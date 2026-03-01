@@ -1,0 +1,19 @@
+name: 'Setup SSH'
+description: 'Configures SSH private keys and known_hosts for secure connections'
+inputs:
+  private-key:
+    description: 'SSH Private Key'
+    required: true
+  host:
+    description: 'Target Host Address'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - shell: bash
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ inputs.private-key }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan -H ${{ inputs.host }} >> ~/.ssh/known_hosts

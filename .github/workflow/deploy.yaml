@@ -1,0 +1,91 @@
+name: Deploy Application
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target Environment'
+        required: true
+        default: 'production'
+
+jobs:
+  plan:
+    name: Plan Deployment
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.gen_id.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: pex-artifacts
+          path: ./dist
+
+      - name: Generate Release ID
+        id: gen_id
+        # Format: YYYYMMDDHHMMSS-ShortSHA (Ensures sortability for cleanup)
+        run: echo "release_id=$(date +%Y%m%d%H%M%S)-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Setup SSH
+        uses: ./.github/actions/setup-ssh
+        with:
+          private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          host: ${{ secrets.SSH_HOST }}
+
+      - name: Dry Run Rsync
+        env:
+          TARGET_DIR: /opt/apps/my-app/releases/${{ steps.gen_id.outputs.release_id }}
+        run: |
+          echo "🚧 Dry Run: Syncing to $TARGET_DIR"
+          # -a: archive, -v: verbose, -n: dry-run
+          rsync -avn --delete ./dist/ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:$TARGET_DIR
+
+  deploy:
+    name: Deploy & Switch
+    needs: plan
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }} # 🛑 Approval Gate triggers here
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: pex-artifacts
+          path: ./dist
+
+      - name: Setup SSH
+        uses: ./.github/actions/setup-ssh
+        with:
+          private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          host: ${{ secrets.SSH_HOST }}
+
+      - name: Atomic Sync
+        env:
+          RELEASE_ID: ${{ needs.plan.outputs.release_id }}
+          BASE_PATH: /opt/apps/my-app
+        run: |
+          RELEASE_DIR="$BASE_PATH/releases/$RELEASE_ID"
+          CURRENT_LINK="$BASE_PATH/current"
+          
+          echo "🚀 Deploying to $RELEASE_DIR"
+          
+          # 1. Upload new version
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "mkdir -p $BASE_PATH/releases"
+          rsync -av --delete ./dist/ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:$RELEASE_DIR
+          
+          # 2. Atomic Switch (Symlink update)
+          echo "🔗 Switching symlink..."
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "ln -sfn $RELEASE_DIR $CURRENT_LINK"
+          
+          echo "✅ Deployed successfully to $RELEASE_ID"
+
+      - name: Cleanup Old Releases
+        env:
+          BASE_PATH: /opt/apps/my-app
+        run: |
+          echo "🧹 Cleaning up old releases (keeping last 5)..."
+          # List, Sort, Keep last 5, Delete rest
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "cd $BASE_PATH/releases && ls -1 | sort | head -n -5 | xargs -r rm -rf"

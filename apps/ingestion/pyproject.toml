@@ -1,0 +1,16 @@
+[project]
+name = "ingestion"
+version = "0.1.0"
+description = "Data Ingestion Service"
+dependencies = [
+    "clients", # Depends on libs/clients
+    "ray",
+    "pandera", 
+    "polars",
+    "pyarrow",
+    "watchfiles",
+    "diskcache",
+    "sdnotify",
+]
+requires-python = ">=3.11"
+

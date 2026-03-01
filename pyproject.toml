@@ -1,0 +1,30 @@
+[project]
+name = "my-portfolio-monorepo"
+version = "0.1.0"
+description = "High performance Python monorepo using uv and pex"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv]
+# Define the workspace members
+workspace = { members = ["apps/*", "libs/*"] }
+
+[tool.mypy]
+strict = true
+ignore_missing_imports = true
+
+
+# Line length and target version
+line-length = 100
+target-version = "py311"
+
+[lint]
+# Enable Pyflakes (`F`) and a subset of the pycodestyle (`E`)  codes by default.
+# Unlike Flake8, Ruff doesn't enable pycodestyle warnings (`W`) or
+# McCabe complexity (`C901`) by default.
+select = ["E4", "E7", "E9", "F", "I"] # I = isort (import sorting)
+ignore = []
+
+[format]
+quote-style = "double"
+indent-style = "space"

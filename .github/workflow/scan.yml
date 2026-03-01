@@ -1,0 +1,47 @@
+name: Reusable Quality Checks
+
+on:
+  workflow_call:
+
+jobs:
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        # uv sync installs dependencies for all workspace members
+        run: uv sync --all-extras
+
+      - name: Run Ruff Linter & Formatter
+        # --check ensures the action fails if formatting is incorrect or linting issues are found
+        run: |
+          uv run ruff format --check .
+          uv run ruff check .
+
+  scan-secrets:
+    name: Scan for Secrets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Fetch all history for a more thorough scan
+          fetch-depth: 0
+
+      - name: Run TruffleHog to find secrets
+        uses: trufflesecurity/trufflehog@main
+        with:
+          # The 'git' scanner is comprehensive. We only fail on verifiable secrets
+          # to reduce noise from false positives.
+          args: --only-verified

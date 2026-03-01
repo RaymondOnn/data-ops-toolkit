@@ -1,0 +1,77 @@
+jobs:
+  list-apps:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          APPS=$(ls .deploy/ | sed 's/\.yaml//' | jq -R -s -c 'split("\n")[:-1]')
+          echo "matrix=$APPS" >> $GITHUB_OUTPUT
+
+  build-and-deploy:
+    needs: list-apps
+    strategy:
+      matrix:
+        app: ${{ fromJson(needs.list-apps.outputs.matrix) }}
+    steps:
+      - name: Build PEX for ${{ matrix.app }}
+        run: |
+          uv export --format requirements.txt > requirements.txt
+          pex -r requirements.txt -o releases/deps-${{ hashFiles('uv.lock') }}.pex
+          pex . -o releases/app-${{ github.sha }}.pex --no-index
+
+
+name: Build PEX Artifacts
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-pex:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv and pex
+        run: pip install uv pex
+
+      - name: Generate requirements.txt
+        run: uv pip compile apps/ingestion/pyproject.toml -o requirements.txt
+
+      - name: Download dependencies with uv
+        # We install dependencies into a local folder first.
+        # This leverages uv's speed for resolution and downloading.
+        # We exclude the local 'core-utils' from this step to ensure it goes into code.pex, not deps.pex.
+        run: |
+          sed -i '/core-utils/d' requirements.txt
+          mkdir -p .deps
+          uv pip install -r requirements.txt --target .deps
+
+      - name: Build deps.pex
+        # Create a PEX from the downloaded dependencies
+        run: |
+          pex --sources-directory .deps \
+              -o deps.pex \
+              --python-shebang="/usr/bin/env python3"
+
+      - name: Build code.pex
+        # Package the application and shared library source code.
+        # We use -e to specify the entry point directly since we are using raw sources.
+        run: |
+          pex --sources-directory apps/ingestion/src \
+              --sources-directory libs/core-utils/src \
+              --no-pypi \
+              -e main:start \
+              -o code.pex \
+              --python-shebang="/usr/bin/env python3"
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pex-artifacts
+          path: |
+            deps.pex
+            code.pex
