@@ -1,20 +1,18 @@
 import argparse
-import logging
 import subprocess
 import sys
 import time
+import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Any, Optional
 
 from src.core.engine import IngestionConfig, IngestionEngine
 from watchfiles import Change, watch
 
 from libs.registry import get_registry
 
-
 LOG = logging.getLogger(__name__)
-
 
 class BaseTrigger(ABC):
     """Base class for all triggers."""
@@ -37,9 +35,7 @@ class CommandLineTrigger(BaseTrigger):
         run_id = self.args.run_id or f"{dataset}-{int(time.time())}"
         output_path = self.args.output_path
 
-        LOG.info(
-            f"Starting Ingestion: {dataset} from {source} (Run ID: {run_id})"
-        )
+        LOG.info(f"Starting Ingestion: {dataset} from {source} (Run ID: {run_id})")
 
         registry = get_registry()
         registry.update(f"job:{run_id}", "STARTING")
@@ -120,7 +116,7 @@ class SchedulerTrigger(BaseTrigger):
         except KeyboardInterrupt:
             LOG.info("Scheduler stopped by user.")
 
-    def _poll_for_jobs(self) -> Optional[Dict[str, str]]:
+    def _poll_for_jobs(self) -> Optional[Dict[str, Any]]:
         """Mock DB polling logic."""
         # In a real system: SELECT * FROM scheduled_jobs WHERE status = 'PENDING'
         # For this portfolio demo, we'll trigger a job every 15 seconds to show it works.
@@ -133,7 +129,7 @@ class SchedulerTrigger(BaseTrigger):
             }
         return None
 
-    def _execute_workflow(self, job_details: Dict[str, str]) -> None:
+    def _execute_workflow(self, job_details: dict[str, Any]) -> None:
         dataset = job_details["dataset"]
         run_id = job_details["run_id"]
         LOG.info(f"Triggering Scheduled Job: {dataset} (Run ID: {run_id})")
@@ -151,4 +147,3 @@ class SchedulerTrigger(BaseTrigger):
         except Exception as e:
             # In a real system, you'd update the job's status to FAILED in the DB.
             LOG.error(f"Scheduled job {run_id} failed: {e}")
-

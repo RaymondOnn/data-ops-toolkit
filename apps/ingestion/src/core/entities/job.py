@@ -1,12 +1,30 @@
 import logging
+import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any, Optional
-import uuid
+from pathlib import Path
+from typing import Any, Optional, Type
+from dataclasses import dataclass, field
 
 import polars as pl
 
 LOG = logging.getLogger(__name__)
+
+@dataclass
+class JobConfig:
+    job_id: str
+    source_url: str
+    dataset_name: str
+    worker_id: str
+    output_path: str = field(default="./data_lake")
+
+class JobBitmask:
+    START = "000001"
+    RAW = "000010"
+    TRANSFORM = "000100"
+    AUDIT = "001000"
+    LOAD = "010000"
+    COMPLETE = "100000"
 
 
 class JobStep(ABC):
@@ -30,25 +48,27 @@ class JobStep(ABC):
     def transit(self, job: "Job") -> None:
         """Transit the Job instance to the next stage."""
         raise NotImplementedError
-    
+
     def _get_checkpoint_path(self, job: "Job", xtension: str = "parquet") -> str:
         """
         Generates the path: <state>/<job_id>/<run_id>/{dataset}/proc_{worker_id}.{ext}
         """
         # Note: In a real S3 scenario, we would use fsspec to handle 's3://' paths.
-        base = Path(job.config.output_path)
+        base = Path(job.job_config.output_path)
         path = (
             base
-            / self.__class__.__name__
+            / self.__class__.__name__.replace(
+                "Step", ""
+            ).lower()  # e.g., StartStep -> start
             / job.id
             / job.run_id
-            / job.dataset_name
+            / job.job_config.dataset_name
             / f"proc_{self.config.worker_id}.{extension}"
         )
         # Ensure directory exists (for local fs)
         path.parent.mkdir(parents=True, exist_ok=True)
         return str(path)
-    
+
     def _checkpoint(self, df: pl.DataFrame, state: "JobStep"):
         """
         Persist the given Polars DataFrame to disk as a Parquet file,
@@ -87,14 +107,14 @@ class JobStep(ABC):
         return marker_path
 
     @classmethod
-    def from_step(cls, name: str) -> "JobStep":
+    def get_step_class_by_name(cls, name: str) -> Type["JobStep"]:
         steps = {
-            "start": StartStep(),
-            "raw": RawStep(),
-            "transform": TransformStep(),
-            "audit": AuditStep(),
-            "load": LoadStep(),
-            "complete": CompleteStep(),
+            "start": StartStep,
+            "raw": RawStep,
+            "transform": TransformStep,
+            "audit": AuditStep,
+            "load": LoadStep,
+            "complete": CompleteStep,
         }
         if name not in steps:
             raise ValueError(f"Unknown step name: {name}")
@@ -120,7 +140,7 @@ class RawStep(JobStep):
 
 
 class TransformStep(JobStep):
-    def execute(self, df: Any) -> Any:
+    def execute(self, df: Optional[Any] = None) -> None:
         raise NotImplementedError
 
     def transit(self, job: "Job") -> None:
@@ -128,7 +148,7 @@ class TransformStep(JobStep):
 
 
 class AuditStep(JobStep):
-    def execute(self, df: Any):
+    def execute(self, df: Optional[Any] = None) -> None:
         raise NotImplementedError
 
     def transit(self, job: "Job") -> None:
@@ -136,7 +156,7 @@ class AuditStep(JobStep):
 
 
 class LoadStep(JobStep):
-    def execute(self, df: Any) -> None:
+    def execute(self, df: Optional[Any] = None) -> None:
         LOG.info(f"Loading {len(df)} rows to destination...")
         # Logic for adbc-driver to write to DB would go here
         pass
@@ -152,11 +172,18 @@ class CompleteStep(JobStep):
 
 
 class Job:
+    
+    history: list[str] = []
+    status: JobStatus,
+    run_id: str
+    _step: JobStep | None = None
     def __init__(
-        self, 
-        job_id: str, 
+        self,
+        job_id: str,
         job_config: Any,
-        step: str | None = None
+        job_folder: Optional[Path] = None,
+        start_step: Optional[str] = "start",
+        run_id: Optional[str] = None,
     ) -> None:
         """
         Initialize a Job instance with the given step.
@@ -164,14 +191,30 @@ class Job:
         :param step: The step name to start from (e.g. "raw", "transform", etc.). If None, the job will start from the beginning.
         :type step: str
         """
-        self.history: list[str] = []
         self.id = job_id
-        self.dataset_name = job_config.dataset_name
-        self.run_id = str(uuid.uuid4())[:8]
-        if step:
-            self._step = JobStep.from_step(step)
-        else:
-            self._step = StartStep()
+        if start_step:
+            self._step = self._get_step_by_name(start_step)
+        self.job_config = job_config
+        self.folder = job_folder or self.init_folder(job_config.output_path)
+        self.metadata = {
+            "job_id": self.id,
+            "status": self.status,
+            "run_id": str(uuid.uuid4())[:8],
+            "dataset": self.job_config.dataset_name,
+        }
+
+
+    def init_folder(self, base_dir: str | Path) -> Path:
+        base_dir = Path(base_dir)
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        folder_path = base_dir / self._step.__class__.__name__ / self.id / self.run_id
+        folder_path.mkdir(parents=True, exist_ok=True)
+        return folder_path
+
+    def _get_step_by_name(self, name: str) -> Type[JobStep]:
+        """Helper method to get a step class type by name."""
+        return JobStep.get_step_class_by_name(name)
 
     @property
     def step(self) -> JobStep:

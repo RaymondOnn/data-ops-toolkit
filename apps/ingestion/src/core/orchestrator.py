@@ -13,6 +13,11 @@ class Orchestrator:
         self.mode = mode
         self.db = DatabaseConnection()
         self.heartbeat = Heartbeat()
+        self.last_heartbeat: float = 0
+        self.last_db_poll: float = 0
+        self.last_job_trigger: float = 0 
+
+
 
     def run(self) -> None:
         if ALWAYS_ON_MODE:
@@ -27,6 +32,8 @@ class Orchestrator:
         
         try:
             while True:
+                now = time.time()
+                
                 # 1. Look for the 'Two Earliest' jobs in DB
                 jobs: List[Optional[Job]] = self.db.get_next_queued_jobs(limit=2)
                 for job in jobs:
@@ -34,8 +41,23 @@ class Orchestrator:
                         self._execute_logic(job)
                 
                 # 2. Heartbeat for Systemd
-                self.heartbeat.ping()
-                time.sleep(60)
+                # --- 1. Systemd Heartbeat (Every 30s) ---
+                if now - self.last_heartbeat > 30:
+                    self.heartbeat.ping()
+                    self.last_heartbeat = now
+                
+                
+                # --- 2. Database Polling (Every 60s) ---
+                if now - self.last_db_poll > 60:
+                    self._poll_database()
+                    self.last_db_poll = now
+                    
+                # --- 3. Job Triggering (Every 10s) ---
+                if now - self.last_job_trigger > 10:
+                    self._trigger_jobs()
+                    self.last_job_trigger = now
+                    # Small sleep to prevent 100% CPU usage
+                    time.sleep(1)
         except KeyboardInterrupt:
             self.stop()
 
