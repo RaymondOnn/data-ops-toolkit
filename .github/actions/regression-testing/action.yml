@@ -1,0 +1,36 @@
+jobs:
+  regression-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Current Branch
+        uses: actions/checkout@v4
+        with:
+          path: current
+      
+      - name: Build & Run Candidate
+        env:
+          INGEST_EXECUTION_MODE: "REGRESSION_TEST"
+          INGEST_TARGET_PATH: "s3://lake/testing/${{ github.sha }}/candidate"
+        run: cd current && uv run apps/ingestion/main.py
+
+      - name: Checkout Main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main
+
+      - name: Build & Run Baseline
+        env:
+          INGEST_EXECUTION_MODE: "REGRESSION_TEST"
+          INGEST_TARGET_PATH: "s3://lake/testing/${{ github.sha }}/baseline"
+        run: cd main && uv run apps/ingestion/main.py
+
+      - name: Compare Results
+        run: |
+          uv run libs/testing/compare_results.py \
+            --candidate s3://lake/testing/${{ github.sha }}/candidate \
+            --baseline s3://lake/testing/${{ github.sha }}/baseline
+
+      - name: Cleanup
+        if: always()
+        run: aws s3 rm s3://lake/testing/${{ github.sha }}/ --recursive

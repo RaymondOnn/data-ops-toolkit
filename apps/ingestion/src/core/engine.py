@@ -1,19 +1,74 @@
+from datetime import datetime
 import logging
 import time
 from pathlib import Path
-from typing import Any
-import uuid
+from typing import Any, Optional
+
 
 import diskcache
 import ray
+import msgspec
 from filelock import FileLock
+from nanoid import generate
 
-from src.core.entities.job import Job, CompleteStep, JobConfig
+from src.core.entities.job import Job
+from src.core.context.job import JobContext
+from src.core.entities.job.manifest import BaseManifest
+
 
 LOG = logging.getLogger(__name__)
 LOCK_FILE = "/tmp/orchestrator.lock"
 CACHE_DIR = ".cache/ingestion"
 
+@ray.remote
+class JobWorker:
+    def __init__(self, worker_id: str):
+        self.worker_id = worker_id # TODO: check how this worker_id works
+        self.cache = diskcache.Cache(CACHE_DIR)
+        self.lock = FileLock(LOCK_FILE)
+        self._busy = False
+    
+    #TODO: Check that folder is brought over when job is picked up
+    def process_step(self, current_step: str, composite_key: str) -> None:
+        # 1. Rehydrate Job
+        with self.lock:
+            meta = self.cache[f"{current_step}:{composite_key}"]
+        
+        job = Job(meta["job_id"], meta["config"], start_step=current_step)
+        self.is_busy = True
+        
+        try:
+            # 2. Execute the single step
+            job.execute()
+            
+            # 3. Get the next step signal
+            next_step = job.step.transit(job)
+            
+            # 4. Atomic Handoff
+            with self.lock:
+                # Remove from current queue
+                self.cache.pop(f"{current_step}:{composite_key}")
+                
+                # Push to next queue if not finished
+                if next_step != "complete":
+                    meta["current_step"] = next_step
+                    meta["status"] = "PENDING" # Ready for the next worker pool
+                    self.cache[f"{next_step}:{composite_key}"] = meta
+                else:
+                    LOG.info(f"Job {composite_key} fully completed.")
+                    meta["status"] = "COMPLETED"
+                    self.cache[f"{current_step}:{composite_key}"] = meta
+
+        except Exception as e:
+            with self.lock:
+                meta["status"] = "FAILED"
+                self.cache[f"{current_step}:{composite_key}"] = meta
+            raise e
+        finally:
+            self.is_busy = False
+            
+    def is_idle(self) -> bool:
+        return not self.is_busy
 
 class IngestionEngine:
     def __init__(self, cache_dir: str = ".cache/ingestion"):
@@ -22,9 +77,19 @@ class IngestionEngine:
         
         if not ray.is_initialized():
             ray.init(ignore_reinit_error=True)
-            
-        # Initialize a pool of workers
-        self.workers = [JobWorker.remote() for _ in range(4)] # e.g., 4 workers
+        
+        # Configuration for stage limits
+        self.stage_limits = {
+            "start":     {"limit": 5,  "pool": "io"},
+            "raw":       {"limit": 10, "pool": "io"},
+            "transform": {"limit": 4,  "pool": "cpu"}, # CPU-Heavy
+            "audit":     {"limit": 4,  "pool": "io"},
+            "load":      {"limit": 1,  "pool": "io"}  # Sequential
+        }
+        
+        # Initialize specialized pools
+        self.io_pool = [JobWorker.remote(f"io_{i}") for i in range(15)]
+        self.cpu_pool = [JobWorker.remote(f"cpu_{i}") for i in range(4)]
     
     def run(self) -> None:
         """Main loop managing multiple jobs."""
@@ -33,77 +98,147 @@ class IngestionEngine:
             self.scan_and_recover()
             self._process_jobs()
             time.sleep(10) # Frequency of polling
+            
 
     def queue_jobs(self, configs: list[JobConfig]) -> None:
         """Checks config, creates jobs if not in cache, and submits them."""
         for config in configs:
-            # Granularity: Job Date + Dataset Name
-            job_id = config.job_id
-            composite_key = f"{config.job_id}:{config.dataset_name}"
+            # Check if the config defines multiple tables/datasets
+            datasets = config.get("tables", [config.dataset_name])
             
-            with self.lock:
-                # Check if job exists in cache
-                if composite_key not in self.cache:
-                    # Brand new entry
-                    self.cache[composite_key] = {
-                        "job_id": job_id,
-                        "run_id": str(uuid.uuid4())[:8],
-                        "config": config,
-                        "status": "PENDING",
-                        "current_step": "start", # Default start
-                        "last_hb": time.time(),
-                        "recovery_count": 0
-                    }
-                LOG.info(f"Queued job instance for dataset: {config.dataset_name}")
+            for table in datasets:
+                # 1. Generate the 2026-style run_id
+                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                short_hash = generate(alphabet="0123456789abcdef", size=6)
+                run_id = f"{timestamp}-{short_hash}"
+                
+                
+                # Granularity: Job Date + Dataset Name
+                composite_key = f"{config.job_id}:{config.dataset_name}"
+                # Always start in the 'start' queue
+                queue_key = f"start:{composite_key}"
+                
+                with self.lock:
+                    # Check if job exists in cache
+                    if queue_key not in self.cache:
+                        # Brand new entry
+                        self.cache[queue_key] = {
+                            "job_id": job_id,
+                            "run_id": run_id,
+                            "config": config,
+                            "status": "PENDING",
+                            "table_name": table,
+                            "current_step": "start", # Default start
+                            "last_hb": time.time(),
+                            "retry_count": 0
+                        }
+                    LOG.info(f"Queued {config.dataset_name} | RunID: {run_id}")
                     
     def _process_jobs(self) -> None:
+        # 1. Calculate current occupancy per stage
+        # We count how many keys per prefix have status 'RUNNING'
+        current_occupancy = self._get_current_occupancy()
+        
         with self.lock:
             for key in self.cache.iterkeys():
+                if ":" not in key: 
+                    continue
+                step, composite_key = key.split(":", 1)
                 job_meta = self.cache[key]
+
                 if job_meta["status"] == "PENDING":
+                    limits = self.stage_limits.get(step, {})
+                    # 2. Check if the specific stage has room
+                    if current_occupancy[step] < limits.get(step, 1):
+                        continue
                     
-                    # Simple round-robin allocation
-                    worker = self.workers[hash(key) % len(self.workers)]
-                    job_meta["status"] = "SUBMITTED"
-                    job_meta["last_hb"] = time.time()
-                    self.cache[key] = job_meta
-                    # Pass the key and the job_meta to the Ray Task
-                    worker.process_job.remote(key, job_meta)
+                    # 2. Select the correct Worker Pool
+                    # 3. Find a free Ray worker
+                    pool = self.cpu_pool if limits["pool"] == "cpu" else self.io_pool
+                    if worker := self._get_idle_worker_from_pool(pool):
+                        job_meta["status"] = "SUBMITTED"
+                        job_meta["last_hb"] = time.time()
+                        self.cache[key] = job_meta
+                        
+                        # Update local occupancy count
+                        current_occupancy[step] += 1
+                        
+                        # Pass the key and the job_meta to the Ray Task
+                        worker.process_step.remote(key, job_meta)
                     
+    def _get_current_occupancy(self) -> dict:
+        """Counts how many workers are active in each stage."""
+        counts = {k: 0 for k in self.stage_limits.keys()}
+        for key in self.cache.iterkeys():
+            if ":" in key:
+                step = key.split(":")[0]
+                if self.cache[key]["status"] == "RUNNING":
+                    counts[step] = counts.get(step, 0) + 1
+        return counts
+
+    def _get_idle_worker_from_pool(self, pool: list[JobWorker]) -> Any | None:
+        for w in pool:
+            if ray.get(w.is_idle.remote()):
+                return w
+        return None
+    
     def scan_and_recover(self) -> None:
-        """Identifies dead jobs and resets them."""
-        now = time.time()
+        """Scans all stage queues for zombie jobs."""
         with self.lock:
-            for key in self.cache.iterkeys():
-                # Assuming jobs are keyed by job_id
-                job_meta = self.cache.get(key)
-                if job_meta and job_meta["status"] == "RUNNING":
-                    if now - job_meta["last_hb"] > 300:  # 5 minutes
-                        self._recover_job(key)
+            for key in list(self.cache.iterkeys()):
+                if ":" not in key: 
+                    continue
+                step, composite_key = key.split(":", 1)
+                meta = self.cache[key]
 
-    def _recover_job(self, composite_key: str) -> None:
+                if meta["status"] == "RUNNING":
+                    # Check if heartbeat is older than 5 minutes
+                    if time.time() - meta.get("last_hb", 0) > 300:
+                        self._recover_job(step, composite_key)
+
+    def _recover_job(self, step_prefix: str, composite_key: str) -> None:
         """
-        composite_key is 'job_id:dataset_name'
+        Recovers a stalled job by checking its physical progress.
         """
-        job_meta = self.cache.get(composite_key)
-        if not job_meta:
-            return
+        with self.lock:
+            key = f"{step_prefix}:{composite_key}"
+            job_meta = self.cache.get(key)
+            if not job_meta:
+                return
 
-        config = job_meta["config"]
-        # Determine the last successful step by scanning the filesystem
-        last_step_name = self._find_last_completed_step(job_meta)
+        # 1. Verify if the step actually finished on disk but failed to transit
+        # We check for the .success marker in the current step's folder
+        if self._check_step_completion_on_disk(step_prefix, job_meta):
+            # If disk says it's done, move it to the NEXT step queue
+            next_step = self._get_next_step_name(step_prefix)
+            LOG.info(f"Recovery: Moving {composite_key} from {step_prefix} to {next_step}")
+            
+            del self.cache[key]
+            if next_step != "complete":
+                job_meta["status"] = "PENDING"
+                self.cache[f"{next_step}:{composite_key}"] = job_meta
+        else:
+            # If disk says it's NOT done, reset to PENDING in the SAME queue
+            LOG.info(f"Recovery: Resetting {composite_key} in {step_prefix} queue")
+            job_meta["status"] = "PENDING"
+            job_meta["last_hb"] = time.time()
+            self.cache[key] = job_meta
+    
+    def _check_step_completion_on_disk(self, step_prefix: str, meta: dict) -> bool:
+        """
+        Scans the output_path for the .success file created by JobStep.mark_success.
+        """
+        # Using Pathlib to check: <output_path>/<StepClass>/<job_id>/<run_id>/<dataset>/*.success
+        # Note: You'll need to map step_prefix (e.g. 'raw') to Class Name (e.g. 'RawStep')
+        step_class_name = f"{step_prefix.capitalize()}Step"
         
-        LOG.info(f"Recovering {composite_key}. Last successful step: {last_step_name}")
+        base_path = Path(meta["config"].output_path)
+        search_path = (
+            base_path / step_class_name / meta["job_id"] / meta["run_id"] / meta["config"].dataset_name
+        )
+        
+        return any(search_path.glob("*.success"))
 
-        # Transition to the NEXT step after the last successful one
-        next_step = self._get_next_step_name(last_step_name)
-        
-        # Reset the job in the cache so the orchestrator picks it up
-        job_meta["status"] = "PENDING"
-        job_meta["start_step"] = next_step
-        job_meta["recovery_count"] = job_meta.get("recovery_count", 0) + 1
-        self.cache[composite_key] = job_meta
-        
     def _find_last_completed_step(self, job_meta: dict[str, Any]) -> str:
         """
         Scans the output_path for .success markers to find the furthest progress.
@@ -139,53 +274,41 @@ class IngestionEngine:
         }
         return workflow.get(current_step, "start")
  
-@ray.remote
-class JobWorker:
-    def __init__(self) -> None:
-        self.cache = diskcache.Cache(CACHE_DIR)
-        self.lock = FileLock(LOCK_FILE)
-
-    def process_job(self, composite_key: str) -> None:
-        """Executes a single job synchronously."""
-        cache: diskcache.Cache = diskcache.Cache(CACHE_DIR)
+    def _recover_from_manifest(self, job_id: str, run_id: str, output_path: str) -> str:
+        """
+        Peeps at the manifests on disk to find where the job stalled.
+        """
+        # Steps in reverse order to find the latest state
+        for step in ["load", "audit", "transform", "raw"]:
+            manifest_path = Path(output_path) / step / job_id / run_id / "manifest.json"
+            
+            if manifest_path.exists():
+                # Peep: msgspec is fast enough to do this inside the Orchestrator loop
+                with open(manifest_path, "rb") as f:
+                    # We can decode into BaseManifest just to see the 'status' and 'step'
+                    meta = msgspec.json.decode(f.read(), type=BaseManifest)
+                    
+                    if meta.status == "COMPLETED":
+                        # If 'raw' is completed, we should queue 'transform'
+                        return self._get_next_step_name(step)
+                    else:
+                        # If it's 'PENDING' or 'RUNNING', it crashed mid-step. Resume this step.
+                        return step
+        return "raw" # Default start
+    
+    def get_latest_manifest(self, context: JobContext) -> JobManifest:
+        """
+        Finds the furthest reached step and returns its manifest.
+        """
+        # Search backwards from the end of the pipeline
+        for step in ["load", "audit", "transform", "raw", "start"]:
+            manifest_path = (
+                Path(context.output_path) / step / context.job_id / context.run_id / "manifest.json"
+            )
+            
+            if manifest_path.exists():
+                # msgspec.json.decode is extremely fast
+                with open(manifest_path, "rb") as f:
+                    return msgspec.json.decode(f.read(), type=JobManifest)
         
-        # 1. Fetch metadata and mark as running
-        with FileLock(LOCK_FILE):
-            job_meta = cache[composite_key]
-            job_meta["status"] = "RUNNING"
-            job_meta["last_hb"] = time.time()
-            cache[composite_key] = job_meta
-
-        # 2. Rehydrate the Job instance using cached config and start_step
-        # This uses the Job.__init__ logic you provided to set the correct _step
-        job = Job(
-            job_id=job_meta["job_id"],
-            job_config=job_meta["config"],
-            start_step=job_meta.get("current_step", "start"),
-            run_id=job_meta.get("run_id")
-        )
-
-        # 2. Execute steps
-        try:
-            while not isinstance(job.step, CompleteStep):
-                LOG.info(f"Job {composite_key} executing step: {job.step.__class__.__name__}")
-                job.execute()
-                
-                # Update heartbeat during execution
-                with FileLock(LOCK_FILE):
-                    job_meta = cache[composite_key]
-                    job_meta["last_hb"] = time.time()
-                    cache[composite_key] = job_meta
-
-            # 3. Mark complete
-            with FileLock(LOCK_FILE):
-                job_meta = cache[composite_key]
-                job_meta["status"] = "COMPLETED"
-                cache[composite_key] = job_meta
-
-        except Exception as e:
-            LOG.error(f"Job {composite_key} failed: {e}")
-            with FileLock(LOCK_FILE):
-                job_meta = cache[composite_key]
-                job_meta["status"] = "FAILED"
-                cache[composite_key] = job_meta
+        raise FileNotFoundError(f"No manifest found for {context.job_id}")
