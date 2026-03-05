@@ -1,0 +1,53 @@
+CREATE TABLE IF NOT EXISTS EXECUTION_HISTORY(
+    RUN_ID                  CHAR(22) PRIMARY KEY, 
+    JOB_ID                  VARCHAR(50),
+    TARGET_IDENTIFIER       VARCHAR(200),
+    JOB_STATUS              VARCHAR(50),
+    SOURCE_ROW_COUNT        INTEGER,
+    FINAL_ROW_COUNT         INTEGER,
+    START_TIMESTAMP         TIMESTAMP_LTZ,
+    END_TIMESTAMP           TIMESTAMP_LTZ,
+    FINAL_MANIFEST            VARIANT,
+)
+
+CREATE TABLE IF NOT EXISTS JOB_SCHEDULES (
+    JOB_ID                  VARCHAR(50) PRIMARY KEY
+    , CRON_EXPR             CHAR(6) -- Trigger timing
+    , IS_ACTIVE             BOOLEAN -- Master Kill Switch
+    , PRIORITY              INTEGER -- Worker Allocation Priority
+    , TIMEOUT_SECS          INTEGER -- Max Execution Time
+    , CONCURRENCY_LIMIT     INTEGER -- Max Concurrent Jobs
+    , MISFIRE_GRACE_SECS    INTEGER -- Run if X Seconds late (0=Never, -1=Always)
+    , WATCH_FILE_PATH       VARCHAR(1000) -- For file monitoring
+    , NEXT_RUN_TS           TIMESTAMP_LTZ
+    . PREV_RUN_TS           TIMESTAMP_LTZ
+    , LAST_UPDATED_AT_TS    TIMESTAMP_LTZ DEFAULT NOW()
+    , CREATED_AT_TS         TIMESTAMP_LTZ
+)
+
+
+CREATE_TABLE IF NOT EXIST CURRENT_EXECUTIONS (
+    RUN_ID                  CHAR(22) PRIMARY KEY
+    , JOB_ID                VARCHAR(50) REFERENCES JOB_SCHEDULES(JOB_ID)
+    , TARGET_IDENTIFIER     VARCHAR(500)
+    , START_TIMESTAMP       TIMESTAMP_LTZ
+    , LAST_UPDATED_AT_TS    TIMESTAMP_LTZ
+    , END_TIMESTAMP         TIMESTAMP_LTZ
+    , JOB_STATUS            VARCHAR(50)
+    , CURRENT_STEP          VARCHAR(20)
+    , JOB_BITMASK           INTEGER DEFAULT 0
+    , WATCH_FILE_PATH       VARCHAR(1000)
+    , RUNTIME_OVERRIDES     VARIANT
+    , RETRY_ATTEMPTS        INTEGER DEFAULT 0
+)
+
+CREATE_TABLE IF NOT EXIST ERROR_LOGS (
+    RUN_ID                  CHAR(22) PRIMARY KEY    
+    , JOB_ID                VARCHAR(50)
+    , TARGET_IDENTIFIER     VARCHAR(500)
+    , STEP_FAILED           VARCHAR(20)
+    , ERROR_TYPE            VARCHAR(50)
+    , ERROR_MSG             VARCHAR(1000)
+    , ERROR_TRACE           VARCHAR(16777216)   
+    , ERROR_TS             TIMESTAMP_LTZ
+)

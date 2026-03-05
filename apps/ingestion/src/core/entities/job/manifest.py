@@ -1,22 +1,21 @@
 import logging
-import os
 from typing import Any, Literal, Optional
 from pathlib import Path
 from datetime import datetime
 
 import msgspec
-from msgspec import Struct, json, field
+from msgspec import json, field
 
 LOG = logging.getLogger(__name__)
 
-class ErrorPayload(Struct):
+class ErrorPayload(msgspec.Struct):
     step: str
     error_type: str
     message: str
     traceback: Optional[str] = None
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
-class BasePayload(Struct):
+class BasePayload(msgspec.Struct):
     step_outcome: str
     commit_hash: str = ""
     source_params: dict[str, Any] = {}
@@ -69,12 +68,15 @@ class WritePayload(BasePayload):
     
 class AuditPayload(BasePayload):
     step_outcome: str
-    checks_applied: list[str] = []
-    row_count_diff: int
-    errors: list[str] = []
+    validation_passed: bool
+    total_checks_run: int
+    failed_checks: dict[str, Any] = {}
+    external_app_status: str
+    audit_duration_ms: int
     
 class PublishPayload(BasePayload):
     step_outcome: str
+    final_destination: str
     final_count: int
     published_at_utc: str # When it was published. ISO format
     is_idempotent_cleanup_run: bool = False
@@ -82,18 +84,20 @@ class PublishPayload(BasePayload):
 
 class CompletePayload(BasePayload):
     final_status: str
-    total_duration_secs: float
-    end_timestamp: str # ISO format
-    cleanup_verified: bool
-    archival_path: Path
-    retention_expiry: str
+    end_timestamp: str          # Final ISO-8601 timestamp
+    total_duration_secs: float  # Wall-clock time from Raw to Complete
+    
+    # Governance & Privacy
+    cleanup_verified: bool      # Confirmation that staging/temp data is purged
+    archival_path: str | None   # Path to backup, or None if privacy-restricted
+    retention_expiry: str | None # Date when this log/archive can be deleted
 
-class JobManifest(Struct):
+class JobManifest(msgspec.Struct):
     # Top-level Metadata (The "Header")
     job_id: str
     run_id: str
     dataset_name: str
-    # job_status: Literal["PENDING", "RUNNING", "COMPLETED", "FAILED"]
+    job_status: Literal["PENDING", "RUNNING", "COMPLETED", "FAILED"]
     current_step: str
     
     # Step-Specific Data (The "Body")
@@ -108,84 +112,6 @@ class JobManifest(Struct):
     # The "Black Box" Recorder
     error: Optional[ErrorPayload] = None
 
-def atomic_manifest_update(manifest_path: Path, step_name: str, payload: dict[str, Any]) -> None:
-    # 1. Load the "Old" Truth
-    if manifest_path.exists():
-        with open(manifest_path, "rb") as f:
-            old_data = msgspec.json.decode(f.read(), type=JobManifest)
-            manifest_dict = msgspec.to_builtins(old_data)
-    else:
-        # Initialize if it's the very first step
-        manifest_dict = {"status": "PENDING", "current_step": "init"}
-
-    # 2. Prepare the "New" Truth in memory
-    manifest_dict[step_name] = payload
-    manifest_dict["current_step"] = step_name
-    manifest_dict["status"] = "COMPLETED"
-
-    try:
-        # 3. Validation Step (The "Gatekeeper")
-        # We convert back to the Struct to ensure types are correct 
-        # and no required fields are missing.
-        new_manifest_obj = msgspec.convert(manifest_dict, JobManifest)
-        new_bytes = msgspec.json.encode(new_manifest_obj)
-        
-        # 4. Write to a Temporary Buffer
-        temp_path = manifest_path.with_suffix(".tmp")
-        with open(temp_path, "wb") as f:
-            f.write(new_bytes)
-            f.flush()
-            os.fsync(f.fileno()) # Force the OS to physically write to disk
-
-        # 5. The Atomic Pointer Swap
-        # On POSIX (Linux/Mac), this is an atomic operation.
-        os.replace(temp_path, manifest_path)
-        
-    except Exception as e:
-        # If anything fails (validation, disk full, etc.), 
-        # the original manifest_path is untouched.
-        LOG.error(f"Manifest update failed! Original file preserved. Error: {e}")
-        raise
-
-
-def finalize_manifest(manifest_path: Path, step_name: str, payload: dict[str, Any]) -> None:
-    """
-    The final 'Commit' of a JobStep.
-    """
-    # 1. READ: Load the previous state
-    # If it's the first step, we start fresh.
-    if manifest_path.exists():
-        with open(manifest_path, "rb") as f:
-            # We decode to a dict to allow for flexible merging
-            current_data = msgspec.json.decode(f.read())
-    else:
-        current_data = {}
-
-    # 2. MUTATE: Add the new step payload
-    current_data[step_name] = payload
-    current_data["current_step"] = step_name
-    current_data["status"] = "COMPLETED"
-    current_data["last_updated"] = datetime.now().isoformat()
-
-    # 3. VALIDATE: The "Dry Run"
-    try:
-        # This checks types, required fields, and nesting constraints
-        validated_obj = msgspec.convert(current_data, JobManifest)
-        final_bytes = msgspec.json.encode(validated_obj)
-    except msgspec.ValidationError as e:
-        # LOG AND HALT: Do not proceed to swap if data is invalid
-        LOG.critical(f"Step {step_name} produced invalid manifest data: {e}")
-        raise
-
-    # 4. SWAP: Atomic write
-    temp_path = manifest_path.with_suffix(".tmp")
-    with open(temp_path, "wb") as f:
-        f.write(final_bytes)
-        f.flush()
-        os.fsync(f.fileno()) # Ensure it's physically written to the platter
-    
-    # The pointer swap
-    os.replace(temp_path, manifest_path)
     
 __sll__ = [
     # BasePayload,
