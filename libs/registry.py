@@ -6,28 +6,30 @@ from abc import ABC, abstractmethod
 
 class BaseRegistry(ABC):
     @abstractmethod
-    def update(self, service: str, status: str): ...
+    def update(self, service: str, status: str) -> None: 
+        ...
     
     @abstractmethod
     def get_status(self, service: str) -> str: ...
 
 # --- Implementation A: Diskcache (Laptop/Single EC2) ---
 class LocalDiskRegistry(BaseRegistry):
-    def __init__(self, cache_dir=".cache/registry"):
+    def __init__(self, cache_dir: str=".cache/registry") -> None:
         self.cache = diskcache.Cache(cache_dir)
 
-    def update(self, service, status):
+    def update(self, service, status) -> None:
         self.cache.set(service, status, expire=300) # Auto-reset after 5 mins
 
-    def get_status(self, service):
+    def get_status(self, service) -> str:
         return self.cache.get(service, "UP")
 
 # --- Implementation B: Named Actor (Kubernetes/Ray) ---
 @ray.remote(num_cpus=0)
 class RayRegistryActor:
-    def __init__(self):
+    def __init__(self) -> None:
         self._data = {}
-    def update(self, s, st): self._data[s] = st
+    def update(self, s, st) -> None: 
+        self._data[s] = st
     def get(self, s): return self._data.get(s, "UP")
 
 class RemoteRayRegistry(BaseRegistry):

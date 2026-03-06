@@ -1,16 +1,20 @@
 from abc import ABC, abstractmethod
+from typing import Any, Generator
 
-class BaseDBClient(ABC):
-    def __init__(self, pool):
-        self.pool = pool
+import polars as pl
+
+class DBClient(ABC):
+    def __init__(self, **config: Any) -> None:
+        self.config = config
+        self._connection = None
+
 
     @abstractmethod
-    def fetch_dataframe(self, query: str):
+    def connect(self) -> None:
+        """Specific driver logic to establish self._connection."""
         pass
 
-    # Generic behavior shared by ALL databases
-    def execute_raw(self, sql: str):
-        with self.pool.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(sql)
-            conn.commit()
+    @abstractmethod
+    def fetch_df(self, query: str) -> Generator[pl.DataFrame, None, None]:
+        """Yields DataFrames."""
+        pass   

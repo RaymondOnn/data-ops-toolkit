@@ -1,12 +1,18 @@
-import logging
 import time
 from typing import Any
+from pathlib import Path
+
+import msgspec
+import structlog
+
 
 from src.core.entities.job.manifest import JobManifest
 
-LOG = logging.getLogger(__name__)
+LOG = structlog.getLogger(__name__)
 CURRENT_EXECUTION_TBL = "CURRENT_EXECUTION"
 
+
+# TODO: Logging to Error Log? Workflow for refresh current_execution for the day 
 class StateStore:
     
     def __init__(self, sb_client: DatabaseClient) -> None:
@@ -53,7 +59,11 @@ class StateStore:
         if job_id in self._mirror:
             self._mirror[job_id]["next_scheduled_time"] = time.time() + 3600 
             self._dirty_keys.add(job_id)
-            
+    
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
+        """Retrieves a specific run from the mirror by Run ID."""
+        return self._mirror.get(run_id)
+    
     def sync_from_folder(self, folder_path: Path) -> None:
         """
         Reads the manifest.json from a physical folder and 
@@ -92,13 +102,26 @@ class StateStore:
             LOG.error(f"Failed to sync manifest from {folder_path}: {e}")
 
     def flush(self) -> None:
-        """Persists 'dirty' breadcrumbs to Postgres."""
+        """
+        Commits mirror updates to Postgres. 
+        Matches Approach 1: High-level status + current_step.
+        """
         if not self._dirty_keys:
             return
 
-        batch_data = [self._mirror[k] for k in self._dirty_keys]
-        
-        # Updated SQL to match your CURRENT_EXECUTIONS table
+        batch_data = []
+        for run_id in self._dirty_keys:
+            data = self._mirror[run_id]
+            # Ensure Enum values are converted to strings for the DB driver
+            batch_data.append({
+                "run_id": data["run_id"],
+                "job_id": data["job_id"],
+                "status": str(data["status"]), # e.g., 'RUNNING'
+                "step": data["step"],          # e.g., 'TRANSFORM'
+                "bitmask": data.get("bitmask", 0),
+                "folder_path": data["folder_path"]
+            })
+
         sql = """
             INSERT INTO CURRENT_EXECUTIONS (
                 RUN_ID, JOB_ID, JOB_STATUS, CURRENT_STEP, 
@@ -109,7 +132,7 @@ class StateStore:
                 :bitmask, :folder_path, NOW()
             )
             ON CONFLICT (RUN_ID) DO UPDATE SET 
-                JOB_STATUS = EXCLUDED.JOB_STATUS, 
+                JOB_STATUS = EXCLUDED.JOB_STATUS,
                 CURRENT_STEP = EXCLUDED.CURRENT_STEP,
                 JOB_BITMASK = EXCLUDED.JOB_BITMASK,
                 FOLDER_PATH = EXCLUDED.FOLDER_PATH,
@@ -119,6 +142,6 @@ class StateStore:
         try:
             self.client.execute_batch(sql, batch_data)
             self._dirty_keys.clear()
-            self.last_sync = time.time()
+            LOG.debug(f"Flushed {len(batch_data)} updates to Postgres.")
         except Exception as e:
-            LOG.error(f"Postgres batch sync failed: {e}")
+            LOG.error(f"Postgres batch update failed: {e}")

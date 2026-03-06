@@ -1,7 +1,6 @@
 
 
 
-import logging
 import os
 import shutil
 import socket
@@ -12,11 +11,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from libs.resilence.circuit_breaker import CircuitBreakerTripped
+import structlog
 import polars as pl
 import msgspec
 from msgspec import Struct
 
-from src.core.ingest.base import IngestionFactory
+
 from src.core.transform.base import TransformFactory
 from src.core.load.base import LoadFactory
 from src.core.entities.job.manifest import (
@@ -35,7 +36,7 @@ from src.utils.constants import JOB_STEPS_BASE_DIR
 if TYPE_CHECKING:
     from src.core.entities.job.base import Job
 
-LOG = logging.getLogger(__name__)
+LOG = structlog.getLogger(__name__)
 _JOB_ORDER = [
     "start",
     "raw",
@@ -88,12 +89,12 @@ class JobStep(ABC):
         idx = _JOB_ORDER.index(self.name)
         if idx + 1 < len(_JOB_ORDER):
             next_step = _JOB_ORDER[idx + 1]
-            job.set_step(JobStep.get_step_class_by_name(next_step)())
+            job.set_step(JobStep.get_step_class_by_name(next_step))
             return next_step
         return "FINISH"
 
 
-    def read_parquet_source(self, source_folder: str) -> pl.LazyFrame:
+    def read_parquet_source(self, source_folder: Path |str) -> pl.LazyFrame:
         """Standardized way to lazily load the previous stage's data."""
         path = Path(source_folder)
         if not path.exists():
@@ -101,11 +102,12 @@ class JobStep(ABC):
         # scan_parquet is lazy; it doesn't load data into RAM yet
         return pl.scan_parquet(path / "*.parquet")
 
-    def sink_to_parquet(self, lf: pl.LazyFrame, destination: Path) -> dict:
+    def sink_to_parquet(self, lf: pl.LazyFrame, destination: Path | str) -> dict[str, Any]:
         """
         Executes the lazy plan and sinks to a single parquet file.
         Returns metadata for the payload.
         """
+        destination = Path(destination)
         destination.mkdir(parents=True, exist_ok=True)
         output_file = destination / "part_0000.parquet"
         
@@ -215,14 +217,21 @@ class JobStep(ABC):
 
     def get_manifest(self, job: "Job") -> JobManifest:
         """Helper to read the current state of the world."""
-        if not job.manifest_path.exists():
+        if job.manifest_path and not job.manifest_path.exists():
             raise FileNotFoundError(f"Manifest missing at {job.manifest_path}")
         
-        with open(job.manifest_path, "rb") as f:
+        with open(file=job.manifest_path, mode="rb") as f:
             return msgspec.json.decode(f.read(), type=JobManifest)
         
     @classmethod
-    def get_step_class_by_name(cls, name: str) -> type["JobStep"]:
+    def get_step_class_by_name(cls, name: str) -> "JobStep":
+        """
+        Given a step name, returns the corresponding JobStep class.
+        
+        Iterates through all subclasses of JobStep and checks if the name attribute matches the given name.
+        If no match is found, raises a ValueError.
+        """
+
         for cls in cls.__subclasses__():    
             # If you have nested subclasses, you may want a recursive walk here.
             if getattr(cls, "name", None) == name or getattr(cls(), "name", None) == name:
@@ -252,7 +261,7 @@ class StartStep(JobStep):
         manifest_path.touch()
         
         # Move file into job folder
-        job_cfg_file = f"{job.job_id}:{job.job_ctx.table}_{job.run_id}_config.json"
+        job_cfg_file = f"{job.id}:{job.job_config.table}_{job.run_id}_config.json"
         source_path = JOB_STEPS_BASE_DIR / self.name / job_cfg_file
         dest_path = job.folder / job_cfg_file
         shutil.move(str(source_path), str(dest_path))
@@ -312,14 +321,35 @@ class RawStep(JobStep):
         return "raw"
 
     def execute(self, job: "Job") -> str:
+        from src.core.ingest.ingest import ReaderFactory, ReaderContext, Reader
+        
         self.prepare_stage(job) # Pivots job.folder to .../raw/
+        if not job.folder:
+            raise ValueError("Job folder is not set.")
         
         try:
-            # 1. Strategy Selection
-            # Based on job_config (e.g., job_config.source_type = "s3")
-            strategy = IngestionFactory.get_strategy(job.job_config.source_type)
+            # 1. Initialize the Type-Safe Context
+            # This object is serialized and sent to Ray workers.
+            ctx = ReaderContext(
+                source_type=job.job_config.source_type,
+                target_table=job.job_config.target_table,
+                source_path=getattr(job.job_config, "source_path", None),
+                parallelism=job.job_config.parallelism or 10
+            )
+
+            # 2. Get the Resilient Service (Singleton per account)
+            # ServiceFactory uses the @register decorators triggered by discovery.
+            service = ServiceFactory.get_service(
+                source_type=ctx.source_type,
+                account_id=job.account_id,
+                **job.job_config.db_config
+            )
             
-            LOG.info(f"Executing raw ingestion using strategy: {job.job_config.source_type}")
+            
+            # 3. Get the Ingest Strategy (Database, File, etc.) 
+            # based on job_config (e.g., job_config.source_type = "s3")
+            reader: Reader = ReaderFactory.get_strategy(ctx.source_type)
+            LOG.info(f"Executing raw ingestion using strategy: {ctx.source_type}")
             
             # The strategy now yields Polars DataFrames or Iterators
             # to be written to the local folder as parquet
@@ -327,8 +357,17 @@ class RawStep(JobStep):
             dest_folder.mkdir(parents=True, exist_ok=True)
             
             # Fetch and convert
-            # This logic might happen inside the strategy or here
-            extracted_files = strategy.fetch_to_parquet(destination=dest_folder)
+            # 4. Execute the Ingestion
+            # This calls reader.fetch() which:
+            #   a. Asks service for work units (SQL queries/File paths)
+            #   b. Distributes tasks to Ray workers
+            #   c. Workers call service.fetch_stream() [Protected by Circuit Breaker]
+            #   d. Streams results to Parquet files (keeping RAM < 2GB)
+            extracted_files = reader.fetch(
+                client=None, 
+                destination=dest_folder,
+                context=ctx, 
+            )
             
             file_infos = []
             total_rows = 0
@@ -374,7 +413,9 @@ class RawStep(JobStep):
             
             # 4. State Transition
             return self._transit(job)
-
+        except CircuitBreakerTripped:
+            LOG.error("Halt by circuit breaker.", error=str(e))
+            raise
         except Exception as e:
             LOG.error(f"Raw ingestion failed: {e}")
             self.finalize(job, exception=e)
@@ -424,12 +465,14 @@ class TransformStep(JobStep):
             # 1. Access the previous stage's data via Manifest
             manifest = self.get_manifest(job)
             raw_meta = manifest.raw # The IngestedMetadata struct
+            if not raw_meta:
+                raise ValueError("Raw metadata not found in manifest.")
             
             # 2. Get the Strategy (Custom or Default)
             strategy = TransformFactory.get_strategy(job.id)
             
             # 3. Create the LazyFrame from the Bronze path
-            lf = self.read_parquet_source(raw_meta.artifact_path)
+            lf = self.read_parquet_source(raw_meta.artifact_folder)
             
             # 4. Apply transformation logic (Lazy)
             # We pass the LazyFrame to the strategy to add operations to the plan
@@ -478,10 +521,10 @@ class WriteStep(JobStep):
             manifest = self.get_manifest(job)
             # 1. Resolve Client & Strategy
             client = DatabaseManager.get_client(job.job_config.destination_type)
-            strategy = LoadFactory.get_strategy(job.job_config.load_mode)
+            strategy = LoadFactory.get_strategy(mode=job.job_config.load_mode)
             
             # 2. PHASE 1: LOAD TO STAGING
-            lf = self.read_parquet_source(manifest.transform.refined_artifact_path)
+            lf = self.read_parquet_source(manifest.transform.artifact_folder)
             staging_results = strategy.load(client, lf, job.job_config.target_destination)
             
             # 3. Finalize Manifest
@@ -617,6 +660,8 @@ class PublishStep(JobStep):
         try:
             manifest = self.get_manifest(job)
             write_meta = manifest.write
+            if not write_meta:
+                raise ValueError("Write metadata not found in manifest.")
             
             # 1. Resolve Strategy & Client
             client = DatabaseFactory.get_client(job.job_config.destination_type)
@@ -677,7 +722,7 @@ class CompleteStep(JobStep):
                 archive_dir = Path(job.job_config.archive_base_path) / job.id / job.run_id
                 archive_dir.mkdir(parents=True, exist_ok=True)
                 
-                raw_source = Path(manifest.raw.artifact_path)
+                raw_source = Path(manifest.raw.artifact_folder)
                 if raw_source.exists():
                     shutil.make_archive(str(archive_dir / "raw_backup"), 'zip', raw_source)
                     final_archive_path = str(archive_dir)

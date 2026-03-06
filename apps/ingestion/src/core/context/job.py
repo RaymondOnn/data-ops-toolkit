@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 import msgspec
 from dynaconf import Dynaconf
@@ -9,6 +9,10 @@ class JobContext(msgspec.Struct):
     output_path: str
     tables: list[str]
     worker_id: str
+    
+    # ISO format timestamp or Unix epoch
+    expires_at: float | None = None
+    load_mode: Literal['overwrite', 'append', 'upsert']
     
     # Governance & Privacy
     enable_archival: bool = True

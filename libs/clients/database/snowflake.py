@@ -1,4 +1,8 @@
-class SnowflakeClient(BaseDBClient):
+import adbc_driver_snowflake.dbapi as adbc_sf
+from src.core.db.base import DBClient
+
+class SnowflakeADBCClient(DBClient):
+    """Snowflake client using ADBC (bypasses slow row-based drivers)."""
     def fetch_dataframe(self, query: str):
         # Snowflake-specific optimization or logging
         print("❄️ Snowflake Optimized Fetch")

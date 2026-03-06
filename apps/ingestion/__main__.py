@@ -1,18 +1,9 @@
-import logging
+from libs.utils.log import setup_logging
 import sys
 
 # Setup basic logging (In prod, this would use the libs.utils.log module)
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
-
-from src.triggers.cli import CommandLineTrigger
-from src.triggers.file import FileTrigger
-from src.triggers.resume import ResumeTrigger
-from src.triggers.resume import InternalTrigger
-from src.triggers.scheduler import SchedulerTrigger
-from src.utils.cli import setup_parser
+# Call this ONCE before any work starts
+setup_logging(log_dir="logs", is_prod=False)
 
 
 def main():

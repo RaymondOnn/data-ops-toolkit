@@ -1,20 +1,20 @@
 import sys
 import time
-import logging
 from datetime import datetime
 from typing import Any
 from pathlib import Path
 
 import msgspec
+import structlog
 
 from libs.resilence.heartbeat import Heartbeat
 from src.core.engine import IngestionEngine
 from src.core.state import StateStore
 from src.utils.constants import ALWAYS_ON_MODE, JOB_STEPS_BASE_DIR
+from src.core.entities.job.base import Job, JobStatus
+from src.utils.dates import is_expired, epoch_to_iso
 
-
-
-LOG = logging.getLogger(__name__)
+LOG = structlog.getLogger(__name__)
 PID_FILE = Path(".daemon.pid")
 MISFIRE_GRACE_PERIOD_SECS = 3600
 
@@ -27,19 +27,17 @@ def generate_run_id() -> str:
 
 def resolve_current_path(job_id: str, run_id: str, status: str, step: str) -> Path:
     """
-    Deterministic path resolution based on job state.
-    Ensures we look in /QUARANTINE if the DB says FAILED.
+    Returns the physical path of a job based on its Approach 1 status.
     """
-    base = Path(JOB_STEPS_BASE_DIR).expanduser()
+    base = Path(JOB_STEPS_BASE_DIR)
     
-    # Mapping status to the top-level directory branch
-    if status in ["FAILED", "QUARANTINE"]:
+    # Branch based on Machine State
+    if status in [JobStatus.FAILED, "QUARANTINE"]:
         return base / "QUARANTINE" / job_id / run_id
-    elif status == "HELD":
+    elif status in (JobStatus.BLOCKED or JobStatus.DEFERRED, ):
         return base / "HOLD" / job_id / run_id
     else:
-        # For active or completed jobs, follow the step-named folders
-        # e.g., /data/ingestion/raw/my_job/run_123
+        # Standard flow uses the lowercase step name as the folder
         return base / step.lower() / job_id / run_id
 
 # TODO: Check Disk Space 
@@ -63,13 +61,13 @@ class Orchestrator:
         self.last_engine_scan: float = 0
         
         if ALWAYS_ON_MODE:
-            self.state_store = StateStore()
+            self.state_store = StateStore(db_client)
             self.last_state_sync: float = 0        
             self.last_db_poll: float = 0
             self.last_job_trigger: float = 0 
             self.last_recovery_sweep: float = 0
             
-        
+        LOG.info("Orchestrator initialized", mode=self.mode)
 
     def run(self, job_id: str, overrides: dict[str, Any] | None = None) -> None:
         if ALWAYS_ON_MODE:
@@ -119,6 +117,7 @@ class Orchestrator:
                 # 3. Maintenance: Run recovery sweep every 5 minutes
                 if now - self.last_recovery_sweep > 300:
                     self._handle_recovery()
+                    self._handle_expiry()
                     self.last_recovery_sweep = time.time()
                 
                 # Small sleep to prevent 100% CPU usage
@@ -189,7 +188,7 @@ class Orchestrator:
             trigger_map: dict[str, TriggerEvent]= {
                 "CRON": TimeTriggerEvent(),
                 "FILE": FileTriggerEvent(),
-                "MANUAL": lambda x: True # Ad-hoc always fires
+                "MANUAL": TimeTriggerEvent(), # Ad-hoc always fires
             }
             
             
@@ -288,34 +287,101 @@ class Orchestrator:
 
     def _handle_recovery(self) -> None:
         """
-        Scans the HOLD directory to auto-resume deferred jobs.
-        Note: QUARANTINE is ignored here as it requires manual CLI intervention.
+        Scans the HOLD and QUARANTINE directories to re-queue stuck jobs.
+        Uses the directory structure as the source of truth when the DB is stale.
         """
         from src.core.entities.job.steps.terminal import HoldStep
-        from src.core.entities.job.base import Job
         
-        hold_base = Path(JOB_STEPS_BASE_DIR).expanduser() / "HOLD"
+        LOG.info("Starting recovery sweep...")
+        # We focus on HOLD for auto-resumption
+        hold_base = Path(JOB_STEPS_BASE_DIR) / "HOLD"
         if not hold_base.exists():
             return
 
-        # Look for any manifest in the HOLD tree
+        # rglob finds all manifests regardless of how deep the job/run IDs are nested
         for manifest_path in hold_base.rglob("manifest.json"):
-            # We load the job from the folder (it already has config.json inside!)
-            job = Job.from_folder(manifest_path.parent) 
-            
-            # HoldStep encapsulates the 'ping' logic and the 'recover' move
-            recovery_tool = HoldStep()
-            if recovery_tool.check_and_resume(job, self.state_store):
-                LOG.info(f"Auto-recovered job {job.run_id} from HOLD. Moving to engine.")
+            try:
+                # 1. Rehydrate the Job object from the folder metadata
+                # Line 204 fix: Using the new classmethod
+                job = Job.from_folder(manifest_path.parent)
                 
-                # Re-queue the recovered job into the engine
-                self.engine.queue_job(
-                    job_id=job.id,
+                # 1. Check for Expiry first
+                if is_expired(job.job_context.expires_at):
+                    LOG.warning("Job expired", 
+                                run_id=job.run_id, 
+                                expiry=epoch_to_iso(job.job_context.expires_at))
+                    
+                    job.manifest.job_status = JobStatus.EXPIRED
+                    job.save_manifest()
+                    self.state_store.sync_from_folder(job.folder)
+                    continue
+                
+                # 2. Logic check: Should this job be resumed?
+                # We use a tool-based approach to check dependencies/locks
+                recovery_tool = HoldStep()
+                if not recovery_tool.check_and_resume(job, self.state_store):
+                    continue
+
+                LOG.info(f"Auto-recovering job {job.run_id} from HOLD.")
+
+                # 3. Construct the composite key for the Engine
+                # Line 313 fix: composite_key = "job_id:table"
+                composite_key = f"{job.id}:{job.job_config.target_table}"
+                LOG.info("Recovering job", run_id=job.run_id, step=job.manifest.current_step)
+
+                # 4. Re-queue into the Ingestion Engine
+                # This moves the job back into the active processing queue
+                self.engine.queue_jobs(
+                    composite_key=composite_key,
                     run_id=job.run_id,
-                    folder_path=str(job.folder),
+                    config_file_path=str(next(job.folder.glob("*_config.json"))),
                     current_step=job.manifest.current_step 
                 )
-                
+
+                # 5. Sync the StateStore mirror so the UI reflects the move
+                # Line 341 fix: Ensure the DB knows the job is now RUNNING
+                self.state_store.sync_from_folder(job.folder)
+
+            except StopIteration:
+                LOG.error(f"Recovery failed for {manifest_path}: Missing _config.json")
+            except Exception as e:
+                LOG.error(f"Error recovering job at {manifest_path}: {e}")
+
+        # Final flush to Postgres to commit all recovered statuses
+        self.state_store.flush()
+    
+    def _handle_expiry(self) -> None:
+        """
+        Scans the StateStore mirror for BLOCKED jobs that have passed their TTL.
+        """
+        now = time.time()
+        for run_id, data in self.state_store._mirror.items():
+        # Only check jobs that are currently waiting/stuck
+            if data["status"] in [JobStatus.BLOCKED]:
+                try:
+                    job = Job.from_folder(Path(data["folder_path"]))
+                    
+                    expires = job.job_context.expires_at
+                    if is_expired(expires):
+                        LOG.warning(
+                            f"Run {run_id} expired at {epoch_to_iso(expires)}. "
+                            f"Current time is {epoch_to_iso(now)}."
+                        )
+                        job.manifest.job_status = JobStatus.EXPIRED
+                        job.save_manifest()
+                        self.state_store.sync_from_folder(job.folder)
+                except Exception as e:
+                    LOG.error(f"Expiry check failed for {run_id}: {e}")
+
+        # 4. Physical Cleanup (Optional: Move to a 'TRASH' folder or delete)
+        for job in expired_runs:
+            self._cleanup_workspace(job)
+
+    def _cleanup_workspace(self, job: Job):
+        """Removes or archives the physical data for expired snapshot jobs."""
+        # Logic to delete the /data/HOLD/job_id/run_id folder to save space
+        pass
+    
     def _process_worker_signals(self) -> None:
         """
         Scans the flat signals directory for any {run_id}.signal files.
@@ -334,25 +400,29 @@ class Orchestrator:
             try:
                 # 1. Parse metadata from filename
                 # Example: 20240101-abc.transform.3.sync
-                parts = crumb.stem.split(".")
-                run_id = parts[0]
-                
+                # Metadata is now primarily in the manifest; 
+                # filename is just a pointer to the run_id
+                run_id = crumb.stem.split(".")[0]
                 # 2. Find the folder path from DB
                 run_record = self.state_store.get_run(run_id)
-                if run_record:
-                    # Resolve the path using our new utility
-                    physical_path = resolve_current_path(
-                        job_id=run_record['job_id'],
-                        run_id=run_id,
-                        status=run_record['status'],
-                        step=run_record['step']
-                    )
-                    
-                    # 3. Sync manifest -> DB
-                    self.state_store.sync_from_folder(Path(physical_path))
+                if not run_record:
+                    LOG.error("Signal received for unknown run", run_id=run_id)
+                    continue
+                
+                # Resolve the path using our new utility
+                physical_path = resolve_current_path(
+                    job_id=run_record['job_id'],
+                    run_id=run_id,
+                    status=run_record['status'],
+                    step=run_record['step']
+                )
+                
+                # 3. Sync manifest -> DB
+                self.state_store.sync_from_folder(Path(physical_path))
                 
                 # 4. 'Eat' the breadcrumb
                 crumb.unlink(missing_ok=True)
+                LOG.debug("Signal processed", run_id=run_id)
                 
             except Exception as e:
                 LOG.error(f"Failed to process breadcrumb {crumb.name}: {e}")

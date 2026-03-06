@@ -1,12 +1,15 @@
-import logging
 from typing import Any, Literal, Optional
 from pathlib import Path
 from datetime import datetime
 
+import structlog
 import msgspec
 from msgspec import json, field
 
-LOG = logging.getLogger(__name__)
+from src.core.entities.job.base import JobStatus
+
+
+LOG = structlog.getLogger(__name__)
 
 class ErrorPayload(msgspec.Struct):
     step: str
@@ -53,7 +56,7 @@ class TransformPayload(BasePayload):
     output_row_count: int # Number of rows detected
     schema_validation_pass: bool = False # True if schema matches the expected schema
     refined_schema: dict[str, str] = {} # Column names and types
-    artifact_folder: Path
+    artifact_folder: Path | str
     processing_duration_secs: int
     
 class WritePayload(BasePayload):
@@ -97,7 +100,7 @@ class JobManifest(msgspec.Struct):
     job_id: str
     run_id: str
     dataset_name: str
-    job_status: Literal["PENDING", "RUNNING", "COMPLETED", "FAILED"]
+    job_status: JobStatus = JobStatus.PENDING
     current_step: str
     
     # Step-Specific Data (The "Body")

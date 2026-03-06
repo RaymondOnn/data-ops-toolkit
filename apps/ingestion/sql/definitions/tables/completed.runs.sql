@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS JOB_SCHEDULES (
     JOB_ID                  VARCHAR(50) PRIMARY KEY
     , CRON_EXPR             CHAR(6) -- Trigger timing
     , IS_ACTIVE             BOOLEAN -- Master Kill Switch
+    , IS_SNAPSHOT           BOOLEAN
     , PRIORITY              INTEGER -- Worker Allocation Priority
     , TIMEOUT_SECS          INTEGER -- Max Execution Time
     , CONCURRENCY_LIMIT     INTEGER -- Max Concurrent Jobs

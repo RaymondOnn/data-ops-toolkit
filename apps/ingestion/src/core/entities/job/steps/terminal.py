@@ -1,8 +1,9 @@
 from abc import ABC
-from pathlib import Path
 import shutil
 import time
 from typing import TYPE_CHECKING
+
+import structlog
 
 from src.core.entities.job.steps.base import JobStep
 from src.utils.constants import JOB_STEPS_BASE_DIR
@@ -10,6 +11,9 @@ from src.core.state.base import StateStore
 
 if TYPE_CHECKING:
     from src.core.entities.job.base import Job
+    
+LOG = structlog.getLogger(__name__)
+
 
 class TerminalStep(JobStep, ABC):
     """Base for steps that end the active pipeline journey."""

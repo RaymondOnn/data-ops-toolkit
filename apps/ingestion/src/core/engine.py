@@ -1,24 +1,20 @@
-from datetime import datetime
-import logging
 import time
 from pathlib import Path
 from typing import Any
 
-
 import diskcache
-import ray
 import msgspec
+import ray
+import structlog
 from filelock import FileLock
 
 from src.core.context.job import JobContext
 from src.core.entities.job.base import Job
 from src.core.entities.job.manifest import JobManifest
-from src.utils.constants import ALWAYS_ON_MODE
-from src.core.state import StateStore
 
 
 
-LOG = logging.getLogger(__name__)
+LOG = structlog.getLogger(__name__)
 LOCK_FILE = "/tmp/orchestrator.lock"
 CACHE_DIR = ".cache/ingestion"
 
@@ -62,7 +58,7 @@ class Worker:
             job.execute()
 
             # 3. Get the next step signal
-            next_step = job.step._transit(job)
+            next_step = job._step._transit(job)
 
             # 4. Atomic Handoff
             with self.lock:
@@ -92,7 +88,14 @@ class Worker:
 
 
 class IngestionEngine:
-    def __init__(self, cache_dir: str = ".cache/ingestion"):      
+    def __init__(self, cache_dir: str = ".cache/ingestion"):    
+        # 1. Trigger dynamic registration of all @ServiceFactory.register classes
+        discover_services()
+          
+        # 2. Initialize the Global Registry (Diskcache)
+        # This ensures the shared cache path exists for all Ray workers
+        self.registry = ServiceRegistry()
+        
         self.cache = diskcache.Cache(cache_dir)
         self.lock = FileLock(f"{cache_dir}/orchestrator.lock")
 
@@ -128,12 +131,20 @@ class IngestionEngine:
         current_step: str | None = None
     ) -> None:
         """Checks config, creates jobs if not in cache, and submits them."""
+        from src.utils.dates import get_end_of_day_ts, epoch_to_iso
+        
         
         # Always start in the 'start' queue
         current_step = current_step or "start"
         queue_key = f"{current_step}:{composite_key}"
         job_id, table = composite_key.split(":", 1)
         
+        # Logic to determine if this is a snapshot (e.g., based on job naming convention)
+        is_snapshot = "snapshot" in job_id.lower()
+        expires_at = get_end_of_day_ts() if is_snapshot else None
+
+        # Log the dispatch with human-readable timestamps
+        expiry_str = epoch_to_iso(expires_at) if expires_at else "NEVER"
 
         with self.lock:
             # Check if job exists in cache
@@ -145,11 +156,14 @@ class IngestionEngine:
                     "status": "PENDING",
                     "config_file": config_file_path,
                     "table_name": table,
-                    "current_step": "start",  # Default start
+                    "current_step": current_step,  # Default start
                     "last_hb": time.time(),
                     "retry_count": 0,
                 }
-            LOG.info(f"Queued {table} | RunID: {run_id}")
+            LOG.info(
+                f"Queued Job: {job_id} | RunID: {run_id} | "
+                f"Step: {current_step} | Expires: {expiry_str}"
+            )
 
     def _process_jobs(self) -> None:
         # 1. Calculate current occupancy per stage

@@ -1,12 +1,12 @@
-import logging
 import importlib
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict
 
+import structlog
 import polars as pl
 
-LOG = logging.getLogger(__name__)
+LOG = structlog.getLogger(__name__)
 
 
 class TransformFactory:
