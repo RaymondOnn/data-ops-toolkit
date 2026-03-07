@@ -17,7 +17,7 @@ import polars as pl
 import msgspec
 from msgspec import Struct
 
-
+from src.services.factory import ServiceFactory
 from src.core.transform.base import TransformFactory
 from src.core.load.base import LoadFactory
 from src.core.entities.job.manifest import (
@@ -220,7 +220,7 @@ class JobStep(ABC):
         if job.manifest_path and not job.manifest_path.exists():
             raise FileNotFoundError(f"Manifest missing at {job.manifest_path}")
         
-        with open(file=job.manifest_path, mode="rb") as f:
+        with open(job.manifest_path, "rb") as f:
             return msgspec.json.decode(f.read(), type=JobManifest)
         
     @classmethod
@@ -321,7 +321,9 @@ class RawStep(JobStep):
         return "raw"
 
     def execute(self, job: "Job") -> str:
-        from src.core.ingest.ingest import ReaderFactory, ReaderContext, Reader
+        from src.core.ingest.ingest import ReaderContext, Reader
+        from src.core.ingest.factory import ReaderFactory
+        
         
         self.prepare_stage(job) # Pivots job.folder to .../raw/
         if not job.folder:
@@ -364,8 +366,8 @@ class RawStep(JobStep):
             #   c. Workers call service.fetch_stream() [Protected by Circuit Breaker]
             #   d. Streams results to Parquet files (keeping RAM < 2GB)
             extracted_files = reader.fetch(
-                client=None, 
-                destination=dest_folder,
+                service=service, 
+                target_folder=dest_folder,
                 context=ctx, 
             )
             
@@ -413,8 +415,8 @@ class RawStep(JobStep):
             
             # 4. State Transition
             return self._transit(job)
-        except CircuitBreakerTripped:
-            LOG.error("Halt by circuit breaker.", error=str(e))
+        except CircuitBreakerTripped as cb:
+            LOG.error("Halt by circuit breaker.", error=str(cb))
             raise
         except Exception as e:
             LOG.error(f"Raw ingestion failed: {e}")
@@ -501,7 +503,6 @@ class TransformStep(JobStep):
             self.finalize(job, exception=e)
             raise
 
-
 class WriteStep(JobStep):
     manifest: WritePayload
     
@@ -514,18 +515,30 @@ class WriteStep(JobStep):
         return "write"
     
     def execute(self, job: "Job") -> str:
+        from src.core.load.load import WriteContext, Loader
+        
         self.prepare_stage(job)
         start_time = time.perf_counter()
         
         try:
-            manifest = self.get_manifest(job)
-            # 1. Resolve Client & Strategy
-            client = DatabaseManager.get_client(job.job_config.destination_type)
-            strategy = LoadFactory.get_strategy(mode=job.job_config.load_mode)
+            # 1. Get the Service (Securely initialized on Ray worker via ServiceFactory)
+            service = ServiceFactory.get_service(job.sink_type, job.account_id, **job.sink_config)
+            
+            # 2. Get the behavioral Strategy
+            loader = LoadFactory.get_loader(job.sink_type, job.load_mode)
+            
+            # 3. Create Context
+            context = WriteContext(
+                target=job.target_table,
+                load_mode=job.load_mode,
+                partition_col=job.partition_col,
+                partition_value=job.partition_value
+            )
             
             # 2. PHASE 1: LOAD TO STAGING
+            manifest: JobManifest = self.get_manifest(job)
             lf = self.read_parquet_source(manifest.transform.artifact_folder)
-            staging_results = strategy.load(client, lf, job.job_config.target_destination)
+            staging_results = loader.load(service, lf, context)
             
             # 3. Finalize Manifest
             payload = WritePayload(
@@ -533,9 +546,9 @@ class WriteStep(JobStep):
                 target_identifier=job.job_config.target_destination,
                 load_mode=job.job_config.load_mode,
                 sink_type=job.job_config.destination_type,
-                staging_artifact=staging_results.get("staging_path") or staging_results.get("staging_table"),
-                rows_affected=staging_results["rows"],
-                db_connection_id=client.connection_id,
+                staging_artifact=staging_results.staging_path or staging_results.staging_table,
+                rows_affected=staging_results.rows,
+                db_connection_id=service.connection_id,
                 duration_secs=int((time.perf_counter() - start_time) * 1000)
             )
             
@@ -569,8 +582,8 @@ class AuditStep(JobStep):
         start_time = time.perf_counter()
         
         try:
-            manifest = self.get_manifest(job)
-            write_meta = manifest.write # Access staging info from WriteStep
+            manifest: JobManifest = self.get_manifest(job)
+            write_meta: WritePayload = manifest.write # Access staging info from WriteStep
             
             # 1. Internal Heuristic Checks (The 'Stand-in' Logic)
             # While the external app is missing, we check basic things:
@@ -664,7 +677,7 @@ class PublishStep(JobStep):
                 raise ValueError("Write metadata not found in manifest.")
             
             # 1. Resolve Strategy & Client
-            client = DatabaseFactory.get_client(job.job_config.destination_type)
+            client = ServiceFactory.get_service(job.job_config.destination_type)
             strategy = LoadFactory.get_strategy(
                 job.job_config.destination_type, 
                 job.job_config.load_mode

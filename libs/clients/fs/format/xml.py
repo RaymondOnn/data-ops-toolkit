@@ -1,0 +1,29 @@
+import io
+import re
+import xmltodict
+import polars as pl
+
+from libs.clients.fs.format.base import FormatHandler
+
+class XMLHandler(FormatHandler):
+    def read_mem(self, target: str, **kwargs) -> io.BytesIO:
+        """Removes illegal ASCII control characters."""
+        encoding = kwargs.get("encoding", "utf-8")
+        with self.fs.open(target, "rb") as f:
+            raw = f.read().decode(encoding, errors="ignore")
+            # Regex Repair: Strip chars 0-31 except \t, \n, \r
+            clean = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", raw)
+            return io.BytesIO(clean.encode("utf-8"))
+
+    def to_df(self, target: str, **kwargs) -> pl.LazyFrame:
+        buffer = self.read_mem(target, **kwargs)
+        # XML to Polars bridge
+        data = xmltodict.parse(buffer.read())
+        return pl.DataFrame(data).lazy()
+
+    def from_df(self, lf: pl.LazyFrame, target: str):
+        raise NotImplementedError("Streaming XML write is not supported by Polars.")
+
+    def write_file(self, data: bytes, target: str):
+        with self.fs.open(target, "wb") as f:
+            f.write(data)

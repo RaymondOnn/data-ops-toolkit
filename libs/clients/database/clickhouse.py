@@ -2,12 +2,14 @@
 
 from typing import Any, Generator
 
-import clickhouse_connect
+from clickhouse_connect import Client
 import polars as pl
 from libs.clients.database.base import DBClient
 
 class ClickhouseClient(DBClient):
-    def connect(self) -> clickhouse_connect.Client:
+    def connect(self) -> Client:
+        import clickhouse_connect
+        
         if not self._connection:
             self._connection = clickhouse_connect.get_client(
                 host=self.config.get('host', 'localhost'),
@@ -23,6 +25,11 @@ class ClickhouseClient(DBClient):
             for i in range(partitions)
         ]
 
+    def sql(self, query: str) -> list[tuple[Any, ...]]:
+        # Returns a list of tuples by default
+        result = self.connect().query(query)
+        return list(result.result_rows)
+    
     def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
         # clickhouse-connect supports native DataFrame streaming
         result = self.connect().query_df_stream(

@@ -7,6 +7,7 @@ import structlog
 
 
 from src.core.entities.job.manifest import JobManifest
+from src.services.database import DatabaseService
 
 LOG = structlog.getLogger(__name__)
 CURRENT_EXECUTION_TBL = "CURRENT_EXECUTION"
@@ -15,8 +16,8 @@ CURRENT_EXECUTION_TBL = "CURRENT_EXECUTION"
 # TODO: Logging to Error Log? Workflow for refresh current_execution for the day 
 class StateStore:
     
-    def __init__(self, sb_client: DatabaseClient) -> None:
-        self.client = db_client # Database-specific logic here
+    def __init__(self, db_service: DatabaseService) -> None:
+        self.service = db_service # Database-specific logic here
         self._mirror: dict[str, dict[str, Any]] = {}  # {job_id: {record_data}}
         self._dirty_keys: set[str] = set() # Track what needs saving
         self.last_sync = 0
@@ -30,7 +31,7 @@ class StateStore:
             SELECT * FROM {CURRENT_EXECUTION_TBL} W
             HERE STATUS IN ("RUNNING", "QUEUED")
         """
-        records = self.client.fetch(sql)
+        records =    self.service.fetch(sql)
         for r in records:
             # We don't overwrite local 'RUNNING' states with DB state 
             # unless the local state is empty (startup)
@@ -140,7 +141,7 @@ class StateStore:
         """
         
         try:
-            self.client.execute_batch(sql, batch_data)
+            self.service.execute_batch(sql, batch_data)
             self._dirty_keys.clear()
             LOG.debug(f"Flushed {len(batch_data)} updates to Postgres.")
         except Exception as e:

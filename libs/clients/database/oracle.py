@@ -1,16 +1,16 @@
 from typing import Any, Generator
 
 
-import oracledb
+from oracledb import Connection
 import polars as pl
 
 from libs.clients.database.base import DBClient
-
 class OracleClient(DBClient):
     def __init__(self, **config: Any) -> None:
         super().__init__(**config)
     
-    def connect(self) -> oracledb.Connection:
+    def connect(self) -> Connection:
+        import oracledb
         # Thin mode: no instant client required
         if not self._connection:
             self._connection = oracledb.connect(
@@ -34,6 +34,17 @@ class OracleClient(DBClient):
             queries.append(sql)
         return queries
 
+    def sql(self, query: str) -> list[tuple[Any, ...]]:
+        """
+        Executes raw SQL using the package driver.
+        Used for commands and small metadata fetches.
+        """
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query)
+                rows = cur.fetchall()
+                return [tuple(row) for row in rows]
+            
     def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
         """Fetched concurrently by Ray, but limited by the Manager's Session Lock."""
         # Note: In your specific case, we yield chunks to stay under 2GB

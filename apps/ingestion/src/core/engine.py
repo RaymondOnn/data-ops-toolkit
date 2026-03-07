@@ -11,6 +11,7 @@ from filelock import FileLock
 from src.core.context.job import JobContext
 from src.core.entities.job.base import Job
 from src.core.entities.job.manifest import JobManifest
+from src.services.registry import ServiceRegistry
 
 
 
@@ -88,10 +89,7 @@ class Worker:
 
 
 class IngestionEngine:
-    def __init__(self, cache_dir: str = ".cache/ingestion"):    
-        # 1. Trigger dynamic registration of all @ServiceFactory.register classes
-        discover_services()
-          
+    def __init__(self, cache_dir: str = ".cache/ingestion"):        
         # 2. Initialize the Global Registry (Diskcache)
         # This ensures the shared cache path exists for all Ray workers
         self.registry = ServiceRegistry()
@@ -103,7 +101,7 @@ class IngestionEngine:
             ray.init(ignore_reinit_error=True)
 
         # Configuration for stage limits
-        self.stage_limits = {
+        self.stage_limits: dict[str, dict[str, Any]]= {
             "start": {"limit": 5, "pool": "io"},
             "raw": {"limit": 10, "pool": "io"},
             "transform": {"limit": 4, "pool": "cpu"},  # CPU-Heavy
@@ -112,8 +110,8 @@ class IngestionEngine:
         }
 
         # Initialize specialized pools
-        self.io_pool = [Worker.remote(f"io_{i}") for i in range(15)]
-        self.cpu_pool = [Worker.remote(f"cpu_{i}") for i in range(4)]
+        self.io_pool: list[ray.actor.ActorHandle]  = [Worker.remote(f"io_{i}") for i in range(15)]
+        self.cpu_pool: list[ray.actor.ActorHandle]  = [Worker.remote(f"cpu_{i}") for i in range(4)]
 
     def run(self) -> None:
         """Main loop managing multiple jobs."""
@@ -178,9 +176,9 @@ class IngestionEngine:
                 job_meta = self.cache[key]
 
                 if job_meta["status"] == "PENDING":
-                    limits = self.stage_limits.get(step, {})
+                    limits = min(self.stage_limits[step]["limit"], 1)
                     # 2. Check if the specific stage has room
-                    if current_occupancy[step] < int(limits.get("limit", 1)):
+                    if current_occupancy[step] < limits:
                         continue
 
                     # 2. Select the correct Worker Pool
@@ -207,7 +205,7 @@ class IngestionEngine:
                     counts[step] = counts.get(step, 0) + 1
         return counts
 
-    def _get_idle_worker_from_pool(self, pool: list[Worker]) -> Any | None:
+    def _get_idle_worker_from_pool(self, pool: list[ray.actor.ActorHandle] ) -> Any | None:
         for w in pool:
             if ray.get(w.is_idle.remote()):
                 return w

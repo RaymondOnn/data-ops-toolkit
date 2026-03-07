@@ -45,7 +45,7 @@ class CircuitBreaker:
         return f"CircuitBreaker(threshold={self.threshold}, state={self.state}"
         
 
-    def evaluate_state(self, current_status: str, last_failure_time: float) -> CBState:
+    def evaluate_state(self, current_status: str, last_failure_time: float) -> CircuitBreakerState:
         """Determines logic-based state based on Registry data."""
         if current_status != "OPEN":
             return CircuitBreakerState.CLOSED
@@ -58,3 +58,28 @@ class CircuitBreaker:
 
     def should_trip(self, fails: int) -> bool:
         return fails >= self.threshold
+    
+    def get_current_state(
+        self, 
+        status: str, 
+        last_failure_time: float, 
+        retry_attempts: int = 0
+    ) -> CircuitBreakerState:
+        """
+        Logic engine to determine state.
+        Uses exponential backoff: 300s -> 600s -> 1200s... capped at max_timeout.
+        """
+        if status != CircuitBreakerState.OPEN:
+            return CircuitBreakerState.CLOSED
+
+        # Calculate backoff: base_timeout * 2^(retries)
+        # We use max(0, retry_attempts - 1) so the first recovery attempt starts at base_timeout
+        # Exponential Backoff: 300s, 600s, 1200s, 2400s...
+        current_timeout = self.recovery_timeout * (2 ** max(0, retry_attempts - 1))
+        
+        elapsed = time.time() - last_failure_time
+        
+        if elapsed > current_timeout:
+            return CircuitBreakerState.HALF_OPEN
+        
+        return CircuitBreakerState.OPEN

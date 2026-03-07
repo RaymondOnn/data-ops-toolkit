@@ -1,17 +1,23 @@
-from typing import Any, Generator
+from typing import TYPE_CHECKING, Any, Generator
 
 import polars as pl
-import adbc_driver_postgresql.dbapi as adbc_pg
 
 from libs.clients.database.base import DBClient
+
+if TYPE_CHECKING:
+    from adbc_driver_postgresql.dbapi import Connection
 
 class PostgresClient(DBClient):
     def __init__(self, **config: Any) -> None:
         super().__init__(**config)
     
-    def connect(self) -> adbc_pg.Connection:
+    def connect(self) -> Connection:
+        # INLINE IMPORT: Prevents pickling the driver across the network
+        import adbc_driver_postgresql.dbapi as adbc_pg
+        
         if not self._connection:
-            self._connection = adbc_pg.connect(self.config['uri'])
+            uri = f"postgresql://{self.config['user']}:{self.config['password']}@{self.config['host']}/{self.config['database']}"
+            self._connection = adbc_pg.connect(uri)
         return self._connection
 
     def get_load_strategy(self, table_name: str, partitions: int = 10) -> list[str]:
@@ -24,6 +30,16 @@ class PostgresClient(DBClient):
             for i in range(partitions)
         ]
 
+    def sql(self, query: str) -> list[tuple[Any, ...]]:
+        """
+        Executes raw SQL using the package driver.
+        Used for commands and small metadata fetches.
+        """
+        with self.connect().cursor() as cur:
+                cur.execute(query)
+                rows = cur.fetchall()
+                return [tuple(row) for row in rows]
+                
     def fetch_df(self, query: str) -> Generator[pl.DataFrame, None, None]:
         with self.connect().cursor() as cursor:
             cursor.execute(query)

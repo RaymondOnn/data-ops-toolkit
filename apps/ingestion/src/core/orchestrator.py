@@ -13,6 +13,7 @@ from src.core.state import StateStore
 from src.utils.constants import ALWAYS_ON_MODE, JOB_STEPS_BASE_DIR
 from src.core.entities.job.base import Job, JobStatus
 from src.utils.dates import is_expired, epoch_to_iso
+from src.services.database import DatabaseService
 
 LOG = structlog.getLogger(__name__)
 PID_FILE = Path(".daemon.pid")
@@ -51,9 +52,7 @@ def resolve_current_path(job_id: str, run_id: str, status: str, step: str) -> Pa
 # TODO: Cancel Job
 
 class Orchestrator:
-    def __init__(self, mode: str = "SENTINEL"):
-        self.mode = mode
-
+    def __init__(self, db_service: DatabaseService):
         self.heartbeat = Heartbeat()
         self.last_heartbeat: float = 0
         
@@ -61,7 +60,7 @@ class Orchestrator:
         self.last_engine_scan: float = 0
         
         if ALWAYS_ON_MODE:
-            self.state_store = StateStore(db_client)
+            self.state_store = StateStore(db_service)
             self.last_state_sync: float = 0        
             self.last_db_poll: float = 0
             self.last_job_trigger: float = 0 
@@ -72,8 +71,11 @@ class Orchestrator:
     def run(self, job_id: str, overrides: dict[str, Any] | None = None) -> None:
         if ALWAYS_ON_MODE:
             self._start_always_on_loop()
+            self.mode = "ALWAYS_ON"
         else:
             self._run_synchronous_task(job_id, overrides)
+            self.mode = "TRIGGER"
+
 
     def _start_always_on_loop(self) -> None:
         """Used for Always-On Mode"""

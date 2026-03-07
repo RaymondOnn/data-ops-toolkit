@@ -1,42 +1,18 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Generator, Optional, List, Dict
+from typing import Any, Generator
 
-import msgspec
 
 import ray
 import polars as pl
 import structlog
 
+from src.services.base import Service, DatabaseService
+from src.core.ingest.base import Reader, ReaderContext
+
+
 LOG = structlog.getLogger(__name__)
 
-class ReaderContext(msgspec.Struct):
-    """
-    Type-safe container for all ingestion parameters.
-    Serializable for Ray worker distribution.
-    """
-    source_type: str
-    target_table: Optional[str] = None  # Used by DatabaseIngest
-    source_path: Optional[str] = None   # Used by FileIngest
-    parallelism: int = 10
-    # For any source-specific extras (e.g., API keys, custom filters)
-    options: Dict[str, Any] = {}
-
-
-class Reader(ABC):
-    @abstractmethod
-    def fetch(
-        self, 
-        client: Any, 
-        context: ReaderContext, 
-        target_folder: Path
-    ) -> List[Dict[str, Any]]:
-        raise NotImplementedError("Subclasses must implement this method")
-
-class FileIngest(Reader):
-    def get_units(self, client: Any, context: ReaderContext) -> List[str]:
-        # context.source_path provides the directory or bucket to scan
-        return client.list_files(context.source_path)
 
 
 class DataReader(Reader):
@@ -44,13 +20,13 @@ class DataReader(Reader):
     Base Strategy class. 
     Subclasses implement _get_data_generator to handle source-specific logic.
     """
-    
+
     def fetch(
         self, 
-        service: Any, 
+        service: Service, 
         context: ReaderContext, 
         target_folder: Path
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Entry point for RawStep."""
         df_generator = self._get_ray_generator(service, context)
         return self.to_parquet(df_generator, target_folder)
@@ -108,7 +84,7 @@ class DataReader(Reader):
         self, 
         generator: Generator[pl.DataFrame, None, None], 
         destination: Path
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Consumes the stream and saves each chunk as a unique parquet file.
         Returns metadata required for the FileInfo structs.
@@ -135,25 +111,18 @@ class DataReader(Reader):
         return metadata_list
     
     @abstractmethod
-    def get_work_units(self, client: Any, context: ReaderContext) -> List[str]:
+    def get_work_units(self, client: Any, context: ReaderContext) -> list[str]:
         pass
 
 class DBDataReader(DataReader):
-    def get_work_units(self, client: Any, context: ReaderContext) -> List[str]:
+    def __init__(self) -> None:
+        super().__init__()
+    
+    def get_work_units(self, service: DatabaseService, context: ReaderContext) -> list[str]:
         # Uses ORA_HASH for Oracle or ctid for Postgres
         # to generate N unique queries for the 50M rows
-        return client.get_load_strategy(
-            table_name=context.target_table, 
-            partitions=context.parallelism
-        )
-
-class ReaderFactory:
-    @staticmethod
-    def get_strategy(source_type: str) -> Reader:
-        strategies = {
-            "data": DataReader(),
-            "file": FileReader(),
-        }
-        if source_type not in strategies:
-            raise ValueError(f"Unsupported source type: {source_type}")
-        return strategies[source_type]
+        if not context.target_table:
+            raise ValueError("target_table is required for DBDataReader")
+        
+        units = service.get_work_units(context.target_table, context.parallelism)
+        return [str(unit) for unit in units]
