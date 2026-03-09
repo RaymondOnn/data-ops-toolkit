@@ -10,7 +10,7 @@ class DBClient(ABC):
 
 
     @abstractmethod
-    def connect(self) -> None:
+    def connect(self):
         """Specific driver logic to establish self._connection."""
         pass
     
@@ -30,3 +30,16 @@ class DBClient(ABC):
         Convert a query into multiple "partition" queries
         """
         raise NotImplementedError("Subclasses must implement this method")
+    
+    def reconnect(self) -> None:
+        """
+        Ensures that a broken pipe during a folder-load 
+        resets the session entirely.
+        """
+        if hasattr(self, 'connection') and self._connection:
+            try:
+                self._connection.close()
+            except:
+                pass
+        self.connection = None
+        self.connect()

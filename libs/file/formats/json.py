@@ -1,7 +1,10 @@
 import re
 import io
+import logging
 import polars as pl
-from .base import FormatHandler
+from libs.file.formats.base import FormatHandler
+
+LOG = logging.getLogger(__name__)
 
 class JSONHandler(FormatHandler):
     def read_mem(self, target: str, **kwargs) -> io.BytesIO:
@@ -19,7 +22,7 @@ class JSONHandler(FormatHandler):
     def to_df(self, target: str, **kwargs) -> pl.LazyFrame:
         size = self.fs.size(target)
         if size > 1.5 * 1024**3: # 1.5GB warning
-            self.logger.warning(f"Standard JSON {target} is very large. Risk of OOM.")
+            LOG.warning(f"Standard JSON {target} is very large. Risk of OOM.")
         
         # Performance: For Newline Delimited JSON (ndjson), 
         # Polars can scan it lazily without loading into memory.

@@ -15,13 +15,7 @@ from libs.clients.base import BaseIOClient
 
 LOG = logging.getLogger(__name__)
 
-def calculate_sha256(local_path: str) -> str:
-    import hashlib
-    sha256_hash = hashlib.sha256()
-    with open(local_path, "rb") as f:
-        for byte_block in iter(lambda: f.read(65536), b""):  # 64KB chunks
-            sha256_hash.update(byte_block)
-    return sha256_hash.hexdigest()
+
 
 def repair_json(stream: BytesIO) -> BytesIO:
     """Handles common 'Trailing Comma' issues in JSON arrays/objects."""

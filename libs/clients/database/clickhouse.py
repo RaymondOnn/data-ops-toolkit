@@ -38,3 +38,16 @@ class ClickhouseClient(DBClient):
         with result:
             for pandas_df in result:
                 yield pl.from_pandas(pandas_df)
+                
+    def write_table(self, lf: pl.LazyFrame, table_name: str) -> None:
+        """
+        Uses ClickHouse native client to insert data in optimized blocks.
+        """
+        # ClickHouse drivers are highly optimized for Polars/Pandas structures.
+        # We stream the data to the insert method.
+        df = lf.collect()
+        
+        self.connection.insert_df(
+            table=table_name,
+            df=df
+        )

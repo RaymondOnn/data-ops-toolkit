@@ -24,12 +24,12 @@ class ServiceFactory:
         return wrapper
     
     @classmethod
-    def get_service(cls, source_type: str, account_id: str, **config: Any) -> Any:
+    def get_service(cls, source_type: str, **config: Any) -> Any:
         """
         Acts as the Singleton Manager. 
         Returns a service instance based on account_id.
         """
-        instance_key = f"{source_type}:{account_id}"
+        instance_key = f"{source_type}:{config.account_id}"
         
         if instance_key not in cls._INSTANCES:
             service_cls = cls._SERVICES.get(source_type.lower())

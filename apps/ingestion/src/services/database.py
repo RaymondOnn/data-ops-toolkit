@@ -28,8 +28,8 @@ class DatabaseService(Service):
     """
     Intermediate layer for all SQL-based sources.
     """
-    def __init__(self, name: str, account_id: str, **config: Any):
-        super().__init__(name, account_id, **config)
+    def __init__(self, name: str, **config: Any):
+        super().__init__(name, **config)
         self.client: DBClient = self._init_client(**config)
 
     @abstractmethod
@@ -80,27 +80,54 @@ class PostgresService(DatabaseService):
             port=config.get("port", 5432)
         )
     
-    def stage_data(self, lf: pl.LazyFrame, target_table: str) -> str:
+    def stage_data(self, source_dir: str, target_table: str) -> str:
         staging_table = f"stg_{target_table}_{int(time.time())}"
+        self.client.sql(f"CREATE UNLOGGED TABLE {staging_table} (LIKE {target_table})")
         
-        # Performance: Use 'UNLOGGED' for staging to skip WAL logging (faster for 50M rows)
-        self.client.sql(f"CREATE UNLOGGED TABLE {staging_table} (LIKE {target_table} INCLUDING ALL)")
+        # Polars scan_parquet handles a directory path natively.
+        # It will treat all parquet files in the folder as a single dataset.
+        lf = pl.scan_parquet(f"{source_dir}/*.parquet")
         
-        # Use the client to stream the Polars LazyFrame into the staging table
-        # This uses the ADBC/Copy protocol under the hood
-        self.client.write_table(lf, staging_table)
-        return staging_table
+        # 1. Get the raw connection from the DBAPI
+        conn = self.client.connect().raw_connection()
+        
+        try:
+            with conn.cursor() as cursor:
+                # 2. Open the COPY pipe
+                copy_sql = f"COPY {staging_table} FROM STDIN WITH (FORMAT CSV, HEADER FALSE)"
+                
+                with cursor.copy(copy_sql) as copy:
+                    # Stream in 100k chunks to keep RAM flat
+                    for batch_df in lf.collect().iter_slices(n_rows=100_000):
+                        # write_csv returns bytes, which we feed into the copy pipe
+                        copy.write(batch_df.write_csv(include_header=False))
+            
+            # Commit only if the entire 50M row stream succeeded
+            conn.commit()
+            return staging_table
+        except Exception as e:
+            conn.rollback()
+            self.client.reconnect()
+            raise e
 
-    def promote_data(self, staging_table: str, target_table: str, mode: str):
-        if mode == "upsert":
-            # Native Postgres 'ON CONFLICT' or 'MERGE'
-            sql = f"INSERT INTO {target_table} SELECT * FROM {staging_table} ON CONFLICT ... "
-        else:
-            # Generic Transactional Swap
-            sql = f"BEGIN; TRUNCATE {target_table}; INSERT INTO {target_table} SELECT * FROM {staging_table}; COMMIT;"
-        
+    def promote_data(
+        self, 
+        staging_table: str, 
+        target_table: str, 
+        partition_col: str, 
+        partition_val: str
+    ) -> None:
+        # Transactional Swap
+        sql = f"""
+        BEGIN;
+        DELETE FROM {target_table} 
+            WHERE {partition_col} = '{partition_val}';
+        INSERT INTO {target_table} 
+            SELECT * FROM {staging_table};
+        COMMIT;
+        DROP TABLE {staging_table};
+        """
         self.client.sql(sql)
-        self.client.sql(f"DROP TABLE {staging_table}")
         
 ServiceFactory.register("oracle")
 class OracleService(DatabaseService):
@@ -112,38 +139,93 @@ class OracleService(DatabaseService):
             dsn=config['dsn']
         )
     
-    def stage_data(self, lf: pl.LazyFrame, target: str) -> StagingResult:
-        temp_table = f"STG_{target}_{int(time.time())}"
-        # ... logic to create table and self.client.write_table(lf) ...
-        return StagingResult(staging_table=temp_table, rows=0)
+    def stage_data(self, source_dir: str, target_table: str) -> str:
+        staging_table = f"STG_{target_table}"
+    
+        # Oracle 'ORACLE_BIGDATA' driver can read all files in a location
+        # if the location is defined as a directory or a specific URI pattern
+        sql = f"""
+        CREATE TABLE {staging_table} (
+            -- Schema columns
+        )
+        ORGANIZATION EXTERNAL (
+            TYPE ORACLE_BIGDATA
+            ACCESS PARAMETERS (
+                com.oracle.bigdata.fileformat=parquet
+            )
+            -- Oracle allows wildcards in the location for BigData driver
+            LOCATION ('{source_dir}/*.parquet')
+        )
+        REJECT LIMIT UNLIMITED
+        """
+        self.client.sql(sql)
+        return staging_table
 
-    def promote_data(self, result: StagingResult, context: WriteContext):
-        """Idempotent Promotion via Transaction."""
-        stg = result.staging_table
-        tgt = context.target
-        
-        # Build partition filter
-        filter_clause = f"WHERE {context.partition_col} = '{context.partition_value}'" if context.partition_col else ""
-        
-        # Idempotency logic: 
-        # 1. DELETE existing data for that partition
-        # 2. INSERT from staging
-        # All inside one BEGIN/COMMIT block
+    def promote_data(
+        self, 
+        staging_table: str, 
+        target_table: str, 
+        partition_col: str, 
+        partition_val: str
+    ) -> None:
+        # If partition_val is '2026-03-10', we wipe that day and replace it
         sql = f"""
         BEGIN
-            DELETE FROM {tgt} {filter_clause};
-            INSERT INTO {tgt} SELECT * FROM {stg};
+            -- Idempotency: Clear the target slice
+            DELETE FROM {target_table}
+            WHERE {partition_col} = '{partition_val};
+            
+            -- Performance: Use APPEND hint for direct-path insert (bypasses buffer cache)
+            INSERT /*+ APPEND */ INTO {target_table} 
+            SELECT * FROM {staging_table};
+            
             COMMIT;
-            EXECUTE IMMEDIATE 'DROP TABLE {stg}';
+            EXECUTE IMMEDIATE 'DROP TABLE {staging_table}';
+        EXCEPTION WHEN OTHERS THEN
+            ROLLBACK;
+            RAISE;
         END;
         """
         self.client.sql(sql)
 
 @ServiceFactory.register("clickhouse")
 class ClickHouseService(DatabaseService):
-    def promote_data(self, result: StagingResult, context: WriteContext):
-        """Idempotent Promotion via Partition Swap."""
-        # ClickHouse has a native atomic command for this
-        if context.load_mode in ["overwrite", "append"]:
-            sql = f"ALTER TABLE {context.target} REPLACE PARTITION '{context.partition_value}' FROM {result.staging_table}"
+    def stage_data(self, source_dir: str, target_table: str) -> str:
+        staging_table = f"stg_{target_table}_{int(time.time())}"
+        try:
+            self.client.sql(f"CREATE TEMPORARY TABLE {staging_table} AS {target_table}")
+            
+            # ClickHouse pulls the folder directly - no Python RAM used
+            path_pattern = f"{source_dir.rstrip('/')}/*.parquet"
+            sql = f"INSERT INTO {staging_table} SELECT * FROM file('{path_pattern}', 'Parquet')"
+            
             self.client.sql(sql)
+            return staging_table
+            
+        except Exception:
+            # Cleanup staging on failure to prevent orphan temp tables
+            self.client.sql(f"DROP TABLE IF EXISTS {staging_table}")
+            raise
+    
+    def promote_data(
+        self, 
+        staging_table: str, 
+        target_table: str, 
+        partition_col: str, 
+        partition_val: str
+    ) -> None:
+        """
+        Atomic metadata swap. 
+        ClickHouse moves the actual data parts on disk
+        Note: {partition_val} must match the internal ClickHouse partition ID format.
+        """
+        sql = f"""
+            ALTER TABLE {target_table} 
+            REPLACE PARTITION '{partition_val}' 
+            FROM {staging_table}
+        """
+        try:
+            self.client.sql(sql)
+        finally:
+            # Always drop the staging table after the swap attempt
+            self.client.sql(f"DROP TABLE IF EXISTS {staging_table}")

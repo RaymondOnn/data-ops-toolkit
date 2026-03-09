@@ -64,8 +64,9 @@ class WritePayload(BasePayload):
     target_identifier: str
     staging_artifact: str
     sink_type: str
-    load_mode: Literal["APPEND", "UPSERT", "OVERWRITE"]
-    rows_affected: int
+    rows_staged: int
+    partition_col: str
+    partition_value: str
     sink_connection_id: int 
     load_duration_secs: float
     
