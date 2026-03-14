@@ -1,0 +1,75 @@
+
+job_id: my_daily_job
+source: 
+    type: postgres
+    config:
+      host: "db.prod.local"
+      port: 5432
+      user: "ingest_user"
+      password: "*****"
+      database: "warehouse"
+      sslmode: "require"
+
+destination:
+  type: clickhouse
+  config:
+    host: "clickhouse.prod.local"
+    port: 8123
+
+archive: 
+  type: s3
+  config:
+    bucket: "archive-bucket"
+    prefix: "orders/"
+    storage_class: "GLACIER"
+  enable_archival: true
+  retention_days: 2555
+
+datasets:
+  orders:
+    # Source config (e.g. Postgres → S3)
+    target_destination: "public.orders" # Source DB table
+    read_mode: delta # delta | snapshot
+    expires_at: null              # or unix epoch (e.g. 1735776000)
+    num_partitions: 16
+    filter_clause: 
+    schema: orders.csv
+    source_path: null             # Only used for file/s3 source types
+    # Load/sink config
+    
+    # Governance & archival
+    archive:
+      enable_archival: true
+      archive_type: "s3"
+      retention_days: 2555
+      archive_base_path: "s3://archive-bucket/ingestion"
+    # Lifecycle / validation
+    checks:
+      validation_cmd: "validation-app"
+    # Free-form params for services / readers
+    params:
+      s3_region: "us-east-1"
+      max_batch_rows: 100000
+      fetch_timeout_secs: 600
+
+  sales: 
+    target_destination: "public.sales" # Source DB table
+    read_mode: snapshot # delta | snapshot
+    expires_at: null              # or unix epoch (e.g. 1735776000)
+    num_partitions: 16
+    filter_clause: 
+    schema: sales.csv
+    # target_destination: "s3://raw-bucket/orders/"
+    source_path: null             # Only used for file/s3 source types
+    
+    # Governance & archival
+    archive:
+      archive_base_path: "s3://archive-bucket/ingestion"
+    # Lifecycle / validation
+    checks:
+      validation_cmd: "validation-app"
+    # Free-form params for services / readers
+    params:
+      s3_region: "us-east-1"
+      max_batch_rows: 100000
+      fetch_timeout_secs: 600

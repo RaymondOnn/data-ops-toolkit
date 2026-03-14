@@ -8,10 +8,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import msgspec
-import polars as pl
-import structlog
-from src.core.entities.job.manifest import (
+from apps.ingestion.src.core.models.job import manifest
+import msgspec # type: ignore
+import polars as pl # type: ignore
+import structlog # type: ignore
+from src.core.load.load import Loader, WriteContext
+from src.core.models.job.manifest import (
     AuditPayload,
     BasePayload,
     CompletePayload,
@@ -22,15 +24,18 @@ from src.core.entities.job.manifest import (
     TransformPayload,
     WritePayload,
 )
-from src.core.load.load import WriteContext, Loader
-from src.core.transform.base import TransformFactory
 from src.services.factory import ServiceFactory
 from src.utils.constants import JOB_STEPS_BASE_DIR
+from src.utils.exceptions import JobFailed, JobBlocked, JobDeferred
+from libs.file.formats.parquet import ParquetHandler
+from libs.clients.base import ClientCantConnect
+
+
 
 from libs.resilence.circuit_breaker import CircuitBreakerTripped
 
 if TYPE_CHECKING:
-    from src.core.entities.job.base import Job
+    from src.core.models.job.base import Job
 
 LOG = structlog.getLogger(__name__)
 _JOB_ORDER = [
@@ -69,6 +74,13 @@ class JobStep(ABC):
     def name(self) -> str:
         raise NotImplementedError("Subclasses must implement this property")
 
+    def get_step(self, offset: int) -> str:
+        idx = _JOB_ORDER.index(self.name)
+        if 0 <= idx + offset < len(_JOB_ORDER):
+            return _JOB_ORDER[idx + offset]
+        else:
+            raise ValueError(f"Invalid offset: {offset}")
+    
     @abstractmethod
     def execute(self, job: "Job") -> str:
         """Execute the current JobStage with the given engine and dataframe.
@@ -82,56 +94,23 @@ class JobStep(ABC):
 
     def _transit(self, job: "Job") -> str:
         """Transit the Job instance to the next stage."""
-        """Transit the Job instance to the next stage."""
-        idx = _JOB_ORDER.index(self.name)
-        if idx + 1 < len(_JOB_ORDER):
-            next_step = _JOB_ORDER[idx + 1]
-            job.set_step(JobStep.get_step_class_by_name(next_step))
-            return next_step
+        next_step = self.get_step(offset=1)
+        job.set_step(JobStep.get_step_class_by_name(next_step))
+        return next_step
         return "FINISH"
-
-    def read_parquet_source(self, source_folder: Path | str) -> pl.LazyFrame:
-        """Standardized way to lazily load the previous stage's data."""
-        path = Path(source_folder)
-        if not path.exists():
-            raise FileNotFoundError(f"Source folder {source_folder} missing.")
-        # scan_parquet is lazy; it doesn't load data into RAM yet
-        return pl.scan_parquet(path / "*.parquet")
-
-    def sink_to_parquet(
-        self, lf: pl.LazyFrame, destination: Path | str
-    ) -> dict[str, Any]:
-        """
-        Executes the lazy plan and sinks to a single parquet file.
-        Returns metadata for the payload.
-        """
-        destination = Path(destination)
-        destination.mkdir(parents=True, exist_ok=True)
-        output_file = destination / "part_0000.parquet"
-
-        # sink_parquet is the most memory-efficient way to write in Polars
-        lf.sink_parquet(output_file, compression="snappy")
-
-        # Now we collect just the schema and count (metadata only)
-        final_meta = lf.select(
-            [
-                pl.len().alias("count"),
-            ]
-        ).collect()
-
-        return {
-            "path": str(output_file),
-            "rows": final_meta["count"][0],
-            "schema": {k: str(v) for k, v in lf.schema.items()},
-        }
 
     def finalize(
         self,
         job: "Job",
+        data_folder: Path | None = None,
         results: dict[str, Any] | None = None,
         exception: Exception | None = None,
     ) -> None:
-
+        """
+        DECISION: Deterministic Paths & Symlinking.
+        We avoid searching for 'latest' folders by using a static symlink 
+        at active/{job_id}/{step_name}.
+        """
         results = results or {}
 
         # 1. READ & BOOTSTRAP
@@ -145,10 +124,10 @@ class JobStep(ABC):
                 data: dict[str, Any] = msgspec.json.decode(f.read())
         else:
             # File is empty or doesn't exist: Start Phase
-            data: dict[str, Any] = {
+            data = {
                 "job_id": job.id,
                 "run_id": job.run_id,
-                "dataset_name": job.job_config.dataset_name,
+                "dataset_name": job.context.dataset_name,
                 "status": "RUNNING",
                 "current_step": "init",
             }
@@ -166,6 +145,8 @@ class JobStep(ABC):
             )
             data["status"] = "FAILED"
             data["error"] = error_payload
+            
+            if isinstance(exception, JobFailed)
         else:
             if data["current_step"] == "complete":
                 data["status"] = "COMPLETED"
@@ -173,59 +154,20 @@ class JobStep(ABC):
             if results:
                 data[self.name] = results
 
-        # 3. ATOMIC SWAP
-        validated_bytes = msgspec.json.encode(msgspec.convert(data, JobManifest))
-
-        temp_path = manifest_path.with_suffix(".tmp")
-        with open(temp_path, "wb") as f:
-            f.write(validated_bytes)
-            f.flush()
-            os.fsync(f.fileno())
-
-        os.replace(temp_path, manifest_path)
-
-    def prepare_stage(self, job: "Job") -> None:
-        """
-        Physically moves the run folder from the previous step's directory
-        to the current step's directory.
-        """
-        # 1. Define the destination
-        # e.g., BASE_DATA_DIR / "transform" / "job_123" / "run_456"
-        target_dir = (
-            Path(JOB_STEPS_BASE_DIR).expanduser() / self.name / job.id / job.run_id
-        )
-
-        # 2. Identify current location (wherever it is now)
-        if not job.folder:
-            raise ValueError("Job folder is not set.")
-        current_dir = Path(job.folder)
-
-        if current_dir != target_dir:
-            # Ensure parent exists (e.g., the 'transform' folder)
-            target_dir.parent.mkdir(parents=True, exist_ok=True)
-
-            # Physical Move (Rename is atomic on the same filesystem)
-            if current_dir.exists():
-                shutil.move(current_dir, target_dir)
-                LOG.info(
-                    f"[{job.worker_id}] Moved folder: {current_dir.name} -> {self.name}"
-                )
-            else:
-                # Handle first step (Raw) where folder doesn't exist yet
-                target_dir.mkdir(parents=True, exist_ok=True)
-
-        # 3. Update Job Object context
-        job.folder = target_dir
-        # Manifest is ALWAYS inside the folder, so its path updates relative to job.folder
-        job.manifest_path = target_dir / "manifest.json"
-
-    def get_manifest(self, job: "Job") -> JobManifest:
-        """Helper to read the current state of the world."""
-        if job.manifest_path and not job.manifest_path.exists():
-            raise FileNotFoundError(f"Manifest missing at {job.manifest_path}")
-
-        with open(job.manifest_path, "rb") as f:
-            return msgspec.json.decode(f.read(), type=JobManifest)
+        # 3. CREATE SYMLINK
+        if data_folder:
+            active_link = job.folder / self.name
+            if active_link.exists() or active_link.is_symlink():
+                active_link.unlink()
+            
+            # Create the pointer to the immutable physical data
+            relative_target = Path("..") / ".." / "data" / self.name / data_folder.name
+            active_link.symlink_to(relative_target)
+        
+        # 4. ATOMIC SWAP
+        manifest = msgspec.convert(data, JobManifest)
+        job.update_status(manifest)
+        
 
     @classmethod
     def get_step_class_by_name(cls, name: str) -> "JobStep":
@@ -244,8 +186,15 @@ class JobStep(ABC):
             ):
                 return cls
         raise ValueError(f"Unknown step name: {name}")
+    
+    def get_manifest(self, job: "Job") -> JobManifest:
+        """Helper to read the current state of the world."""
+        if job.manifest_path and not job.manifest_path.exists():
+            raise FileNotFoundError(f"Manifest missing at {job.manifest_path}")
 
-
+        with open(job.manifest_path, "rb") as f:
+            return msgspec.json.decode(f.read(), type=JobManifest)
+        
 class StartStep(JobStep):
     manifest: BasePayload
 
@@ -258,21 +207,8 @@ class StartStep(JobStep):
         return "start"
 
     def execute(self, job: "Job") -> str:
-        # 1. Physical Directory Creation
-        # Path: ~/.ingestion_engine/data/<job_id>/<run_id>/
-        job.folder = JOB_STEPS_BASE_DIR / self.name / job.id / job.run_id
-        job.folder.mkdir(parents=True, exist_ok=True)
+        
 
-        # 2. Create the empty placeholder (The "Signal")
-        # This satisfies your requirement for finalize() to see an empty file
-        manifest_path = job.folder / "manifest.json"
-        manifest_path.touch()
-
-        # Move file into job folder
-        job_cfg_file = f"{job.id}:{job.job_config.table}_{job.run_id}_config.json"
-        source_path = JOB_STEPS_BASE_DIR / self.name / job_cfg_file
-        dest_path = job.folder / job_cfg_file
-        shutil.move(str(source_path), str(dest_path))
 
         # persist job-start metadata using engine helper
         try:
@@ -294,6 +230,7 @@ class StartStep(JobStep):
             # 5. Finalize (using the generic helper we discussed)
             # Note: Pass the Struct directly if finalize() handles to_builtins
             self.finalize(job, results=ctx)
+            LOG.info("Job initialized", job_id=job.id, run_id=job.run_id)
             return self._transit(job)
         except Exception as e:
             # Ensure we capture the traceback in the manifest
@@ -314,7 +251,7 @@ class StartStep(JobStep):
             return "unknown"
 
 
-class FileInfo(msgspec.Struct):
+class FileInfo(msgspec.Struct): # type: ignore
     """
     Metadata for an individual physical file artifact.
     """
@@ -340,48 +277,44 @@ class RawStep(JobStep):
         from src.core.ingest.factory import ReaderFactory
         from src.core.ingest.ingest import Reader, ReaderContext
 
-        self.prepare_stage(job)  # Pivots job.folder to .../raw/
         if not job.folder:
             raise ValueError("Job folder is not set.")
 
         try:
-            # 1. Initialize the Type-Safe Context
+            # 1. Prepare Reader Context
             # This object is serialized and sent to Ray workers.
+            # We include the schema_items from the manifest so workers are 'Contract-Aware'
             ctx = ReaderContext(
-                source_type=job.job_config.source_type,
-                target_table=job.job_config.target_table,
-                source_path=getattr(job.job_config, "source_path", None),
-                num_partitions=job.job_config.num_partitions or 10,
+                source_type=job.context.source_type,
+                target_table=job.context.target_table,
+                num_partitions=job.context.num_partitions or 10,
+                schema_items=job.context.schema_items,
             )
-
-            # 2. Get the Resilient Service (Singleton per account)
-            # ServiceFactory uses the @register decorators triggered by discovery.
+            
+            # 2. Extract & Guard (The Ray Orchestration)
+            # Decision: DataReader.fetch uses the functional apply_schema_contract 
+            # inside the Ray workers to prevent double-handling.
             service = ServiceFactory.get_service(
-                source_type=ctx.source_type,
-                account_id=job.account_id,
-                **job.job_config.db_config,
+                job.context.source_type,
+                **job.context.source_params
             )
-
-            # 3. Get the Ingest Strategy (Database, File, etc.)
-            # based on job_config (e.g., job_config.source_type = "s3")
-            reader: Reader = ReaderFactory.get_strategy(ctx.source_type)
+            reader: Reader = ReaderFactory.get_reader(ctx.source_type)
             LOG.info(f"Executing raw ingestion using strategy: {ctx.source_type}")
 
-            # The strategy now yields Polars DataFrames or Iterators
-            # to be written to the local folder as parquet
-            dest_folder: Path = Path(job.folder) / "raw"
-            dest_folder.mkdir(parents=True, exist_ok=True)
+            # 3. We create a temporary physical folder in 'data'
+            data_store = JOB_STEPS_BASE_DIR / "data" / self.name / f"{job.id}_{int(time.time())}"
+            data_store.mkdir(parents=True, exist_ok=True)
 
-            # Fetch and convert
             # 4. Execute the Ingestion
             # This calls reader.fetch() which:
             #   a. Asks service for work units (SQL queries/File paths)
             #   b. Distributes tasks to Ray workers
             #   c. Workers call service.fetch_stream() [Protected by Circuit Breaker]
-            #   d. Streams results to Parquet files (keeping RAM < 2GB)
+            #   d. Workers call _apply_schema_contract
+            #   e. Streams results to Parquet files (keeping RAM < 2GB)
             extracted_files = reader.fetch(
                 service=service,
-                target_folder=dest_folder,
+                target_folder=data_store,
                 context=ctx,
             )
 
@@ -392,7 +325,7 @@ class RawStep(JobStep):
             for f in extracted_files:
                 path = f["path"]
 
-                # 1. Calculate Checksum (MD5 or SHA256)
+                # A. Calculate Checksum (MD5 or SHA256)
                 checksum = self._calculate_checksum(f["path"])
 
                 # Use Polars to get the schema of this specific file
@@ -400,7 +333,7 @@ class RawStep(JobStep):
                 file_schema = pl.read_parquet_schema(path)
                 all_schemas.append(file_schema)
 
-                # 2. Build FileInfo
+                # B. Build FileInfo
                 file_infos.append(
                     FileInfo(
                         path=str(f["path"]),
@@ -411,15 +344,15 @@ class RawStep(JobStep):
                 )
                 total_rows += f["rows"]
 
-            # 2. CALCULATE FINAL SCHEMA (The "Union" of all files)
+            # c. CALCULATE FINAL SCHEMA (The "Union" of all files)
             # This identifies all columns across all files, handling API drift.
             final_schema_dict = self._merge_schemas(all_schemas)
 
-            # 3. Create Payload and Finalize
+            # 6. Create Payload and Finalize
             # We map the strategy output to our RawPayload schema
             payload = RawPayload(
                 step_outcome="COMPLETED",
-                artifact_folder=str(dest_folder),
+                artifact_folder=str(data_store), #?: Point to virtual or physical folder
                 file_count=len(file_infos),
                 files=file_infos,
                 raw_row_count=total_rows,
@@ -431,6 +364,9 @@ class RawStep(JobStep):
 
             # 4. State Transition
             return self._transit(job)
+        except ClientCantConnect as ccc:
+            LOG.error("Halt by client connection.", error=str(ccc))
+            raise JobBlocked(str(ccc)) from ccc
         except CircuitBreakerTripped as cb:
             LOG.error("Halt by circuit breaker.", error=str(cb))
             raise
@@ -478,47 +414,74 @@ class TransformStep(JobStep):
         return "transform"
 
     def execute(self, job: "Job") -> str:
-        self.prepare_stage(job)  # Pivots job.folder to .../transform/
+        """
+        Decision: Use LazyFrame Streaming for 50M rows.
+        By reading from the 'active/raw' symlink, we ensure we are 
+        always processing the latest sanitized data without needing 
+        to know the specific physical timestamped folder.
+        """
+        from src.core.transform.transform import TransformFactory
         start_time = time.perf_counter()
 
         try:
-            # 1. Access the previous stage's data via Manifest
-            manifest = self.get_manifest(job)
-            raw_meta = manifest.raw  # The IngestedMetadata struct
-            if not raw_meta:
-                raise ValueError("Raw metadata not found in manifest.")
+            with ParquetHandler() as handler:
+                # 1. Initialize the LazyFrame (Logical Plan)
+                # Decision: Use the 'active' symlink path. 
+                # Polars scans the metadata of all part_*.parquet files instantly.
+                raw_path = str(JOB_STEPS_BASE_DIR / "active" / job.id / "raw" / "part_*.parquet")
+                lf = handler.to_df(raw_path)
+            
+                # 2. Apply Business Logic (Transformers)
+                # These add to the 'Plan' but do not execute yet.
+                # Decision: Use the factory to apply bitmasking and custom logic.
+                transformer = TransformFactory.get_transformer(job.context)
+                tr_lf = transformer.apply(lf)
 
-            # 2. Get the Strategy (Custom or Default)
-            strategy = TransformFactory.get_strategy(job.id)
 
-            # 3. Create the LazyFrame from the Bronze path
-            lf = self.read_parquet_source(raw_meta.artifact_folder)
-
-            # 4. Apply transformation logic (Lazy)
-            # We pass the LazyFrame to the strategy to add operations to the plan
-            transformed_lf = strategy.apply(lf, job.job_config)
-
-            # 5. Sink to Silver folder
-            results = self.sink_to_parquet(transformed_lf, job.folder)
-
-            # 6. Build the RefinedMetadata (SilverPayload)
+                # 3. Stream to Physical Storage
+                # Decision: Use sink_parquet via our handler's execution-aware logic.
+                # This triggers the Polars Rust engine to stream chunks through the plan.
+                data_store = JOB_STEPS_BASE_DIR / "data" / self.name / f"{job.id}_{int(time.time())}"
+                data_store.mkdir(parents=True, exist_ok=True)
+                
+                # 4. Decision: Use a partitioned sink. 
+                # This creates part-0.parquet, part-1.parquet, etc., in the data_store folder.
+                # This is much safer for 2GB RAM as it flushes buffers more frequently.
+                handler.from_df(tr_lf, str(data_store))
+                
+            # 5. DECISION: Get accurate stats after the stream is closed
+            # scan_parquet + select(len) on the OUTPUT directory reads only the 
+            # file footers. This is near-instant even for 50M rows.
+            stats = (
+                pl.scan_parquet(str(data_store / "*.parquet"))
+                .select(
+                    count=pl.len(),
+                    schema=pl.map_batches(lambda _: str(getattr(tr_lf, "schema"))) 
+                )
+                .collect() # This is safe because it's only 1 row of metadata
+            )
+            
+            # 6. Build the RefinedMetadata
             duration_ms = int((time.perf_counter() - start_time) * 1000)
-
+            
             payload = TransformPayload(
                 step_outcome="COMPLETED",
-                logic_version=getattr(strategy, "version", "1.0.0"),
-                artifact_path=str(job.folder),
-                output_record_count=results["rows"],
+                logic_version=getattr(transformer, "version", "1.0.0"),
+                artifact_folder=str(data_store),
+                output_record_count=stats["count"][0],
                 schema_validation_passed=True,  # Strategy could add validation logic
-                refined_schema=results["schema"],
+                refined_schema=stats["schema"][0],
                 processing_duration_secs=duration_ms,
             )
-
-            self.finalize(job, results=payload)
+            
+            # 4. Finalize & Flip the Link
+            # Decision: Create active/{job_id}/transform -> ../../data/transform/{dir}
+            # This makes the transformed data available for the WriteStep.
+            self.finalize(job=job, data_folder=data_store, results=payload)
             return self._transit(job)
 
         except Exception as e:
-            self.finalize(job, exception=e)
+            self.finalize(job=job,  exception=e)
             raise
 
 
@@ -534,47 +497,38 @@ class WriteStep(JobStep):
         return "write"
 
     def execute(self, job: "Job") -> str:
-        
-
-        self.prepare_stage(job)
         start_time = time.perf_counter()
 
         try:
+            # 1. Resolve logical input (The partitioned parquet files)
+            source_dir = JOB_STEPS_BASE_DIR / "active" / job.id / "transform"
+        
             # 1. Get the Service (Securely initialized on Ray worker via ServiceFactory)
             service = ServiceFactory.get_service(
-                job.sink_type, job.account_id, **job.sink_config
+                job.context.sink_type, **job.context.sink_config
             )
 
             # 2. Get the behavioral Strategy
             loader = Loader()
 
-            # 3. Create Context
-            context = WriteContext(
-                target=job.target_table,
-                partition_col=job.partition_col,
-                partition_value=job.partition_value,
-            )
-
             # 2. PHASE 1: LOAD TO STAGING
-            manifest: JobManifest = self.get_manifest(job)
             staging_results = loader.load(
-                service, 
-                source_dir=manifest.transform.artifact_folder, 
-                target_table=job.job_config.target_destination
+                service=service,
+                source_dir=source_dir,
+                target_table=job.context.target_destination,
             )
 
             # 3. Finalize Manifest
             payload = WritePayload(
                 step_outcome="COMPLETED",
-                target_identifier=job.job_config.target_destination,
-                sink_type=job.job_config.destination_type,
+                target_identifier=job.context.target_destination,
+                sink_type=job.context.destination_type,
                 staging_artifact=(
-                    staging_results.staging_path
-                    or staging_results.staging_table,
+                    staging_results.staging_path or staging_results.staging_table,
                 ),
                 rows_inserted=staging_results.rows,
-                partition_col=job.partition_col,
-                partition_value=job.partition_value,
+                partition_col=job.context.partition_col,
+                partition_value=job.context.partition_value,
                 db_connection_id=service.connection_id,
                 duration_secs=int((time.perf_counter() - start_time) * 1000),
             )
@@ -608,7 +562,6 @@ class AuditStep(JobStep):
         return "audit"
 
     def execute(self, job: "Job") -> str:
-        self.prepare_stage(job)
         start_time = time.perf_counter()
 
         try:
@@ -693,6 +646,10 @@ class AuditStep(JobStep):
 
 
 class PublishStep(JobStep):
+    """
+    Decision: The PublishStep makes the data 'Public'.
+    We use the context to identify the target 'Prod' table vs 'Staging' table.
+    """
     manifest: PublishPayload
 
     @property
@@ -704,7 +661,6 @@ class PublishStep(JobStep):
         return "publish"
 
     def execute(self, job: "Job") -> str:
-        self.prepare_stage(job)
         start_time = time.perf_counter()
 
         try:
@@ -715,7 +671,7 @@ class PublishStep(JobStep):
 
             # 1. Get the Service (Securely initialized on Ray worker via ServiceFactory)
             service = ServiceFactory.get_service(
-                job.sink_type, job.account_id, **job.sink_config
+                job.context.sink_type, **job.context.sink_config
             )
 
             # 2. Get the behavioral Strategy
@@ -723,9 +679,9 @@ class PublishStep(JobStep):
 
             # 3. Create Context
             context = WriteContext(
-                target=job.target_table,
-                partition_col=job.partition_col,
-                partition_value=job.partition_value,
+                target=job.context.target_table,
+                partition_col=job.context.partition_col,
+                partition_value=job.context.partition_value,
             )
 
             # 2. FINISH THE JOB
@@ -735,12 +691,13 @@ class PublishStep(JobStep):
                 staging_info=write_meta.staging_artifact,
                 write_ctx=context,
             )
-
+            LOG.info("Job Published", job_id=job.id, table=job.context.target_destination)
+            
             # 3. PAYLOAD: The 'Success Receipt'
-            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            duration_ms = round(time.time() - start_time, 2)
             payload = PublishPayload(
                 step_outcome="COMPLETED",
-                final_destination=write_meta.target_identifier,
+                final_destination=job.context.target_identifier,
                 promotion_duration_secs=duration_ms,
                 completed_at=datetime.now().isoformat(),
             )
@@ -765,35 +722,37 @@ class CompleteStep(JobStep):
         return "complete"
 
     def execute(self, job: "Job") -> str:
+        """
+        Decision: The 'Zero-Footprint' Protocol.
+        We preserve the audit trail and the output data in long-term storage
+        while reclaiming high-speed local disk space.
+        """
         from src.services.factory import ServiceFactory
         from src.services.file import StorageService
 
-
-        self.prepare_stage(job)
-        manifest = self.get_manifest(job)
-
+        
+        self.manifest = self.get_manifest(job)
+        
         # 1. Initialize Storage Service for Archival
         # We retrieve the 'archive' service defined in the job configuration
-        fs: StorageService = ServiceFactory.get_service(
-            service_type=job.job_config.archive_type, # e.g., "s3" or "local"
-            **job.job_config.archive_config
+        object_store: StorageService = ServiceFactory.get_service(
+            type=job.context.archive_type,  # e.g., "s3" or "local"
+            **job.context.archive_config,
         )
 
         try:
             # 2. OPTIONAL ARCHIVAL
             # Subject to privacy requirements defined in job_config
             final_archive_path = None
-            if job.job_config.enable_archival:
-                # Define the unique destination: archive_base/job_id/run_id/
-                dest_path = f"{job.job_config.archive_base_path}/{job.id}/{job.run_id}"
-                
-                # We archive the 'raw' folder captured in the RawStep manifest
-                raw_folder = manifest.raw.artifact_folder
+            if job.context.enable_archival:
+                # 1. Archive Parquet Files
+                # We move data from the high-speed 'data/' vault to the 'archive/' vault.
+                # This includes both the Raw (Sanitized) and Transform results.
+                self._archive_parquet_data(object_store, job)
                 
                 # Service-level move (2GB RAM safe)
-                final_archive_path = fs.archive_data(
-                    source_dir=raw_folder,
-                    archive_path=dest_path
+                final_archive_path = object_store.archive_data(
+                    source_dir=raw_folder, archive_path=dest_path
                 )
 
             # 3. CLEANUP VERIFICATION
@@ -805,7 +764,7 @@ class CompleteStep(JobStep):
                     shutil.rmtree(target)
 
             # 4. Calculate Timestamps and Duration
-            start_ts = datetime.fromisoformat(manifest.raw.ingestion_started_at)
+            start_ts = datetime.fromisoformat(manifest.start.ingestion_started_at)
             end_ts = datetime.now()
             duration_secs = (end_ts - start_ts).total_seconds()
 
@@ -816,10 +775,19 @@ class CompleteStep(JobStep):
                 total_duration_secs=round(duration_secs, 2),
                 cleanup_verified=True,
                 archival_path=final_archive_path,
-                retention_expiry=self._calculate_expiry(job, end_ts)
+                retention_expiry=self._calculate_expiry(job, end_ts),
             )
 
             self.finalize(job, results=payload)
+            
+            # 2. Store Manifest in Database (Current Execution Table)
+            # Decision: By moving manifest data to SQL, we allow the BI team to 
+            # monitor job performance without needing file system access.
+            self._record_execution_to_db(job)
+            
+            # 4. Final Finalize (Post-Purge)
+            # We don't use a symlink here; we just record SUCCESS in the DB/State Store
+            LOG.info("Job lifecycle complete. Workspace purged.", job_id=job.id)
 
             # This marks the final state of the manifest
             return "FINISH"
@@ -827,10 +795,62 @@ class CompleteStep(JobStep):
         except Exception as e:
             self.finalize(job, exception=e)
             raise
+
+    def _archive_parquet_data(self, object_store: StorageService, job: "Job") -> None:
+        """
+        Decision: Move files to the Archive location defined in the Context.
+        Standardizing on: archive/{job_id}/{run_id}/{step}/
+        """
+        archive_root = f"{job.context.archive_base_path}/{job.id}/{job.run_id}"
         
-    def _calculate_expiry(self, job, end_timestamp: datetime) -> str:
+        # We loop through the steps we want to keep
+        for step in ["raw", "transform"]:
+            # Follow the active symlink to find the physical data
+            src_folder = job.folder.resolve() / step
+            if src_folder.exists():
+                dest_folder = f"{archive_root}/{step}"
+                # target_archive.mkdir(parents=True, exist_ok=True)
+                final_archive_path = object_store.archive_data(
+                    source_dir=src_folder, archive_path=dest_folder
+                )
+                
+    def _calculate_expiry(self, job: "Job", end_timestamp: datetime) -> str:
         # e.g., standard 7-year retention or 30-day GDPR limit
+        """
+        Calculates the retention expiry date for a job.
+
+        Uses the retention_days attribute from the JobContext if present,
+        otherwise falls back to a 7-year default.
+
+        Returns an ISO-formatted string representing the retention expiry date.
+        """
         retention_days = getattr(
-            job.job_config, "retention_days", 2555
+            job.context, "retention_days", 2555
         )  # 7 years default
         return (end_timestamp + timedelta(days=retention_days)).date().isoformat()
+    
+    def _record_execution_to_db(self, job: "Job"):
+        """
+        Decision: Upsert final stats into the 'job_execution_history' table.
+        This provides a high-level audit trail for 50M row jobs.
+        """
+        db = ServiceFactory.get_service(job.context.target_type)
+        manifest = self.get_manifest(job) # Final read of the audit trail
+        
+        db.execute_query(
+            "INSERT INTO job_execution_history (job_id, run_id, rows_in, rows_out, duration) VALUES (%s, %s, %s, %s, %s)",
+            (job.id, job.run_id, manifest.raw.total_rows, manifest.write.rows_written, manifest.total_duration)
+        )
+        
+    def _purge_workspace(self, job: "Job"):
+        """
+        Decision: Immediate reclamation of disk space.
+        Deletes the active symlink folder and any remaining stray data.
+        """
+        if job.folder.exists():
+            shutil.rmtree(job.folder)
+            
+        # Also clean up any 'data/' subfolders that weren't archived
+        for step in ["raw", "transform"]:
+            physical_data = JOB_STEPS_BASE_DIR / "data" / step / f"{job.id}_*"
+            # Logic to glob and delete specifically for this job_id

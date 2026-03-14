@@ -1,11 +1,13 @@
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Generator
 
-import polars as pl
+import polars as pl # type: ignore
 
 from libs.clients.database.base import DBClient
+from libs.clients.base import ClientCantConnect
 
 if TYPE_CHECKING:
-    from adbc_driver_postgresql.dbapi import Connection
+    from adbc_driver_postgresql.dbapi import Connection # type: ignore
 
 class PostgresClient(DBClient):
     def __init__(self, **config: Any) -> None:
@@ -13,13 +15,22 @@ class PostgresClient(DBClient):
     
     def connect(self) -> Connection:
         # INLINE IMPORT: Prevents pickling the driver across the network
-        import adbc_driver_postgresql.dbapi as adbc_pg
+        import adbc_driver_postgresql.dbapi as adbc_pg # type: ignore
         
         if not self._connection:
-            self.uri = f"postgresql://{self.config['user']}:{self.config['password']}@{self.config['host']}/{self.config['database']}"
-            self._connection = adbc_pg.connect(self.uri)
+            try:
+                self.uri = f"postgresql://{self.config['user']}:{self.config['password']}@{self.config['host']}/{self.config['database']}"
+                self._connection = adbc_pg.connect(self.uri)
+                self._ping(self._connection)
+            except Exception as e:
+                raise ClientCantConnect(str(e))
         return self._connection
 
+    def _ping(self, conn: Connection) -> None:
+            # We don't use self.sql() here to avoid recursive reconnect logic
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+ 
     def get_load_strategy(self, table_name: str, num_partitions: int = 10) -> list[str]:
         # Physical partitioning using Postgres hidden ctid column
         return [
@@ -51,8 +62,8 @@ class PostgresClient(DBClient):
                 
     def reconnect(self) -> None:
         if self.connection:
-            try: self.connection.close()
-            except: pass
+            with suppress(Exception):
+                self.connection.close()
         self.connect()
 
     def write_table(self, lf: pl.LazyFrame, table_name: str) -> None:

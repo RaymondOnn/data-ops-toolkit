@@ -60,7 +60,13 @@ class DatabaseService(Service):
         pass
 
     @abstractmethod
-    def promote_data(self, staging_table: str, target_table: str, mode: str):
+    def promote_data(
+        self, 
+        staging_table: str, 
+        target_table: str, 
+        partition_col: str, 
+        partition_val: str
+    ) -> None:
         """Phase 2: Moves data to production (Swap/Merge/Append)."""
         pass
 

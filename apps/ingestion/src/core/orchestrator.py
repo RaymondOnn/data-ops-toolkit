@@ -1,19 +1,22 @@
 import sys
 import time
+import shutil
 from datetime import datetime
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 import msgspec
 import structlog
 
-from libs.resilence.heartbeat import Heartbeat
+from src.core.context.job import JobContext
 from src.core.engine import IngestionEngine
+from src.core.models.job.base import Job, JobStatus
 from src.core.state import StateStore
-from src.utils.constants import ALWAYS_ON_MODE, JOB_STEPS_BASE_DIR
-from src.core.entities.job.base import Job, JobStatus
-from src.utils.dates import is_expired, epoch_to_iso
 from src.services.database import DatabaseService
+from src.utils.constants import ALWAYS_ON_MODE, JOB_STEPS_BASE_DIR
+from src.utils.dates import epoch_to_iso, is_expired
+
+from libs.resilence.heartbeat import Heartbeat
 
 LOG = structlog.getLogger(__name__)
 PID_FILE = Path(".daemon.pid")
@@ -78,7 +81,15 @@ class Orchestrator:
 
 
     def _start_always_on_loop(self) -> None:
-        """Used for Always-On Mode"""
+        """
+        ARCHITECTURAL NOTE: We use a Polling Control Loop instead of an Event Watchdog.
+        1. Portability: Works identically on EC2 (local disk) and K8S (EFS/NFS) 
+        where inotify events often fail to propagate across pods.
+        2. Backpressure: Prevents 'thundering herd' spikes by batching signal 
+        processing into predictable 'ticks'.
+        3. Self-Healing: Every tick performs a full state reconciliation, 
+        ensuring we recover from crashes automatically.
+        """
         self.heartbeat.ready()    
         
         try:
@@ -157,21 +168,22 @@ class Orchestrator:
     def _is_job_finished(self, job_id: str) -> bool:
         """
         Checks if all tables associated with a job_id have cleared the pipeline.
+        Decision: Enum-driven Lifecycle Check.
+        A job is finished if no associated runs are in an 'Active' state.
         """
-        # Define all prefixes that represent 'active' work
-        active_stages = ["start", "raw", "transform", "audit", "load"]
+        # 1. Physical Workspace Check (The primary breadcrumb)
+        active_path = JOB_STEPS_BASE_DIR / "active" / f"{job_id}_{run_id}"
+        if active_path.exists():
+            return False
+
+        # 2. Logical State Check via StateStore Mirror
+        # We look for any run associated with this job_id that is still in an 'Active' state
+        active_runs = [
+            run for run in self.state_store._mirror.values() 
+            if run["job_id"] == job_id and run["status"] in JobStatus.active_statuses()
+        ]
         
-        with self.engine.lock:
-            for key in self.engine.cache.iterkeys():
-                # Key format is 'stage:job_id:table_name'
-                if ":" in key:
-                    prefix, k_job_id, table = key.split(":", 2)
-                    if k_job_id == job_id and prefix in active_stages:
-                        # Found at least one table still in progress
-                        return False
-        
-        # If we get here, no keys for this job_id exist in active stages
-        return True
+        return len(active_runs) == 0
 
     def _evaluate_triggers(self, job_records: list[dict[str, Any]]) -> None:
         """
@@ -184,8 +196,12 @@ class Orchestrator:
         >0: Grace Period (True if within bounds)
         """
         def provision_run(record: dict[str, Any]) -> None:
-            from src.core.trigger import TriggerEvent, FileTriggerEvent, TimeTriggerEvent
-            
+            from src.core.trigger import (
+                FileTriggerEvent,
+                TimeTriggerEvent,
+                TriggerEvent,
+            )
+
             # Map of trigger types to their logic classes
             trigger_map: dict[str, TriggerEvent]= {
                 "CRON": TimeTriggerEvent(),
@@ -251,17 +267,15 @@ class Orchestrator:
         job_id: str, 
         overrides: dict[str, Any] | None = None
     ) -> None:
-        from src.core.context.job import resolve_job_context
-        from src.core.entities.job.steps.base import _JOB_ORDER
+        from src.core.context.job import JobContextBuilder
+        from src.core.models.job.steps.base import _JOB_ORDER
         
         overrides = overrides or {}
         
         # 1. Load the latest YAML via Dynaconf for overrides
         # This returns a list (1 to N configs depending on table count)
-        job_contexts = resolve_job_context(
-            job_id=job_id, 
-            runtime_overrides=overrides
-        )
+        factory = JobContextBuilder("app.yaml", "job.yaml", env="production")
+        job_contexts = factory.build_job_contexts(job_id=job_id, overrides=overrides)
 
         for job_ctx in job_contexts:
             #2. Create Initial Folder Structure
@@ -292,11 +306,11 @@ class Orchestrator:
         Scans the HOLD and QUARANTINE directories to re-queue stuck jobs.
         Uses the directory structure as the source of truth when the DB is stale.
         """
-        from src.core.entities.job.steps.terminal import HoldStep
+        from src.core.models.job.steps.terminal import HoldStep
         
         LOG.info("Starting recovery sweep...")
         # We focus on HOLD for auto-resumption
-        hold_base = Path(JOB_STEPS_BASE_DIR) / "HOLD"
+        hold_base = JOB_STEPS_BASE_DIR / "HOLD"
         if not hold_base.exists():
             return
 
@@ -354,35 +368,76 @@ class Orchestrator:
     
     def _handle_expiry(self) -> None:
         """
-        Scans the StateStore mirror for BLOCKED jobs that have passed their TTL.
+        Scans for jobs that have passed their TTL and purges their workspaces.
         """
         now = time.time()
-        for run_id, data in self.state_store._mirror.items():
-        # Only check jobs that are currently waiting/stuck
-            if data["status"] in [JobStatus.BLOCKED]:
+        # List to prevent 'dictionary changed size during iteration'
+        runs_to_check = list(self.state_store._mirror.values())
+
+        for data in runs_to_check:
+            # We only expire jobs that are stuck in a non-terminal state
+            if data["status"] in JobStatus.active_statuses():
                 try:
-                    job = Job.from_folder(Path(data["folder_path"]))
+                    # Use get_context to check expiry without a full manifest parse
+                    job_path = Path(data["folder_path"])
+                    if not job_path.exists():
+                        continue
+
+                    # Load only the config/context (fast)
+                    ctx = self.get_context_from_path(job_path)
                     
-                    expires = job.job_context.expires_at
-                    if is_expired(expires):
-                        LOG.warning(
-                            f"Run {run_id} expired at {epoch_to_iso(expires)}. "
-                            f"Current time is {epoch_to_iso(now)}."
-                        )
-                        job.manifest.job_status = JobStatus.EXPIRED
-                        job.save_manifest()
-                        self.state_store.sync_from_folder(job.folder)
+                    if is_expired(ctx.expires_at):
+                        LOG.warning("Job TTL reached. Initiating purge.", 
+                                    job_id=data["job_id"], run_id=data["run_id"])
+                        
+                        # 1. Perform physical cleanup
+                        self._cleanup_workspace(data["job_id"])
+                        
+                        # 2. Update State Store to terminal status
+                        self.state_store.update_run(data["run_id"], {
+                            "status": JobStatus.EXPIRED,
+                            "step": "cleanup"
+                        })
+                        
                 except Exception as e:
-                    LOG.error(f"Expiry check failed for {run_id}: {e}")
+                    LOG.error("Expiry check failed", run_id=data["run_id"], error=str(e))
 
-        # 4. Physical Cleanup (Optional: Move to a 'TRASH' folder or delete)
-        for job in expired_runs:
-            self._cleanup_workspace(job)
+        self.state_store.flush()    
+        
+    def get_context_from_path(self, folder: Path) -> "JobContext":
+        """
+        Helper to load the JobContext from the active workspace.
+        Standardized to look for 'config.json' directly.
+        """
+        from src.core.context.job import JobContext
+        
+        # In our refactor, we standardized the filename to config.json
+        config_path = folder / "config.json"
+        
+        if not config_path.exists():
+            # Fallback for legacy naming if necessary, otherwise stick to strict
+            raise FileNotFoundError(f"Missing config.json in {folder}")
 
-    def _cleanup_workspace(self, job: Job):
-        """Removes or archives the physical data for expired snapshot jobs."""
-        # Logic to delete the /data/HOLD/job_id/run_id folder to save space
-        pass
+        with open(config_path, "rb") as f:
+            # msgspec handles the mapping to JobContext class automatically
+            return msgspec.json.decode(f.read(), type=JobContext)
+
+    def _cleanup_workspace(self, job_id: str) -> None:
+        """
+        The 'Janitor' method. Deletes active links and physical data.
+        """
+        # 1. Remove active links
+        active_path = JOB_STEPS_BASE_DIR / "active" / job_id
+        if active_path.exists():
+            shutil.rmtree(active_path)
+        
+        # 2. Remove physical data vaults (raw, transform, etc)
+        # Search data/ folders for {job_id}_*
+        data_root = JOB_STEPS_BASE_DIR / "data"
+        for step_dir in data_root.iterdir():
+            if step_dir.is_dir():
+                for physical_folder in step_dir.glob(f"{job_id}_*"):
+                    shutil.rmtree(physical_folder)
     
     def _process_worker_signals(self) -> None:
         """
@@ -396,35 +451,99 @@ class Orchestrator:
         if not signal_dir.exists():
             return
 
+        # Define our signals and whether they require a deep manifest sync
+        # .sync = Light heartbeat | .done = Final deep audit
+        signals = {
+            "*.sync": False,
+            "*.done": True
+        }
+        
         # iterdir() returns a generator, which is memory efficient
         # This glob automatically ignores files starting with "."
-        for crumb in signal_dir.glob("[!.]*.sync"):
-            try:
-                # 1. Parse metadata from filename
-                # Example: 20240101-abc.transform.3.sync
-                # Metadata is now primarily in the manifest; 
-                # filename is just a pointer to the run_id
-                run_id = crumb.stem.split(".")[0]
-                # 2. Find the folder path from DB
-                run_record = self.state_store.get_run(run_id)
-                if not run_record:
-                    LOG.error("Signal received for unknown run", run_id=run_id)
-                    continue
-                
-                # Resolve the path using our new utility
-                physical_path = resolve_current_path(
-                    job_id=run_record['job_id'],
-                    run_id=run_id,
-                    status=run_record['status'],
-                    step=run_record['step']
-                )
-                
-                # 3. Sync manifest -> DB
-                self.state_store.sync_from_folder(Path(physical_path))
-                
-                # 4. 'Eat' the breadcrumb
-                crumb.unlink(missing_ok=True)
-                LOG.debug("Signal processed", run_id=run_id)
-                
-            except Exception as e:
-                LOG.error(f"Failed to process breadcrumb {crumb.name}: {e}")
+        for pattern, is_deep_sync in signals.items():
+            for crumb in signal_dir.glob("[!.]*.sync"):
+                try:
+                    # 1. Parse metadata from filename
+                    # Example: 20240101-abc.transform.3.sync
+                    # Metadata is now primarily in the manifest; 
+                    # filename is just a pointer to the run_id
+                    run_id = crumb.stem.split(".")[0]
+                    # 2. Find the folder path from DB
+                    run_record = self.state_store.get_run(run_id)
+                    if not run_record:
+                        LOG.error("Signal received for unknown run", run_id=run_id)
+                        continue
+                    
+                    # Resolve the path using our new utility
+                    physical_path = resolve_current_path(
+                        job_id=run_record['job_id'],
+                        run_id=run_id,
+                        status=run_record['status'],
+                        step=run_record['step']
+                    )
+                    
+                    # 3. Sync manifest -> DB
+                    self.state_store.sync_from_folder(
+                        Path(physical_path),
+                        deep_sync=is_deep_sync
+                    )
+                    
+                    # 4. 'Eat' the breadcrumb
+                    crumb.unlink(missing_ok=True)
+                    LOG.debug("Signal processed", run_id=run_id)
+                    
+                except Exception as e:
+                    LOG.error(f"Failed to process breadcrumb {crumb.name}: {e}")                
+                    LOG.debug("Signal processed", run_id=run_id)
+    
+    def _terminate_job(self, job: Job, status: JobStatus, reason: str = None) -> None:
+        """
+        Controlled Crash Handler.
+        Uses the Job's internal status updater to ensure consistency.
+        """
+        LOG.error("Terminating job", job_id=job.id, status=status, reason=reason)
+
+        # 1. Update the Job state
+        # We pass the reason as the payload so it gets serialized into the manifest
+        # update_status handles the msgspec encoding and file write internally
+        job.update_status(
+            step_name=job.current_step, 
+            status=status, 
+            payload={"termination_reason": reason} if reason else None,
+            is_final=True  # This triggers the .audit breadcrumb for the StateStore
+        )
+        
+        # 2. Sync the StateStore
+        # Since update_status created the .audit file, we tell the StateStore 
+        # to perform its final deep sync to pull the failure details into the DB.
+        self.state_store.sync_from_folder(job.id, job.run_id)
+        
+        # 3. Cleanup logic (Optional: move to quarantine or delete)
+        if status == JobStatus.EXPIRED:
+            self._cleanup_workspace(job.id)
+    
+    def _check_for_manual_commands(self) -> None:
+        """
+        Checks for 'Command Files' dropped by CLI users/scripts.
+        This acts as our inter-process communication (IPC).
+        """
+        cmd_dir = Path(JOB_STEPS_BASE_DIR) / "signals"
+        
+        # Map command filenames to internal methods
+        commands = {
+            "RECOVER_ALL.cmd": self._handle_recovery,
+            "PURGE_EXPIRED.cmd": self._handle_expiry,
+            "RELOAD_CONFIG.cmd": self._reload_internal_config,
+        }
+
+        for cmd_file, method in commands.items():
+            cmd_path = cmd_dir / cmd_file
+            if cmd_path.exists():
+                LOG.info("Manual command received", command=cmd_file)
+                try:
+                    # 1. Execute the command
+                    method()
+                    # 2. 'Eat' the command file so it doesn't run again next tick
+                    cmd_path.unlink()
+                except Exception as e:
+                    LOG.error("Failed to execute manual command", cmd=cmd_file, error=e)

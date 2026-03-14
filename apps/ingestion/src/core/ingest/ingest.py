@@ -40,6 +40,8 @@ class DataReader(Reader):
                 "source_type": context.source_type,
                 "config": service.config,  # Connection params
                 "account_id": service.account_id,
+                "schema_items": context.schema_items
+                
             }
             for unit in work_units
         ]
@@ -48,18 +50,29 @@ class DataReader(Reader):
         ds = ray.data.from_items(task_payloads)
 
         # 3. Define the extraction task (Runs in parallel on Ray Workers)
-        def fetch_task(item: dict[str, Any]) -> pl.DataFrame:
+        def fetch_task(payload: dict[str, Any]) -> pl.DataFrame:
             """This function runs on the Ray Worker (K8S Pod)."""
             # 1. Importing this triggers the __init__.py discovery logic
             # and populates ServiceFactory.registry automatically.
             from src.services.factory import ServiceFactory
+            from src.core.schema import apply_schema_contract
 
             # 2. Get the singleton instance for this process
             # It will use the Diskcache to check if it's allowed to run.
             service = ServiceFactory.get_service(
-                item["source_type"], item["account_id"], **item["config"]
+                payload["source_type"], payload["account_id"], **payload["config"]
             )
-            return pl.concat(list(service.fetch_df(item["unit"])))
+            
+            # 1. Extraction
+            df: pl.DataFrame = service.fetch_df(payload["unit"])
+            
+            # 2. Guarding (Function Call)
+            # We pass the schema items that were sent in the payload            
+            return apply_schema_contract(
+                df, 
+                payload.get("schema_items", [])
+            )
+
 
         # 4. Map the task across the cluster
         # .iter_batches() makes this a generator!

@@ -13,16 +13,29 @@ class OracleClient(DBClient):
 
     def connect(self) -> Connection:
         import oracledb
+        from libs.clients.base import ClientCantConnect
+
 
         # Thin mode: no instant client required
-        if not self._connection:
+        if self._connection:
+            return
+        
+        try:
             self._connection = oracledb.connect(
                 user=self.config["user"],
                 password=self.config["password"],
                 dsn=self.config["dsn"],
             )
-        return self._connection
-
+            self._ping(self._connection)
+        except Exception as e:
+            raise ClientCantConnect(str(e))
+        else:
+            return self._connection
+            
+    
+    def _ping(self, conn: Connection) -> None: 
+        conn.ping()
+            
     def get_load_strategy(self, table_name: str, partitions: int = 10) -> list[str]:
         """
         Uses ORA_HASH to create N virtual partitions without needing a PK.

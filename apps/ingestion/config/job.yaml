@@ -1,0 +1,81 @@
+job_id: daily_ingestion_sync
+
+# JOB-LEVEL CONFIG (Applies to all datasets in this job)
+archive:
+  enable_archival: true
+  service_ref: "s3_archive"  # archive_type
+
+datasets:
+  # DATASET 1: Standard 50M row import
+  orders:
+    target_destination: "production.orders"
+    source_path: "s3://landing/orders/*.parquet"
+    num_partitions: 16
+    # Inherits job-level archive
+
+    load_mode: delta # Loading Strategy: delta | snapshot 
+    source_params:
+      # For DatabaseReader
+      filter_sql: "status = 'COMPLETED' AND updated_at >= {{start_date}}"
+      bind_params:
+        start_date:
+          type: "relative_date"
+          offset_days: -2
+          format: "YYYY-MM-DD"
+          wrap_quotes: true
+      # For APIReader
+      endpoint: "/v1/customers"
+      query_params:
+        include_deleted: false
+        region: "EMEA"
+
+
+    schema_file: "orders.csv"
+    validation:
+      # Threshold-based checks
+      allow_missing_percent: 0.02 
+      # Row-level logic
+      expectations:
+        - "amount <= 1000000" # Flag outliers
+        - "order_date <= today()"
+      # Action on failure
+      on_failure: "quarantine" # options: abort | warn | quarantine
+
+    transform:
+      # Standard declarative transforms
+      standard:
+        # Operation-first approach: "Do X to these columns"
+        - op: "lowercase"
+          cols: ["email", "status", "category_code"]
+          
+        - op: "trim"
+          cols: ["email", "address_line_1"]
+
+        - op: "fill_null"
+          cols: ["amount", "tax_rate"]
+          value: 0.0
+
+        - op: "round"
+          cols: ["amount"]
+          precision: 2
+
+        - op: "apply_masking"
+          cols: ["email", "credit_card"] # Refers to the CSV 'masking' logic
+      
+      # Lazy-loaded custom Python logic
+      custom_script: "src.workflows.finance.currency_conversion"
+
+  # DATASET 2: Sensitive Financials (Requires CAS Vault)
+  ledger_entries:
+    target_destination: "finance.ledger"
+    source_path: "s3://landing/ledger/"
+    # OVERRIDE: Specific archival for this dataset
+    archive:
+      archive_type: "cas_archive" 
+      retention_days: 3650 # 10 years for finance
+      
+  # DATASET 3: Temporary Log data (No Archival)
+  internal_logs:
+    target_destination: "staging.logs"
+    archive:
+      enable_archival: false

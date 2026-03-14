@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, Generator
 
-import polars as pl
+import polars as pl # type: ignore
 
 class DBClient(ABC):
     def __init__(self, **config: Any) -> None:
@@ -10,19 +10,25 @@ class DBClient(ABC):
 
 
     @abstractmethod
-    def connect(self):
+    def connect(self) -> None:
         """Specific driver logic to establish self._connection."""
-        pass
+        raise NotImplementedError("Subclasses must implement this method")
+    
+    @abstractmethod
+    def _ping(self) -> None:
+        raise NotImplementedError("Subclasses must implement this method")
     
     @abstractmethod
     def sql(self, query: str) -> list[tuple[Any, ...]]:
         """Yields DataFrames."""
-        pass   
+        raise NotImplementedError("Subclasses must implement this method")
+   
     
     @abstractmethod
     def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
         """Yields DataFrames."""
-        pass   
+        raise NotImplementedError("Subclasses must implement this method")
+      
     
     @abstractmethod
     def get_load_strategy(self, table_name: str, partitions: int = 10) -> list[str]:

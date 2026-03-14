@@ -18,6 +18,8 @@ class ReaderContext(msgspec.Struct):
     num_partitions: int = 10
     # For any source-specific extras (e.g., API keys, custom filters)
     options: Dict[str, Any] = {}
+    schema_items: list[dict[str, Any]] = []
+    
 
     # mode: Literal["single_shot", "partitioned"]
     # work_units: List[List[str]]  # List of file groups to process

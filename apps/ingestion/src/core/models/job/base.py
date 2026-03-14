@@ -1,4 +1,5 @@
 import os
+import shutil
 from pathlib import Path
 from enum import StrEnum
 
@@ -6,8 +7,8 @@ import msgspec
 import structlog
 
 from src.core.context.job import JobContext
-from src.core.entities.job.steps.base import JobStep
-from src.core.entities.job.manifest import JobManifest
+from src.core.models.job.steps.base import JobStep
+from src.core.models.job.manifest import JobManifest
 
 
 
@@ -25,7 +26,7 @@ class JobStatus(StrEnum):
     QUEUED = "QUEUED"       # Picked up by Orchestrator, waiting for Worker
     
     # Active States
-    PREPPING = "PREPPING"   # Worker initialized, manifest created
+    PROVISIONING = "PROVISIONING"   # Worker initialized, manifest created
     RUNNING = "RUNNING"     # Actively processing a step
     
     # Terminal States (End of the road)
@@ -37,6 +38,15 @@ class JobStatus(StrEnum):
     # Wait States (The "Breadcrumb" triggers)
     DEFERRED = "DEFERRED"   # Transient error, Orchestrator will retry later
     BLOCKED = "BLOCKED"     # Manual HOLD or dependency missing
+    
+    
+    @classmethod
+    def active_statuses(cls) -> set:
+        return {cls.QUEUED, cls.PENDING, cls.RUNNING, cls.PROVISIONING}
+
+    @classmethod
+    def terminal_statuses(cls) -> set:
+        return {cls.SUCCESS, cls.FAILED, cls.CANCELLED}
 
 class Job:
     status: JobStatus
@@ -59,42 +69,43 @@ class Job:
         :type step: str
         """
         self.id = job_id
-        self.job_config = job_context
+        self.context = job_context
         self.worker_id = worker_id
         self.run_id = run_id
         self._step = JobStep.get_step_class_by_name(start_step)
-        self.manifest = JobManifest(
-            job_id=job_id, 
-            run_id=run_id,
-            job_status="PENDING",
-            current_step="START"
-        )
-        self.folder: Path | None = None
-        self.manifest_path = None
+        self.init_folder()
 
     @classmethod
-    def from_folder(cls, folder: Path) -> "Job":
-        """Rehydrates a Job instance from its physical workspace."""
-        # Context is stored as <composite_key>_<run_id>_config.json
-        config_files = list(folder.glob("*_config.json"))
-        if not config_files:
-            raise FileNotFoundError(f"No config found in {folder}")
+    def from_folder(cls, folder_path: Path) -> "Job":
+        """
+        Rehydrates a Job object from its active workspace.
+        Standardized to look for 'config.json' and 'manifest.json'.
+        """
+        config_path = folder_path / "config.json"
+        manifest_path = folder_path / "manifest.json"
 
-        with open(config_files[0], "rb") as f:
+        if not config_path.exists():
+            raise FileNotFoundError(f"Cannot rehydrate job: {config_path} missing.")
+
+        # 1. Load the Config/Context
+        with open(config_path, "rb") as f:
+            # Assuming your Job constructor takes a Context object
             ctx = msgspec.json.decode(f.read(), type=JobContext)
 
-        # Re-read manifest for current step/status
-        manifest_path = folder / "manifest.json"
-        with open(manifest_path, "rb") as f:
-            manifest = msgspec.json.decode(f.read(), type=JobManifest)
+        # 2. Load the Manifest
+        if manifest_path.exists():
+            with open(manifest_path, "rb") as f:
+                manifest: JobManifest = msgspec.json.decode(f.read(), type=JobManifest)
 
-        return cls(
-            job_id=ctx.job_id,
-            run_id=manifest.run_id,
-            worker_id="recovery",
-            job_context=ctx,
-            start_step=manifest.current_step
-        )
+            return cls(
+                job_id=ctx.job_id,
+                run_id=manifest.run_id,
+                worker_id="recovery",
+                job_context=ctx,
+                start_step=manifest.current_step
+            )
+        else:
+            raise FileNotFoundError(f"Cannot rehydrate job: {manifest_path} missing.")
         
     @property
     def step(self) -> JobStep:
@@ -102,6 +113,31 @@ class Job:
             raise ValueError("Job is not initialized.")
         return self._step
 
+    def init_folder(self) -> None:
+        from src.utils.constants import JOB_STEPS_BASE_DIR
+        
+        # 1. Setup the Active Directory
+        # Path: storage/active/{job_id}
+        step_root = JOB_STEPS_BASE_DIR / "active" / f"{self.id}_{self.run_id}"
+        step_root.mkdir(parents=True, exist_ok=True)
+
+        # 2. Store the initial manifest directly in the active root
+        # Decision: The manifest in the active root is the 'Single Source of Truth'
+        # for the Orchestrator to monitor progress.
+        manifest_path = step_root / "manifest.json"
+        if not manifest_path.exists():
+            manifest_path.touch()
+
+        # Move file into job folder
+        job_cfg_file = f"{self.id}:{self.context.table}_{self.run_id}_config.json"
+        source_path = JOB_STEPS_BASE_DIR / 'active' / job_cfg_file
+        dest_path = step_root / job_cfg_file
+        shutil.move(str(source_path), str(dest_path))
+        
+        # 4. Update the job pointer
+        self.folder = step_root
+        self.manifest_path = manifest_path
+    
     def set_step(self, step: JobStep) -> None:
         self._step = step
 
@@ -115,17 +151,8 @@ class Job:
 
         self.step.execute(job=self)
     
-    def get_manifest(self) -> JobManifest:
-        """Helper to load the manifest from the current folder."""
-        # Note: manifest_path should be set during Step execution or Job init
-        if not self.manifest_path or not self.manifest_path.exists():
-            # Return a default if not found
-            return JobManifest(job_id=self.id, run_id=self.run_id, ...)
-        
-        with open(self.manifest_path, "rb") as f:
-            return msgspec.json.decode(f.read(), type=JobManifest)
 
-    def save_manifest(self) -> None:
+    def save_manifest(self, manifest: JobManifest) -> None:
         """
         Writes the JobManifest to disk. This is the 'Source of Truth'.
         """
@@ -141,30 +168,38 @@ class Job:
         # Atomic Write: Write to .tmp then rename to avoid corruption during crashes
         tmp_path = self.manifest_path.with_suffix(".tmp")
         with open(tmp_path, "wb") as f:
-            f.write(msgspec.json.encode(self.manifest))
+            f.write(msgspec.json.encode(manifest))
             f.flush()
             os.fsync(f.fileno()) # Ensure bits are physically on the platter
         
         tmp_path.replace(self.manifest_path)
             
-    def update_status(self) -> None:
+    def update_status(self, manifest: JobManifest, deep_sync: bool = False) -> None:
         """
         Drops a signal file to notify the Orchestrator of a state change.
         """
         from src.utils.constants import JOB_STEPS_BASE_DIR
         
         # 1. Ensure the manifest is written to disk first
-        self.save_manifest() 
+        self.save_manifest(manifest) 
 
         # 2. Define the signal path
         # Path: /data/signals/{run_id}.step_name.bitmask.sync
         signal_dir = JOB_STEPS_BASE_DIR / "signals"
         signal_dir.mkdir(parents=True, exist_ok=True)
         
+        # 2. Drop the Breadcrumb
+        # The 'Light' signal for progress steps
+        ext = ".sync"
+        if deep_sync:
+            # The 'Heavy' signal for CompleteStep
+            ext = ".done" 
+
+
         # We embed metadata in the filename so the Orchestrator 
         # might not even need to open the manifest for simple status updates.
-        temp_path = signal_dir / f".tmp_{self.run_id}.sync"
-        final_path = signal_dir / f"{self.run_id}.sync"
+        temp_path = signal_dir / f".tmp_{self.run_id}{ext}"
+        final_path = signal_dir / f"{self.run_id}{ext}"
 
         temp_path.touch()              # Create hidden/temp
         temp_path.replace(final_path)  # Atomic switch to visible

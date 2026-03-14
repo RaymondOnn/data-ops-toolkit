@@ -1,13 +1,27 @@
+
+import logging
 import io
 from abc import ABC, abstractmethod
 from typing import Any
 
-import polars as pl
+import polars as pl # type: ignore
+import fsspec # type: ignore
+
+LOG = logging.getLogger(__name__)
 
 class FormatHandler(ABC):
-    def __init__(self, fs, storage_options: dict) -> None:
-        self.fs = fs
-        self.opts = storage_options
+    def __init__(
+        self, 
+        fs=None, 
+        storage_options: dict[str, Any] | None = None
+    ) -> None:
+        """
+        Decision: Use fsspec for cloud abstraction. 
+        storage_options are passed directly to Polars/PyArrow for high-speed I/O.
+        """
+        
+        self.fs = fs or fsspec.filesystem("file") 
+        self.opts = storage_options or {}
 
     @abstractmethod
     def to_df(self, target: str, **kwargs: Any) -> pl.LazyFrame: 
@@ -28,6 +42,23 @@ class FormatHandler(ABC):
     def write_file(self, data: bytes, target: str) -> None: 
         """Low-level: Raw Bytes -> Storage"""
         pass
+    
+    def __enter__(self):
+        """
+        Decision: Open a persistent connection context if the 
+        filesystem requires it (e.g., S3 session).
+        """
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        Decision: Explicitly close buffers or sessions.
+        Crucial for 50M row jobs to prevent lingering file descriptors 
+        during long-running streaming sinks.
+        """
+        # Close fs sessions if supported, otherwise pass
+        if hasattr(self.fs, "close"):
+            self.fs.close()
 
 class HandlerFactory:
     @staticmethod

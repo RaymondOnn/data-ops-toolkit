@@ -1,5 +1,8 @@
 from abc import ABC, abstractmethod
 
+class ClientCantConnect(Exception):
+    pass
+
 class BaseIOClient(ABC):
     def __enter__(self):
         return self.open()
@@ -13,6 +16,6 @@ class BaseIOClient(ABC):
         pass
 
     @abstractmethod
-    def close(self):
+    def close(self) -> None:
         """Clean up resources"""
         pass

@@ -9,15 +9,26 @@ from libs.clients.database.base import DBClient
 class ClickhouseClient(DBClient):
     def connect(self) -> Client:
         import clickhouse_connect
+        from libs.clients.base import ClientCantConnect
         
-        if not self._connection:
+        if self._connection:
+            return self._connection
+        
+        try:
             self._connection = clickhouse_connect.get_client(
                 host=self.config.get('host', 'localhost'),
                 port=self.config.get('port', 8123),
                 username=self.config.get('user'),
                 password=self.config.get('password')
             )
-        return self._connection
+            self._ping(self._connection)
+        except Exception as e:
+            raise ClientCantConnect(str(e))
+        else:
+            return self._connection
+
+    def _ping(self, conn: Client) -> None:
+        conn.ping()
 
     def get_load_strategy(self, table_name: str, partitions: int = 5) -> list[str]:
         return [

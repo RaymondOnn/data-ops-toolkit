@@ -5,6 +5,7 @@ import polars as pl
 
 
 from src.services.base import Service
+from src.services.factory import ServiceFactory
 from src.services.registry import protect_service
 
 from libs.auth.models import Secret
@@ -99,3 +100,46 @@ class StorageService(Service):
         # 2. Atomic Move: Move the staged folder to the production path
         # On S3, this is a metadata-only rename or a fast copy/delete
         self.client.move_dir(staging_table, final_path)
+        
+# --- Role 1: Reading Flat Files (Landing Zone) ---
+@ServiceFactory.register("flat_file")
+class FlatFileService(StorageService):
+    """Specifically for reading raw data from landing zones."""
+    def __init__(self, name: str, account_id: str, **config: Any) -> None:
+        super().__init__(
+            name=name,
+            url=config.get("url", "file:///tmp/landing"),
+            capabilities=[FileSystemSkills.FILE],
+            storage_options=config.get("storage_options", {}),
+            account_id=account_id,
+            **config
+        )
+
+# --- Role 2: Standard Archival (Moving artifacts) ---
+@ServiceFactory.register("standard_archive")
+class StandardArchiveService(StorageService):
+    """Standard archival for job artifacts and logs."""
+    def __init__(self, name: str, account_id: str, **config: Any) -> None:
+        super().__init__(
+            name=name,
+            url=config.get("url", "s3://archive-bucket"),
+            capabilities=[FileSystemSkills.ARCHIVE],
+            storage_options=config.get("storage_options", {}),
+            account_id=account_id,
+            **config
+        )
+
+# --- Role 3: CAS Archival (Immutable/Hashed storage) ---
+@ServiceFactory.register("cas_archive")
+class CASArchive(StorageService):
+    """Content Addressable Storage for immutable records."""
+    def __init__(self, name: str, account_id: str, **config: Any) -> None:
+        # Vaults often use specific storage classes (e.g., Glacier or WORM)
+        super().__init__(
+            name=name,
+            url=config.get("url", "s3://cas-vault"),
+            capabilities=[FileSystemSkills.CAS],
+            storage_options=config.get("storage_options", {"s3_storage_class": "GLACIER"}),
+            account_id=account_id,
+            **config
+        )

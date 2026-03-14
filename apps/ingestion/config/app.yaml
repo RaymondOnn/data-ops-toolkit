@@ -1,0 +1,59 @@
+version: "1.0"
+defaults:
+  retention_days: 2555 # 7-year default
+  enable_archival: true
+  archive_type: "standard_archive"
+  num_partitions: 10
+  read_mode: "snapshot"
+
+
+accounts:
+  aws_primary:
+    region: "us-east-1"
+    dev:
+      account_id: "aws_dev_01"
+      secret_key: "vault/dev/s3"
+    production:
+      account_id: "aws_prod_01"
+      secret_key: "vault/prod/s3"
+
+  snowflake:
+    dev:
+      account_id: "sf_dev_01"
+    prod:
+      account_id: "sf_prod_01"
+      secret_key: "sf_service_account_vault_id"
+      
+environments:
+  dev:
+    archive_base_path: "file:///tmp/archive"
+    storage_options:
+      region: "us-east-1"
+    services:
+      s3_archive:
+        account_ref: aws_primary
+        type: "standard_archive"
+        account_id: "dev_local_01"
+        url: "file:///tmp/dev_archive"
+      vault_cas:
+        account_ref: aws_primary
+        type: "cas_archive"
+        account_id: "dev_local_secure"
+
+  production:
+    archive_base_path: "s3://prod-vault/archival"
+    storage_options:
+      s3_storage_class: "DEEP_ARCHIVE"
+      region: "us-west-2"
+    services:
+      s3_archive:
+        type: "standard_archive" # Maps to StorageArchivist
+        account_id: "prod_aws_01"
+        bucket: "prod-data-lake-archive"
+        storage_options:
+          s3_storage_class: "DEEP_ARCHIVE"
+          region: "us-east-1"
+      vault_cas:
+        type: "cas_archive" # Maps to StorageVault
+        account_id: "prod_aws_secure"
+        bucket: "immutable-legal-records"

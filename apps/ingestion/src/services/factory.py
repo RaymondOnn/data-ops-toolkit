@@ -8,6 +8,7 @@ LOG = structlog.getLogger(__name__)
 class ServiceNotFound(Exception):
     pass
 
+
                 
 class ServiceFactory:
     # Registry of Classes (Populated by @register)
@@ -19,22 +20,22 @@ class ServiceFactory:
     def register(cls, name: str) -> Callable[[type], type]:
         """Decorator to register services."""
         def wrapper(wrapped_class: type) -> type:
-            cls._SERVICES[name.lower()] = wrapped_class
+            cls._SERVICES[name.casefold()] = wrapped_class
             return wrapped_class
         return wrapper
     
     @classmethod
-    def get_service(cls, source_type: str, **config: Any) -> Any:
+    def get_service(cls, type: str, **config: Any) -> Any:
         """
         Acts as the Singleton Manager. 
         Returns a service instance based on account_id.
         """
-        instance_key = f"{source_type}:{config.account_id}"
+        instance_key = f"{type}:{config['account_id']}"
         
         if instance_key not in cls._INSTANCES:
-            service_cls = cls._SERVICES.get(source_type.lower())
+            service_cls = cls._SERVICES.get(type.casefold())
             if not service_cls:
-                raise ServiceNotFound(f"No service found for {source_type}")
+                raise ServiceNotFound(f"No service found for {type}")
             
             # --- CENTRALIZED SECRET LOGIC ---
             # If 'secret_key' (the ID) is present, wrap it in a Secret object.

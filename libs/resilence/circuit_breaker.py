@@ -13,13 +13,25 @@ class CircuitBreakerState(StrEnum):
     HALF_OPEN = "HALF_OPEN" # Testing: Allow one trial
 
 class CircuitBreaker:
-    def __init__(self, threshold: int, recovery_timeout: int = 300) -> None:
+    def __init__(
+        self, 
+        threshold: int, 
+        recovery_timeout: int = 300,
+        exceptions: list[Exception] | None = None
+    ) -> None:
         self.threshold = threshold
         self._state = CircuitBreakerState.CLOSED
         self.recovery_timeout = recovery_timeout
+        self.exceptions = exceptions or []
         
     @property
     def state(self) -> CircuitBreakerState:
+        """
+        The current state of the circuit breaker.
+
+        :return: The current state of the circuit breaker as a CircuitBreakerState enum.
+        :rtype: CircuitBreakerState
+        """
         return self._state
     
     def can_attempt(self) -> bool:
@@ -83,3 +95,45 @@ class CircuitBreaker:
             return CircuitBreakerState.HALF_OPEN
         
         return CircuitBreakerState.OPEN
+    
+    
+
+def circuit_breaker(
+    failure_threshold: int = 3,
+    recovery_timeout: int = 60,
+    failure_exceptions: tuple[type[Exception], ...] = (Exception,),
+    recover: bool = True
+):
+    def decorator(func: Callable):
+        state = _global_circuit_breaker_state.setdefault(func, {
+            "failures": 0,
+            "last_failure_time": 0.0,
+            "open": False
+        })
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            if state["open"]:
+                if not recover:
+                    raise RuntimeError(f"Global circuit breaker permanently OPEN for {func.__name__}")
+
+                elapsed = time.time() - state["last_failure_time"]
+                if elapsed < recovery_timeout:
+                    raise RuntimeError(f"Global circuit breaker OPEN for {func.__name__}, retry in {int(recovery_timeout - elapsed)}s")
+                else:
+                    state["open"] = False
+                    state["failures"] = 0
+
+            try:
+                result = func(*args, **kwargs)
+                state["failures"] = 0
+                return result
+            except failure_exceptions as exc:
+                state["failures"] += 1
+                if state["failures"] >= failure_threshold:
+                    state["open"] = True
+                    state["last_failure_time"] = time.time()
+                    LOG.error(f"Global circuit breaker tripped on {func.__name__}")
+                raise
+        return wrapper
+    return decorator

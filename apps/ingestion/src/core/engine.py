@@ -9,10 +9,11 @@ import structlog
 from filelock import FileLock
 
 from src.core.context.job import JobContext
-from src.core.entities.job.base import Job
-from src.core.entities.job.manifest import JobManifest
+from src.core.models.job.base import Job
+from src.core.models.job.manifest import JobManifest
+from src.core.models.job.steps.base import _JOB_ORDER
 from src.services.registry import ServiceRegistry
-
+from src.utils.constants import JOB_STEPS_BASE_DIR
 
 
 LOG = structlog.getLogger(__name__)
@@ -28,19 +29,15 @@ class Worker:
         self.lock = FileLock(LOCK_FILE)
         self._busy = False
 
-    def process_step(
-        self, 
-        key: str,
-        config_file_path: str | Path
-    ) -> None:
+    def process_step(self, key: str, config_file_path: str | Path) -> None:
         current_step, composite_key = key.split(":", 1)
 
-        # 1. Load the "Frozen" context from the folder. 
+        # 1. Load the "Frozen" context from the folder.
         # File ends with config.json
         config_path = Path(config_file_path)
         with open(config_path, "rb") as f:
             ctx = msgspec.json.decode(f.read(), type=JobContext)
-        
+
         # 1. Rehydrate Job
         with self.lock:
             meta = self.cache[key]
@@ -89,11 +86,11 @@ class Worker:
 
 
 class IngestionEngine:
-    def __init__(self, cache_dir: str = ".cache/ingestion"):        
+    def __init__(self, cache_dir: str = ".cache/ingestion"):
         # 2. Initialize the Global Registry (Diskcache)
         # This ensures the shared cache path exists for all Ray workers
         self.registry = ServiceRegistry()
-        
+
         self.cache = diskcache.Cache(cache_dir)
         self.lock = FileLock(f"{cache_dir}/orchestrator.lock")
 
@@ -101,7 +98,7 @@ class IngestionEngine:
             ray.init(ignore_reinit_error=True)
 
         # Configuration for stage limits
-        self.stage_limits: dict[str, dict[str, Any]]= {
+        self.stage_limits: dict[str, dict[str, Any]] = {
             "start": {"limit": 5, "pool": "io"},
             "raw": {"limit": 10, "pool": "io"},
             "transform": {"limit": 4, "pool": "cpu"},  # CPU-Heavy
@@ -110,8 +107,12 @@ class IngestionEngine:
         }
 
         # Initialize specialized pools
-        self.io_pool: list[ray.actor.ActorHandle]  = [Worker.remote(f"io_{i}") for i in range(15)]
-        self.cpu_pool: list[ray.actor.ActorHandle]  = [Worker.remote(f"cpu_{i}") for i in range(4)]
+        self.io_pool: list[ray.actor.ActorHandle] = [
+            Worker.remote(f"io_{i}") for i in range(15)
+        ]
+        self.cpu_pool: list[ray.actor.ActorHandle] = [
+            Worker.remote(f"cpu_{i}") for i in range(4)
+        ]
 
     def run(self) -> None:
         """Main loop managing multiple jobs."""
@@ -122,21 +123,20 @@ class IngestionEngine:
             time.sleep(10)  # Frequency of polling
 
     def queue_jobs(
-        self, 
-        composite_key: str, 
-        run_id: str, 
-        config_file_path: str, 
-        current_step: str | None = None
+        self,
+        composite_key: str,
+        run_id: str,
+        config_file_path: str,
+        current_step: str | None = None,
     ) -> None:
         """Checks config, creates jobs if not in cache, and submits them."""
-        from src.utils.dates import get_end_of_day_ts, epoch_to_iso
-        
-        
+        from src.utils.dates import epoch_to_iso, get_end_of_day_ts
+
         # Always start in the 'start' queue
         current_step = current_step or "start"
         queue_key = f"{current_step}:{composite_key}"
         job_id, table = composite_key.split(":", 1)
-        
+
         # Logic to determine if this is a snapshot (e.g., based on job naming convention)
         is_snapshot = "snapshot" in job_id.lower()
         expires_at = get_end_of_day_ts() if is_snapshot else None
@@ -205,7 +205,9 @@ class IngestionEngine:
                     counts[step] = counts.get(step, 0) + 1
         return counts
 
-    def _get_idle_worker_from_pool(self, pool: list[ray.actor.ActorHandle] ) -> Any | None:
+    def _get_idle_worker_from_pool(
+        self, pool: list[ray.actor.ActorHandle]
+    ) -> Any | None:
         for w in pool:
             if ray.get(w.is_idle.remote()):
                 return w
@@ -218,139 +220,142 @@ class IngestionEngine:
             for key in list(self.cache.iterkeys()):
                 if ":" not in key:
                     continue
+                
                 step, composite_key = key.split(":", 1)
                 meta = self.cache[key]
 
-                if meta["status"] == "RUNNING":
+                if meta.get("status") == "RUNNING":
                     # Check if heartbeat is older than 5 minutes
                     if time.time() - meta.get("last_hb", 0) > 300:
+                        LOG.warn("Zombie job detected", key=key)
                         self._recover_job(step, composite_key)
 
-    def _recover_job(self, step_prefix: str, composite_key: str) -> None:
+    def _recover_job(self, step_name: str, composite_key: str) -> None:
         """
         Recovers a stalled job by checking its physical progress.
         """
         with self.lock:
-            key = f"{step_prefix}:{composite_key}"
+            key = f"{step_name}:{composite_key}"
             job_meta = self.cache.get(key)
             if not job_meta:
                 return
 
+        job_id = job_meta["job_id"]
+        run_id = job_meta["run_id"]
+
+
         # 1. Verify if the step actually finished on disk but failed to transit
         # We check for the .success marker in the current step's folder
-        if self._check_step_completion_on_disk(step_prefix, job_meta):
-            # If disk says it's done, move it to the NEXT step queue
-            next_step = self._get_next_step_name(step_prefix)
-            LOG.info(
-                f"Recovery: Moving {composite_key} from {step_prefix} to {next_step}"
-            )
+        if self._check_step_completion_on_disk(job_id, run_id, step_name):
+            # If the symlink exists, the worker finished 'finalize' but the engine died
+            next_step = self._get_next_step_name(step_name)
+            LOG.info("Recovery: Step was successful on disk. Promoting.", 
+                    job_id=job_id, from_step=step_name, to_step=next_step)
 
             del self.cache[key]
             if next_step != "complete":
                 job_meta["status"] = "PENDING"
                 self.cache[f"{next_step}:{composite_key}"] = job_meta
         else:
-            # If disk says it's NOT done, reset to PENDING in the SAME queue
-            LOG.info(f"Recovery: Resetting {composite_key} in {step_prefix} queue")
+            # If no symlink exists, the worker died mid-stream or before finalize.
+            # Reset to PENDING in the SAME queue to allow a retry.
+            LOG.info("Recovery: No physical proof of success. Resetting for retry.", 
+                    job_id=job_id, step=step_name)
             job_meta["status"] = "PENDING"
             job_meta["last_hb"] = time.time()
             self.cache[key] = job_meta
 
-    def _check_step_completion_on_disk(
-        self, step_prefix: str, meta: dict[str, Any]
-    ) -> bool:
+    def _check_step_completion_on_disk(self, job_id: str, run_id: str, step_name: str) -> bool:
         """
-        Scans the output_path for the .success file created by JobStep.mark_success.
+        Checks if the 'active' symlink for this step exists.
+        This is the definitive proof of success in our new structure.
         """
-        # Using Pathlib to check: <output_path>/<StepClass>/<job_id>/<run_id>/<dataset>/*.success
-        # Note: You'll need to map step_prefix (e.g. 'raw') to Class Name (e.g. 'RawStep')
-        step_class_name = f"{step_prefix.capitalize()}Step"
+        # Logic: active/{job_id}/{step_name} 
+        # Example: active/job_123/transform
+        active_path = JOB_STEPS_BASE_DIR / "active" / f"{job_id}_{run_id}" / step_name
+        
+        # It must exist and be a valid link/directory
+        return bool(active_path.exists())
 
-        base_path = Path(meta["config"].output_path)
-        search_path = (
-            base_path
-            / step_class_name
-            / meta["job_id"]
-            / meta["run_id"]
-            / meta["config"].dataset_name
-        )
+    # def _find_last_completed_step(self, job_meta: dict[str, Any]) -> str:
+    #     """
+    #     Scans the output_path for .success markers to find the furthest progress.
+    #     """
+    #     # Order of operations
+    #     steps = ["start", "raw", "transform", "audit", "load"]
+    #     last_completed = "start"
 
-        return any(search_path.glob("*.success"))
+    #     config = job_meta["config"]
+    #     base_path = Path(config.output_path)
 
-    def _find_last_completed_step(self, job_meta: dict[str, Any]) -> str:
-        """
-        Scans the output_path for .success markers to find the furthest progress.
-        """
-        # Order of operations
-        steps = ["start", "raw", "transform", "audit", "load"]
-        last_completed = "start"
+    #     for step in steps:
+    #         # We look for the marker: <step_name>/<job_id>/<run_id>/<dataset>/*.success
+    #         # This matches the logic in JobStep._get_checkpoint_path
+    #         marker_pattern = f"{step}/{job_meta['job_id']}/{job_meta['run_id']}/{config.dataset_name}/*.success"
+    #         markers = list(base_path.glob(marker_pattern))
 
-        config = job_meta["config"]
-        base_path = Path(config.output_path)
+    #         if markers:
+    #             last_completed = step
+    #         else:
+    #             # If a step is missing a marker, the previous one was the last successful one
+    #             break
 
-        for step in steps:
-            # We look for the marker: <step_name>/<job_id>/<run_id>/<dataset>/*.success
-            # This matches the logic in JobStep._get_checkpoint_path
-            marker_pattern = f"{step}/{job_meta['job_id']}/{job_meta['run_id']}/{config.dataset_name}/*.success"
-            markers = list(base_path.glob(marker_pattern))
-
-            if markers:
-                last_completed = step
-            else:
-                # If a step is missing a marker, the previous one was the last successful one
-                break
-
-        return last_completed
+    #     return last_completed
 
     def _get_next_step_name(self, current_step: str) -> str:
-        workflow = {
-            "start": "raw",
-            "raw": "transform",
-            "transform": "audit",
-            "audit": "load",
-            "load": "complete",
-        }
-        return workflow.get(current_step, "start")
-
-    def _recover_from_manifest(self, job_id: str, run_id: str, output_path: str) -> str:
         """
+        Decision: Use List-Index Lookup.
+        Leveraging a list makes the pipeline order explicit and easy to change.
+        """
+        
+
+        try:
+            current_idx = _JOB_ORDER.index(current_step)
+            # Return next step, or 'complete' if we are at the end
+            if current_idx + 1 < len(_JOB_ORDER):
+                return str(_JOB_ORDER[current_idx + 1])
+            return "complete"
+        except ValueError:
+            # If the step is unknown (e.g., job just started), start at the beginning
+            return str(_JOB_ORDER[0])
+
+    def _recover_from_manifest(self, job_id: str, run_id: str) -> str:
+        """
+        Decision: Single-File Peep.
         Peeps at the manifests on disk to find where the job stalled.
+        Used during System Recovery or Orchestrator Boot-up to decide exactly 
+        where to resume a job that was interrupted.
+        Instead of searching 5+ folders, we read the one 'active' manifest.
+        This is O(1) instead of O(N).
         """
-        # Steps in reverse order to find the latest state
-        for step in ["load", "audit", "transform", "raw"]:
-            manifest_path = Path(output_path) / step / job_id / run_id / "manifest.json"
+        manifest_path = JOB_STEPS_BASE_DIR / "active" / f"{job_id}_{run_id}" / "manifest.json"
 
-            if manifest_path.exists():
-                # Peep: msgspec is fast enough to do this inside the Orchestrator loop
-                with open(manifest_path, "rb") as f:
-                    # We can decode into BaseManifest just to see the 'status' and 'step'
-                    meta = msgspec.json.decode(f.read(), type=JobManifest)
+        if not manifest_path.exists():
+            LOG.info("No active manifest found, starting fresh.", job_id=job_id)
+            return str(_JOB_ORDER[0]) # Usually 'start'
 
-                    if meta.status == "COMPLETED":
-                        # If 'raw' is completed, we should queue 'transform'
-                        return self._get_next_step_name(step)
-                    else:
-                        # If it's 'PENDING' or 'RUNNING', it crashed mid-step. Resume this step.
-                        return step
-        return "raw"  # Default start
+        with open(manifest_path, "rb") as f:
+            # msgspec is fast enough to do this in the main recovery loop
+            meta = msgspec.json.decode(f.read(), type=JobManifest)
 
-    def get_latest_manifest(self, context: JobContext) -> JobManifest:
+            # Logic: If the current step is done, move forward. 
+            # Otherwise, the step crashed mid-way; resume/retry it.
+            if meta.status == "COMPLETED":
+                return self._get_next_step_name(meta.current_step)
+            
+            return str(meta.current_step)
+
+    def get_latest_manifest(self, job_id: str, run_id: str) -> JobManifest:
         """
-        Finds the furthest reached step and returns its manifest.
+        Decision: Direct Access.
+        Finds the evolving manifest for the job in its active workspace.
         """
-        # Search backwards from the end of the pipeline
-        for step in ["load", "audit", "transform", "raw", "start"]:
-            manifest_path = (
-                Path(context.output_path)
-                / step
-                / context.job_id
-                / context.run_id
-                / "manifest.json"
-            )
+        manifest_path = JOB_STEPS_BASE_DIR / "active" / f"{job_id}_{run_id}" / "manifest.json"
 
-            if manifest_path.exists():
-                # msgspec.json.decode is extremely fast
-                with open(manifest_path, "rb") as f:
-                    return msgspec.json.decode(f.read(), type=JobManifest)
+        if not manifest_path.exists():
+            # During recovery, if a job exists in DB but not on disk, it's a 'Ghost'
+            raise FileNotFoundError(f"Active workspace missing for {job_id}")
 
-        raise FileNotFoundError(f"No manifest found for {context.job_id}")
+        with open(manifest_path, "rb") as f:
+            # Structural validation included via msgspec
+            return msgspec.json.decode(f.read(), type=JobManifest)

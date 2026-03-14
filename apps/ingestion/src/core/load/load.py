@@ -1,10 +1,8 @@
-from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias
+from pathlib import Path
 
-import polars as pl
-from msgspec import Struct
-import structlog
-from typing import TypeAlias
+from msgspec import Struct # type: ignore
+import structlog # type: ignore
 
 from src.services.database import DatabaseService
 from src.services.file import StorageService
@@ -33,7 +31,7 @@ class Loader:
     Each implementation (Append, Upsert, Overwrite) handles the 
     logic for both Staging and Promotion.
     """
-    def load(self, service: Sink, source_dir: str, target_table: str) -> StagingResult:
+    def load(self, service: Sink, source_dir: Path | str, target_table: str) -> StagingResult:
         """
         Phase 1: Moves data from Silver (Parquet) to a temporary 'Staging' area.
         Returns metadata about the staged data (rows, temp_path/temp_table).
