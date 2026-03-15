@@ -4,6 +4,7 @@ from typing import Any
 
 import msgspec
 import structlog
+
 from src.core.models.job.manifest import JobManifest
 from src.services.database import DatabaseService
 
@@ -25,7 +26,7 @@ class StateStore:
         Polls Postgres for active job definitions.
         Uses JobStatus enum to filter for non-terminal states.
         """
-        from src.core.models.job.base import JobStatus
+        from src.core.models.job import JobStatus
 
         # We only care about jobs that are not SUCCESS, FAILED, or EXPIRED
         active_statuses = [f"'{s.value}'" for s in JobStatus.active_statuses()]
@@ -35,15 +36,17 @@ class StateStore:
             SELECT * FROM {CURRENT_EXECUTION_TBL} 
             WHERE JOB_STATUS IN ({status_filter})
         """
-        
+
         records = self.service.fetch(sql)
         for r in records:
             run_id = r["run_id"]
-            # On startup, populate the mirror. 
+            # On startup, populate the mirror.
             # On subsequent ticks, only update if the DB has newer info
             if run_id not in self._mirror:
                 self._mirror[run_id] = r
-                LOG.debug("Loaded active run from DB", run_id=run_id, status=r["job_status"])
+                LOG.debug(
+                    "Loaded active run from DB", run_id=run_id, status=r["job_status"]
+                )
 
     def get_active_definitions(self) -> list[dict[str, Any]]:
         """Returns the current list of jobs for the Orchestrator to evaluate."""
@@ -96,16 +99,20 @@ class StateStore:
                 self._mirror[run_id] = {"run_id": run_id, "job_id": manifest.job_id}
 
             # 2. Deep Sync: Load manifest data into DB 'metadata'
-            if deep_sync:       
+            if deep_sync:
                 # Update mirror with heavy metrics for the final DB flush
-                self._mirror[run_id].update({
-                    "metadata": {
-                        "total_rows_in": getattr(m_data.raw, "total_rows", 0),
-                        "total_rows_out": getattr(m_data.write, "rows_written", 0),
-                        "total_duration": m_data.total_duration,
-                        "logic_version": getattr(m_data.transform, "logic_version", "1.0")
+                self._mirror[run_id].update(
+                    {
+                        "metadata": {
+                            "total_rows_in": getattr(m_data.raw, "total_rows", 0),
+                            "total_rows_out": getattr(m_data.write, "rows_written", 0),
+                            "total_duration": m_data.total_duration,
+                            "logic_version": getattr(
+                                m_data.transform, "logic_version", "1.0"
+                            ),
+                        }
                     }
-                })
+                )
             # Map manifest to the DB structure expected by your SQL
             self._mirror[run_id] = {
                 "run_id": run_id,
@@ -130,14 +137,18 @@ class StateStore:
 
         except Exception as e:
             LOG.error(f"Failed to sync manifest from {folder_path}: {e}")
-            
+
     def _calculate_bitmask(self, job_path: Path) -> int:
         """Simple logic to check which active links exist."""
         mask = 0
-        if (job_path / "raw").exists(): mask |= 1
-        if (job_path / "transform").exists(): mask |= 2
-        if (job_path / "write").exists(): mask |= 4
-        if (job_path / "publish").exists(): mask |= 8
+        if (job_path / "raw").exists():
+            mask |= 1
+        if (job_path / "transform").exists():
+            mask |= 2
+        if (job_path / "write").exists():
+            mask |= 4
+        if (job_path / "publish").exists():
+            mask |= 8
         return mask
 
     def flush(self) -> None:

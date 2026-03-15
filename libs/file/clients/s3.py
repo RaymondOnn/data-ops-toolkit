@@ -1,7 +1,12 @@
+import logging
 from typing import Any, Optional
+
 import fsspec
+
 from libs.file.base import FileSystemClient
 
+
+LOG = logging.getLogger(__name__)
 
 class S3Client(FileSystemClient):
     """
@@ -68,64 +73,4 @@ class S3Client(FileSystemClient):
             
         # 2. Clean up staging
         self.delete_dir(source_path)
-        
-        
-# class GCSClient(FileSystemClient):
-#     """
-#     Google Cloud Storage Driver.
-    
-#     Storage Options:
-#         - token (str/dict): Path to JSON key or 'google_default'
-#         - project (str): GCP Project ID
-#         - consistency (str): 'strong' or None
-#         - cache_timeout (int): Set to 0 for large 50M row metadata scans.
-#     """
-#     def __init__(self, url: str, storage_options: Optional[dict[str, Any]] = None) -> None:
-#         super().__init__(url, storage_options)
-#         self.fs = fsspec.filesystem("gcs", **self.opts)
-    
-#     def connect(self) -> None:
-#         if self.connection:
-#             return
-#         # GCS usually expects 'token' for the credential path/dict
-#         self.connection = fsspec.filesystem("gcs", **self.opts)
-
-class AzureClient(FileSystemClient):
-    """
-    Azure Blob Storage (ABFS) Driver.
-    
-    Storage Options:
-        - account_name (str): Azure Storage Account Name
-        - account_key (str): Azure Storage Access Key
-        - connection_string (str): Full Azure connection string
-    """
-    def __init__(self, url: str, storage_options: Optional[dict[str, Any]] = None) -> None:
-        super().__init__(url, storage_options)
-        self.fs = self.connect()
-
-    def connect(self) -> fsspec.AzureBlobFileSystem:
-        if not self.fs:
-
-            # Map generic 'password' to Azure-specific 'account_key'
-            if 'password' in self.opts:
-                self.opts['account_key'] = self.opts.pop('password')
-                
-            self.fs = fsspec.filesystem("abfs", **self.opts)
-
-        return self.fs        
-
-class LocalClient(FileSystemClient):
-    """
-    Local FileSystem Driver.
-    Storage Options:
-        - auto_mkdir: True (Automatically create parent directories)
-    """
-    def __init__(self, url: str, storage_options: Optional[dict[str, Any]] = None):
-        super().__init__(url, storage_options)
-        self.fs = self.connect()
-        
-    def connect(self) -> fsspec.LocalFileSystem:
-        if not self.fs:
-            self.fs = fsspec.filesystem("file", **self.opts)
-        return self.fs
         

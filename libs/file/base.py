@@ -89,7 +89,9 @@ def create_fs_client(
     """
     Assembles a Managed Client with dynamic capabilities (Ingestion, Archive, etc.).
     """
-    from .clients import S3Client, AzureClient, LocalClient
+    from .clients.s3 import S3Client
+    from .clients.azure import AzureClient
+    from .clients.local import LocalClient
 
     # 1. Map Protocol to Base Class
     protocol_map = {

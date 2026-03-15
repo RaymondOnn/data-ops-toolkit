@@ -4,12 +4,12 @@ from abc import ABC
 from typing import TYPE_CHECKING
 
 import structlog
-from src.core.models.job.steps.base import JobStep
+from src.core.models.job.steps import JobStep
 from src.core.state.base import StateStore
 from src.utils.constants import JOB_STEPS_BASE_DIR
 
 if TYPE_CHECKING:
-    from src.core.models.job.base import Job
+    from src.core.models.job import Job
 
 LOG = structlog.getLogger(__name__)
 

@@ -9,7 +9,7 @@ from src.services.factory import ServiceFactory
 from src.services.registry import protect_service
 
 from libs.auth.models import Secret
-from libs.file.base import FileSystemClient, FileSystemSkills
+from libs.file import FileSystemClient, FileSystemSkills
 
 
 class StorageService(Service):
@@ -100,6 +100,7 @@ class StorageService(Service):
         # 2. Atomic Move: Move the staged folder to the production path
         # On S3, this is a metadata-only rename or a fast copy/delete
         self.client.move_dir(staging_table, final_path)
+        
         
 # --- Role 1: Reading Flat Files (Landing Zone) ---
 @ServiceFactory.register("flat_file")

@@ -5,7 +5,7 @@ from typing import Any, Optional
 import msgspec
 import structlog
 from msgspec import field, json
-from src.core.models.job.base import JobStatus
+from src.core.models.job import JobStatus
 
 LOG = structlog.getLogger(__name__)
 

@@ -1,45 +1,43 @@
 import os
 import shutil
-from pathlib import Path
 from enum import StrEnum
+from pathlib import Path
 
 import msgspec
 import structlog
 
 from src.core.context.job import JobContext
-from src.core.models.job.steps.base import JobStep
 from src.core.models.job.manifest import JobManifest
-
-
+from src.core.models.job.steps import JobStep
 
 LOG = structlog.getLogger(__name__)
+
 
 class JobStatus(StrEnum):
     """
     Shows the current health of the job.
-    
+
     Independent of Job Step for easier maintenance
     """
-    
+
     # Initial State
-    PENDING = "PENDING"     # Created, waiting for schedule
-    QUEUED = "QUEUED"       # Picked up by Orchestrator, waiting for Worker
-    
+    PENDING = "PENDING"  # Created, waiting for schedule
+    QUEUED = "QUEUED"  # Picked up by Orchestrator, waiting for Worker
+
     # Active States
-    PROVISIONING = "PROVISIONING"   # Worker initialized, manifest created
-    RUNNING = "RUNNING"     # Actively processing a step
-    
+    PROVISIONING = "PROVISIONING"  # Worker initialized, manifest created
+    RUNNING = "RUNNING"  # Actively processing a step
+
     # Terminal States (End of the road)
-    SUCCESS = "SUCCESS"     # Fully finished (Complete step passed)
-    FAILED = "FAILED"       # Hard stop, requires manual intervention
-    CANCELLED = "CANCELLED" # Manual kill
-    EXPIRED = "EXPIRED"     # TTL reached, data purged, no recovery needed
-    
+    SUCCESS = "SUCCESS"  # Fully finished (Complete step passed)
+    FAILED = "FAILED"  # Hard stop, requires manual intervention
+    CANCELLED = "CANCELLED"  # Manual kill
+    EXPIRED = "EXPIRED"  # TTL reached, data purged, no recovery needed
+
     # Wait States (The "Breadcrumb" triggers)
-    DEFERRED = "DEFERRED"   # Transient error, Orchestrator will retry later
-    BLOCKED = "BLOCKED"     # Manual HOLD or dependency missing
-    
-    
+    DEFERRED = "DEFERRED"  # Transient error, Orchestrator will retry later
+    BLOCKED = "BLOCKED"  # Manual HOLD or dependency missing
+
     @classmethod
     def active_statuses(cls) -> set:
         return {cls.QUEUED, cls.PENDING, cls.RUNNING, cls.PROVISIONING}
@@ -48,12 +46,12 @@ class JobStatus(StrEnum):
     def terminal_statuses(cls) -> set:
         return {cls.SUCCESS, cls.FAILED, cls.CANCELLED}
 
+
 class Job:
     status: JobStatus
     run_id: str
     manifest_path: Path | None = None
-    
-    
+
     def __init__(
         self,
         job_id: str,
@@ -102,11 +100,11 @@ class Job:
                 run_id=manifest.run_id,
                 worker_id="recovery",
                 job_context=ctx,
-                start_step=manifest.current_step
+                start_step=manifest.current_step,
             )
         else:
             raise FileNotFoundError(f"Cannot rehydrate job: {manifest_path} missing.")
-        
+
     @property
     def step(self) -> JobStep:
         if not self._step:
@@ -115,7 +113,7 @@ class Job:
 
     def init_folder(self) -> None:
         from src.utils.constants import JOB_STEPS_BASE_DIR
-        
+
         # 1. Setup the Active Directory
         # Path: storage/active/{job_id}
         step_root = JOB_STEPS_BASE_DIR / "active" / f"{self.id}_{self.run_id}"
@@ -130,14 +128,14 @@ class Job:
 
         # Move file into job folder
         job_cfg_file = f"{self.id}:{self.context.table}_{self.run_id}_config.json"
-        source_path = JOB_STEPS_BASE_DIR / 'active' / job_cfg_file
+        source_path = JOB_STEPS_BASE_DIR / "active" / job_cfg_file
         dest_path = step_root / job_cfg_file
         shutil.move(str(source_path), str(dest_path))
-        
+
         # 4. Update the job pointer
         self.folder = step_root
         self.manifest_path = manifest_path
-    
+
     def set_step(self, step: JobStep) -> None:
         self._step = step
 
@@ -150,7 +148,6 @@ class Job:
             raise ValueError("Job is not initialized.")
 
         self.step.execute(job=self)
-    
 
     def save_manifest(self, manifest: JobManifest) -> None:
         """
@@ -170,50 +167,49 @@ class Job:
         with open(tmp_path, "wb") as f:
             f.write(msgspec.json.encode(manifest))
             f.flush()
-            os.fsync(f.fileno()) # Ensure bits are physically on the platter
-        
+            os.fsync(f.fileno())  # Ensure bits are physically on the platter
+
         tmp_path.replace(self.manifest_path)
-            
+
     def update_status(self, manifest: JobManifest, deep_sync: bool = False) -> None:
         """
         Drops a signal file to notify the Orchestrator of a state change.
         """
         from src.utils.constants import JOB_STEPS_BASE_DIR
-        
+
         # 1. Ensure the manifest is written to disk first
-        self.save_manifest(manifest) 
+        self.save_manifest(manifest)
 
         # 2. Define the signal path
         # Path: /data/signals/{run_id}.step_name.bitmask.sync
         signal_dir = JOB_STEPS_BASE_DIR / "signals"
         signal_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # 2. Drop the Breadcrumb
         # The 'Light' signal for progress steps
         ext = ".sync"
         if deep_sync:
             # The 'Heavy' signal for CompleteStep
-            ext = ".done" 
+            ext = ".done"
 
-
-        # We embed metadata in the filename so the Orchestrator 
+        # We embed metadata in the filename so the Orchestrator
         # might not even need to open the manifest for simple status updates.
         temp_path = signal_dir / f".tmp_{self.run_id}{ext}"
         final_path = signal_dir / f"{self.run_id}{ext}"
 
-        temp_path.touch()              # Create hidden/temp
+        temp_path.touch()  # Create hidden/temp
         temp_path.replace(final_path)  # Atomic switch to visible
-        
+
     def update_status(self):
         """Atomic signal: Save manifest then drop breadcrumb."""
         from src.utils.constants import JOB_STEPS_BASE_DIR
-        
+
         # 1. Write Source of Truth
         if self.folder and not self.manifest_path:
             self.manifest_path = Path(self.folder) / "manifest.json"
         else:
             raise ValueError("Job folder is not set.")
-            
+
         # Atomic write to avoid partial reads by Orchestrator
         tmp_path = self.manifest_path.with_suffix(".tmp")
         with open(tmp_path, "wb") as f:
@@ -223,8 +219,7 @@ class Job:
         # 2. Drop the Breadcrumb signal
         signal_dir = Path(JOB_STEPS_BASE_DIR) / "signals"
         signal_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Filename contains run_id for Orchestrator lookup
         crumb_name = f"{self.run_id}.{self.step.name}.sync"
         (signal_dir / crumb_name).touch()
-

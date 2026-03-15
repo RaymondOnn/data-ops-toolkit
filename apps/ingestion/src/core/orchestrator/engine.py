@@ -9,9 +9,7 @@ import structlog
 from filelock import FileLock
 
 from src.core.context.job import JobContext
-from src.core.models.job.base import Job
-from src.core.models.job.manifest import JobManifest
-from src.core.models.job.steps.base import _JOB_ORDER
+from src.core.models.job import Job, JobManifest, _JOB_ORDER
 from src.services.registry import ServiceRegistry
 from src.utils.constants import JOB_STEPS_BASE_DIR
 

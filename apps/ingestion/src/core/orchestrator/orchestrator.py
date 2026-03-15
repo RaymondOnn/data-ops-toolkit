@@ -10,13 +10,13 @@ import structlog
 
 from src.core.context.job import JobContext
 from src.core.engine import IngestionEngine
-from src.core.models.job.base import Job, JobStatus
+from src.core.models.job import Job, JobStatus
 from src.core.state import StateStore
 from src.services.database import DatabaseService
 from src.utils.constants import ALWAYS_ON_MODE, JOB_STEPS_BASE_DIR
 from src.utils.dates import epoch_to_iso, is_expired
 
-from libs.resilence.heartbeat import Heartbeat
+from libs.resilience.heartbeat import Heartbeat
 
 LOG = structlog.getLogger(__name__)
 PID_FILE = Path(".daemon.pid")
@@ -268,7 +268,7 @@ class Orchestrator:
         overrides: dict[str, Any] | None = None
     ) -> None:
         from src.core.context.job import JobContextBuilder
-        from src.core.models.job.steps.base import _JOB_ORDER
+        from src.core.models.job import _JOB_ORDER
         
         overrides = overrides or {}
         
@@ -496,7 +496,12 @@ class Orchestrator:
                     LOG.error(f"Failed to process breadcrumb {crumb.name}: {e}")                
                     LOG.debug("Signal processed", run_id=run_id)
     
-    def _terminate_job(self, job: Job, status: JobStatus, reason: str = None) -> None:
+    def _terminate_job(
+        self, 
+        job: Job, 
+        status: JobStatus, 
+        reason: str | None = None
+    ) -> None:
         """
         Controlled Crash Handler.
         Uses the Job's internal status updater to ensure consistency.
