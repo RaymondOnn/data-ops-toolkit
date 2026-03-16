@@ -6,7 +6,7 @@ import polars as pl
 import structlog
 from src.core.models.job import Job
 from src.core.models.job.manifest import RawPayload
-from src.core.models.job.steps import JobBitmask, JobStep
+from src.core.models.steps import JobBitmask, JobStep
 from src.services.factory import ServiceFactory
 from src.utils.constants import JOB_STEPS_BASE_DIR
 from src.utils.exceptions import JobBlocked
@@ -28,7 +28,7 @@ class FileInfo(msgspec.Struct):  # type: ignore
     size_bytes: int  # Physical file size on disk
 
 
-class RawStep(JobStep):
+class RawStep(JobStep):  # type: ignore
     manifest: RawPayload
 
     @property
@@ -40,28 +40,27 @@ class RawStep(JobStep):
         return "raw"
 
     def execute(self, job: "Job") -> str:
-        from src.core.ingest.factory import ReaderFactory
-        from src.core.ingest.ingest import Reader, ReaderContext
+        from src.core.strategies.ingest.factory import ReaderFactory
+        from src.core.strategies.ingest.ingest import Reader, ReaderContext
 
-        if not job.folder:
-            raise ValueError("Job folder is not set.")
+        job_ctx = job.context
 
         try:
             # 1. Prepare Reader Context
             # This object is serialized and sent to Ray workers.
             # We include the schema_items from the manifest so workers are 'Contract-Aware'
             ctx = ReaderContext(
-                source_type=job.context.source_type,
-                target_table=job.context.target_table,
-                num_partitions=job.context.num_partitions or 10,
-                schema_items=job.context.schema_items,
+                source_type=job_ctx.source_type,
+                target_table=job_ctx.target_table,
+                num_partitions=job_ctx.num_partitions or 10,
+                schema_items=job_ctx.schema_items,
             )
 
             # 2. Extract & Guard (The Ray Orchestration)
             # Decision: DataReader.fetch uses the functional apply_schema_contract
             # inside the Ray workers to prevent double-handling.
             service = ServiceFactory.get_service(
-                job.context.source_type, **job.context.source_params
+                job_ctx.source_type, **job_ctx.source_params
             )
             reader: Reader = ReaderFactory.get_reader(ctx.source_type)
             LOG.info(f"Executing raw ingestion using strategy: {ctx.source_type}")

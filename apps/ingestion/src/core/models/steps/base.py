@@ -1,64 +1,110 @@
+import shutil
 import time
-import traceback
 from abc import ABC, abstractmethod
+from enum import IntEnum, IntFlag, auto
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import msgspec # type: ignore
-import polars as pl # type: ignore
-import structlog # type: ignore
+import msgspec
+import structlog
+from src.core.models.job import JobStatus
+from src.core.models.job.manifest import AuditPayload, JobManifest
+from src.utils.constants import JOB_STEPS_BASE_DIR
 
-from src.core.models.job.manifest import (
-    AuditPayload,
-    ErrorPayload,
-    JobManifest,
-)
-
-
-from src.utils.exceptions import JobFailed, JobBlocked, JobDeferred
-
-
+from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreakerTripped
 
 if TYPE_CHECKING:
     from src.core.models.job import Job
 
 LOG = structlog.getLogger(__name__)
-_JOB_ORDER = [
-    "start",
-    "raw",
-    "transform",
-    "write",
-    "audit",
-    "publish",
-    "complete",
-]
 
 
-class JobBitmask:
+class JobBitmask(IntFlag):
     """
     Class representing the bitmask for job steps.
     """
 
-    START: str = "0000001"
-    RAW: str = "0000010"
-    TRANSFORM: str = "0000100"
-    WRITE: str = "0001000"
-    AUDIT: str = "0010000"
-    PUBLISH: str = "0100000"
-    COMPLETE: str = "1000000"
+    NONE = 0
+    START = auto()
+    RAW = auto()
+    TRANSFORM = auto()
+    WRITE = auto()
+    AUDIT = auto()
+    PUBLISH = auto()
+    COMPLETE = auto()
+
+    @classmethod
+    def ALL_DONE(cls) -> "JobBitmask":
+        """
+        Dynamically calculates the sum of all flags.
+        Useful for checking if the 50M row pipeline is 100% complete.
+        """
+        mask = cls.NONE
+        for member in cls:
+            mask |= member
+        return mask
+
+    def is_fully_complete(self) -> bool:
+        """Helper to check if the current instance matches ALL_DONE."""
+        return self == self.ALL_DONE()
+
+
+class JobSteps(IntEnum):
+    START = 0
+    RAW = 1
+    TRANSFORM = 2
+    WRITE = 3
+    AUDIT = 4
+    PUBLISH = 5
+    COMPLETE = 6
+
+    @property
+    def label(self) -> str:
+        return self.name.casefold()
+
+    @property
+    def bitmask(self) -> JobBitmask:
+        # Map the step to the IntFlag
+        mapping = {
+            JobSteps.START: JobBitmask.START,
+            JobSteps.RAW: JobBitmask.RAW,
+            JobSteps.TRANSFORM: JobBitmask.TRANSFORM,
+            JobSteps.WRITE: JobBitmask.WRITE,
+            JobSteps.AUDIT: JobBitmask.AUDIT,
+            JobSteps.PUBLISH: JobBitmask.PUBLISH,
+            JobSteps.COMPLETE: JobBitmask.COMPLETE,
+        }
+        return mapping[self]
+
+    @classmethod
+    def next_step(cls, current_label: str) -> "JobSteps" | None:
+        """Finds the next step in the sequence based on a string label."""
+        current_enum = cls[current_label.upper()]
+        try:
+            return cls(current_enum.value + 1)
+        except ValueError:
+            return None  # We have reached the end of the pipeline
+
+    @classmethod
+    def prev_step(cls, current_label: str) -> "JobSteps" | None:
+        """Finds the next step in the sequence based on a string label."""
+        current_enum = cls[current_label.upper()]
+        try:
+            return cls(current_enum.value - 1)
+        except ValueError:
+            return None  # We have reached the start of the pipeline
+
+
+_JOB_ORDER = [step.label for step in sorted(JobSteps)]
 
 
 class JobStep(ABC):
     """Base class for JobStage classes."""
 
-    @property
-    def bitmask(self) -> str:
-        raise NotImplementedError("Subclasses must implement this property")
-
-    @property
-    def name(self) -> str:
-        raise NotImplementedError("Subclasses must implement this property")
+    def __init__(self, step: JobSteps) -> None:
+        self.name = step.label
+        self.bitmask = step.bitmask
 
     def get_step(self, offset: int) -> str:
         idx = _JOB_ORDER.index(self.name)
@@ -66,7 +112,7 @@ class JobStep(ABC):
             return _JOB_ORDER[idx + offset]
         else:
             raise ValueError(f"Invalid offset: {offset}")
-    
+
     @abstractmethod
     def execute(self, job: "Job") -> str:
         """Execute the current JobStage with the given engine and dataframe.
@@ -80,10 +126,32 @@ class JobStep(ABC):
 
     def _transit(self, job: "Job") -> str:
         """Transit the Job instance to the next stage."""
-        next_step = self.get_step(offset=1)
-        job.set_step(JobStep.get_step_class_by_name(next_step))
-        return next_step
+        next_step = JobSteps.next_step(self.name)
+        if next_step:
+            job.set_step(JobStep.get_step_class_by_name(next_step.label))
+            return next_step.label
         return "FINISH"
+
+    def move_to_folder(self, job: "Job", category: str) -> None:
+        """
+        Physically moves the metadata folder to HOLD or QUARANTINE.
+        category: "HOLD" | "QUARANTINE" | "DONE"
+        """
+        base_dir = Path(JOB_STEPS_BASE_DIR)
+
+        # Target: base/HOLD/job_id/run_id
+        new_path = base_dir / category / f"{job.id}_{job.run_id}"
+
+        # Ensure parent structure exists
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if job.folder.exists():
+            LOG.info("Moving metadata folder", src=job.folder, dst=new_path)
+            # shutil.move handles cross-filesystem moves if necessary
+            shutil.move(str(job.folder), str(new_path))
+
+            # Update the job instance reference so subsequent saves hit the new path
+            job.folder = new_path
 
     def finalize(
         self,
@@ -94,66 +162,59 @@ class JobStep(ABC):
     ) -> None:
         """
         DECISION: Deterministic Paths & Symlinking.
-        We avoid searching for 'latest' folders by using a static symlink 
+        We avoid searching for 'latest' folders by using a static symlink
         at active/{job_id}/{step_name}.
         """
         results = results or {}
-
-        # 1. READ & BOOTSTRAP
-        # Check if file exists and has content
-        if not job.folder:
-            raise ValueError("Job folder is not set")
-
-        manifest_path = job.folder / "manifest.json"
-        if manifest_path.exists() and manifest_path.stat().st_size > 0:
-            with open(manifest_path, "rb") as f:
-                data: dict[str, Any] = msgspec.json.decode(f.read())
-        else:
-            # File is empty or doesn't exist: Start Phase
-            data = {
-                "job_id": job.id,
-                "run_id": job.run_id,
-                "dataset_name": job.context.dataset_name,
-                "status": "RUNNING",
-                "current_step": "init",
-            }
+        data = msgspec.to_builtins(job.manifest)
 
         # 2. MUTATE (same as before)
         if exception:
-            error_payload = msgspec.to_builtins(
-                ErrorPayload(
-                    step=self.name,
-                    error_type=type(exception).__name__,
-                    message=str(exception),
-                    stack_trace=traceback.format_exc(),
-                    worker_id=job.worker_id,
-                )
-            )
-            data["status"] = "FAILED"
-            data["error"] = error_payload
-            
-            if isinstance(exception, JobFailed)
+            # 2. ROUTING LOGIC (The "Sorting Hat")
+            if isinstance(exception, (CircuitBreakerTripped, ClientCantConnect)):
+                # If we fail during CompleteStep, it's Deferred (Ready to wrap up)
+                # Otherwise, it's Blocked (Needs to re-run current step)
+                # data["job_status"] = (
+                #     JobStatus.DEFERRED if self.name == "CompleteStep"
+                #     else JobStatus.BLOCKED
+                # )
+                from src.core.models.states.terminal import HoldState
+
+                HoldState(job).on_enter(exception)
+                target_category = "HOLD"
+            else:
+                from src.core.models.states.terminal import FailedState
+
+                FailedState(job).on_enter(exception)
+                target_category = "FAILED"
+
+            self.move_to_folder(job, target_category)
         else:
-            if data["current_step"] == "complete":
-                data["status"] = "COMPLETED"
-            data["current_step"] = self.name
+            current_mask = data["bitmask"]
+            new_mask = current_mask | self.bitmask
+            if new_mask.is_fully_complete():
+                from src.core.models.states.terminal import SuccessState
+
+                SuccessState(job).on_enter()
+                data["job_status"] = JobStatus.SUCCESS
+
             if results:
                 data[self.name] = results
 
-        # 3. CREATE SYMLINK
+        # 4. SYMLINK (Pointer to immutable data)
         if data_folder:
             active_link = job.folder / self.name
             if active_link.exists() or active_link.is_symlink():
                 active_link.unlink()
-            
-            # Create the pointer to the immutable physical data
-            relative_target = Path("..") / ".." / "data" / self.name / data_folder.name
+
+            # Pointer: active/job_id/run_id/step -> ../../../data/step/folder
+            relative_target = (
+                Path("..") / ".." / ".." / "data" / self.name / data_folder.name
+            )
             active_link.symlink_to(relative_target)
-        
-        # 4. ATOMIC SWAP
-        manifest = msgspec.convert(data, JobManifest)
-        job.update_status(manifest)
-        
+
+        # 5. ATOMIC SWAP
+        job.request_status_sync()
 
     @classmethod
     def get_step_class_by_name(cls, name: str) -> "JobStep":
@@ -163,16 +224,14 @@ class JobStep(ABC):
         Iterates through all subclasses of JobStep and checks if the name attribute matches the given name.
         If no match is found, raises a ValueError.
         """
-
         for cls in cls.__subclasses__():
             # If you have nested subclasses, you may want a recursive walk here.
-            if (
-                getattr(cls, "name", None) == name
-                or getattr(cls(), "name", None) == name
-            ):
-                return cls
+            if getattr(cls, "name", None) == name:
+                idx = _JOB_ORDER.index(name)
+                step = JobSteps(idx)
+                return cls(step=step)
         raise ValueError(f"Unknown step name: {name}")
-    
+
     def get_manifest(self, job: "Job") -> JobManifest:
         """Helper to read the current state of the world."""
         if job.manifest_path and not job.manifest_path.exists():
@@ -180,21 +239,10 @@ class JobStep(ABC):
 
         with open(job.manifest_path, "rb") as f:
             return msgspec.json.decode(f.read(), type=JobManifest)
-        
-
-
 
 
 class AuditStep(JobStep):
     manifest: AuditPayload
-
-    @property
-    def bitmask(self) -> str:
-        return JobBitmask.AUDIT
-
-    @property
-    def name(self) -> str:
-        return "audit"
 
     def execute(self, job: "Job") -> str:
         start_time = time.perf_counter()
@@ -278,5 +326,3 @@ class AuditStep(JobStep):
             )
 
         return {"passed": len(failures) == 0, "checks": checks, "failures": failures}
-
-

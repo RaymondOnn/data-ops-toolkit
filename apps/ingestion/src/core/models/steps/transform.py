@@ -4,7 +4,7 @@ import polars as pl  # type: ignore
 import structlog  # type: ignore
 from src.core.models.job import Job
 from src.core.models.job.manifest import TransformPayload
-from src.core.models.job.steps import JobBitmask, JobStep
+from src.core.models.steps import JobBitmask, JobStep
 from src.utils.constants import JOB_STEPS_BASE_DIR
 
 from libs.file.formats.parquet import ParquetHandler

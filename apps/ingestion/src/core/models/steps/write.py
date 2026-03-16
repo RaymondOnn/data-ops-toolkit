@@ -1,9 +1,8 @@
 import time
 import traceback
 
-import requests
 import structlog
-from src.core.load.load import Loader
+from src.core.strategies.load.load import Loader
 from src.core.models.job import Job, JobBitmask, JobStep
 from src.core.models.job.manifest import ErrorPayload, WritePayload
 from src.services.factory import ServiceFactory
@@ -25,6 +24,8 @@ class WriteStep(JobStep):  # type: ignore
 
     def execute(self, job: "Job") -> str:
         start_time = time.perf_counter()
+        job_ctx = job.context
+
 
         try:
             # 1. Resolve logical input (The partitioned parquet files)
@@ -32,7 +33,7 @@ class WriteStep(JobStep):  # type: ignore
 
             # 1. Get the Service (Securely initialized on Ray worker via ServiceFactory)
             service = ServiceFactory.get_service(
-                job.context.sink_type, **job.context.sink_config
+                job_ctx.sink_type, **job_ctx.sink_config
             )
 
             # 2. Get the behavioral Strategy
@@ -42,20 +43,20 @@ class WriteStep(JobStep):  # type: ignore
             staging_results = loader.load(
                 service=service,
                 source_dir=source_dir,
-                target_table=job.context.target_destination,
+                target_table=job_ctx.target_destination,
             )
 
             # 3. Finalize Manifest
             payload = WritePayload(
                 step_outcome="COMPLETED",
-                target_identifier=job.context.target_destination,
-                sink_type=job.context.destination_type,
+                target_identifier=job_ctx.target_destination,
+                sink_type=job_ctx.destination_type,
                 staging_artifact=(
                     staging_results.staging_path or staging_results.staging_table,
                 ),
                 rows_inserted=staging_results.rows,
-                partition_col=job.context.partition_col,
-                partition_value=job.context.partition_value,
+                partition_col=job_ctx.partition_col,
+                partition_value=job_ctx.partition_value,
                 db_connection_id=service.connection_id,
                 duration_secs=int((time.perf_counter() - start_time) * 1000),
             )

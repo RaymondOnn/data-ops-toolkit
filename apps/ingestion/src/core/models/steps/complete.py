@@ -4,10 +4,9 @@ from datetime import datetime, timedelta
 import structlog
 from src.core.models.job import Job
 from src.core.models.job.manifest import CompletePayload
-from src.core.models.job.steps import JobBitmask, JobStep
+from src.core.models.steps import JobBitmask, JobStep
 from src.services.factory import ServiceFactory
 from src.services.file import StorageService
-from src.utils.constants import JOB_STEPS_BASE_DIR
 
 LOG = structlog.getLogger(__name__)
 
@@ -33,19 +32,20 @@ class CompleteStep(JobStep):  # type: ignore
         from src.services.file import StorageService
 
         self.manifest = self.get_manifest(job)
+        job_ctx = job.context
 
         # 1. Initialize Storage Service for Archival
         # We retrieve the 'archive' service defined in the job configuration
         object_store: StorageService = ServiceFactory.get_service(
-            type=job.context.archive_type,  # e.g., "s3" or "local"
-            **job.context.archive_config,
+            type=job_ctx.archive_type,  # e.g., "s3" or "local"
+            **job_ctx.archive_config,
         )
 
         try:
             # 2. OPTIONAL ARCHIVAL
             # Subject to privacy requirements defined in job_config
             final_archive_path = None
-            if job.context.enable_archival:
+            if job_ctx.enable_archival:
                 # 1. Archive Parquet Files
                 # We move data from the high-speed 'data/' vault to the 'archive/' vault.
                 # This includes both the Raw (Sanitized) and Transform results.
@@ -60,7 +60,7 @@ class CompleteStep(JobStep):  # type: ignore
                     shutil.rmtree(target)
 
             # 4. Calculate Timestamps and Duration
-            start_ts = datetime.fromisoformat(manifest.start.ingestion_started_at)
+            start_ts = datetime.fromisoformat(job.manifest.start.ingestion_started_at)
             end_ts = datetime.now()
             duration_secs = (end_ts - start_ts).total_seconds()
 
@@ -92,7 +92,7 @@ class CompleteStep(JobStep):  # type: ignore
             self.finalize(job, exception=e)
             raise
 
-    def _archive_parquet_data(self, object_store: StorageService, job: "Job") -> None:
+    def _archive_parquet_data(self, object_store: StorageService, job: Job) -> None:
         """
         Decision: Move files to the Archive location defined in the Context.
         Standardizing on: archive/{job_id}/{run_id}/{step}/
@@ -106,7 +106,7 @@ class CompleteStep(JobStep):  # type: ignore
             if src_folder.exists():
                 dest_folder = f"{archive_root}/{step}"
                 # target_archive.mkdir(parents=True, exist_ok=True)
-                final_archive_path = object_store.archive_data(
+                object_store.archive_data(
                     source_dir=src_folder, archive_path=dest_folder
                 )
 
@@ -142,15 +142,4 @@ class CompleteStep(JobStep):  # type: ignore
             ),
         )
 
-    def _purge_workspace(self, job: "Job") -> None:
-        """
-        Decision: Immediate reclamation of disk space.
-        Deletes the active symlink folder and any remaining stray data.
-        """
-        if job.folder.exists():
-            shutil.rmtree(job.folder)
 
-        # Also clean up any 'data/' subfolders that weren't archived
-        for step in ["raw", "transform"]:
-            physical_data = JOB_STEPS_BASE_DIR / "data" / step / f"{job.id}_*"
-            # Logic to glob and delete specifically for this job_id

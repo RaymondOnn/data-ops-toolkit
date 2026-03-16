@@ -1,4 +1,7 @@
 import time
+import functools
+from typing import Callable, Any
+
 from enum import StrEnum
 
 class CircuitBreakerTripped(Exception):
@@ -11,129 +14,64 @@ class CircuitBreakerState(StrEnum):
     CLOSED = "CLOSED"     # Healthy
     OPEN = "OPEN"         # Error: Stop execution
     HALF_OPEN = "HALF_OPEN" # Testing: Allow one trial
+    
 
 class CircuitBreaker:
     def __init__(
-        self, 
-        threshold: int, 
-        recovery_timeout: int = 300,
-        exceptions: list[Exception] | None = None
-    ) -> None:
-        self.threshold = threshold
-        self._state = CircuitBreakerState.CLOSED
+        self,
+        failure_threshold: int = 3,
+        recovery_timeout: int = 60,
+        expected_exceptions: tuple[type[Exception], ...] = (Exception,),
+    ):
+        self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
-        self.exceptions = exceptions or []
+        self.expected_exceptions = expected_exceptions
         
-    @property
-    def state(self) -> CircuitBreakerState:
-        """
-        The current state of the circuit breaker.
+        # State tracking
+        self.state = CircuitBreakerState.CLOSED
+        self.failures = 0
+        self.last_failure_time: float | None = None
 
-        :return: The current state of the circuit breaker as a CircuitBreakerState enum.
-        :rtype: CircuitBreakerState
-        """
-        return self._state
-    
-    def can_attempt(self) -> bool:
-        return self.state != "OPEN"
-    
-    def tripped(self) -> bool:
-        return self.state == "OPEN"
-        
-    def success(self) -> None:
-        self._state = CircuitBreakerState.CLOSED
-        
-    def trip(self) -> None:
-        self._state = CircuitBreakerState.OPEN
-        
-    
-    def reset(self) -> None:
-        """
-        Reset the circuit breaker back to its original state ("CLOSED").
-        """
-        self._state = CircuitBreakerState.CLOSED
-        
-    def __repr__(self) -> str:
-        return f"CircuitBreaker(threshold={self.threshold}, state={self.state}"
-        
-
-    def evaluate_state(self, current_status: str, last_failure_time: float) -> CircuitBreakerState:
-        """Determines logic-based state based on Registry data."""
-        if current_status != "OPEN":
-            return CircuitBreakerState.CLOSED
-        
-        # Check if cooling-off period has passed
-        if (time.time() - last_failure_time) > self.recovery_timeout:
-            return CircuitBreakerState.HALF_OPEN
-            
-        return CircuitBreakerState.OPEN
-
-    def should_trip(self, fails: int) -> bool:
-        return fails >= self.threshold
-    
-    def get_current_state(
-        self, 
-        status: str, 
-        last_failure_time: float, 
-        retry_attempts: int = 0
-    ) -> CircuitBreakerState:
-        """
-        Logic engine to determine state.
-        Uses exponential backoff: 300s -> 600s -> 1200s... capped at max_timeout.
-        """
-        if status != CircuitBreakerState.OPEN:
-            return CircuitBreakerState.CLOSED
-
-        # Calculate backoff: base_timeout * 2^(retries)
-        # We use max(0, retry_attempts - 1) so the first recovery attempt starts at base_timeout
-        # Exponential Backoff: 300s, 600s, 1200s, 2400s...
-        current_timeout = self.recovery_timeout * (2 ** max(0, retry_attempts - 1))
-        
-        elapsed = time.time() - last_failure_time
-        
-        if elapsed > current_timeout:
-            return CircuitBreakerState.HALF_OPEN
-        
-        return CircuitBreakerState.OPEN
-    
-    
-
-def circuit_breaker(
-    failure_threshold: int = 3,
-    recovery_timeout: int = 60,
-    failure_exceptions: tuple[type[Exception], ...] = (Exception,),
-    recover: bool = True
-):
-    def decorator(func: Callable):
-        state = _global_circuit_breaker_state.setdefault(func, {
-            "failures": 0,
-            "last_failure_time": 0.0,
-            "open": False
-        })
-
+    def __call__(self, func: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            if state["open"]:
-                if not recover:
-                    raise RuntimeError(f"Global circuit breaker permanently OPEN for {func.__name__}")
-
-                elapsed = time.time() - state["last_failure_time"]
-                if elapsed < recovery_timeout:
-                    raise RuntimeError(f"Global circuit breaker OPEN for {func.__name__}, retry in {int(recovery_timeout - elapsed)}s")
-                else:
-                    state["open"] = False
-                    state["failures"] = 0
-
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            self._before_call()
+            
             try:
                 result = func(*args, **kwargs)
-                state["failures"] = 0
+                self._on_success()
                 return result
-            except failure_exceptions as exc:
-                state["failures"] += 1
-                if state["failures"] >= failure_threshold:
-                    state["open"] = True
-                    state["last_failure_time"] = time.time()
-                    LOG.error(f"Global circuit breaker tripped on {func.__name__}")
+            except self.expected_exceptions as e:
+                self._on_failure(exception=e)
                 raise
         return wrapper
-    return decorator
+
+    def _before_call(self) -> None:
+        """Logic to determine if the call should proceed."""
+        if self.state == CircuitBreakerState.OPEN:
+            elapsed = time.time() - (self.last_failure_time or 0)
+            
+            if elapsed >= self.recovery_timeout:
+                self.state = CircuitBreakerState.HALF_OPEN
+            else:
+                remaining = int(self.recovery_timeout - elapsed)
+                raise CircuitBreakerTripped(f"Breaker OPEN. Retry in {remaining}s")
+
+    def _on_success(self) -> None:
+        """Reset everything on a successful call."""
+        self.state = CircuitBreakerState.CLOSED
+        self.failures = 0
+
+    def _on_failure(self, exception: Exception) -> None:
+        """Handle increments and state transitions on error."""
+        self.failures += 1
+        
+        # In HALF_OPEN, a single failure trips it immediately
+        if self.state == CircuitBreakerState.HALF_OPEN or self.failures >= self.failure_threshold:
+            self.state = CircuitBreakerState.OPEN
+            self.last_failure_time = time.time()
+            # print(f"Circuit Breaker TRIPPED due to: {exception}")
+            
+    @property
+    def current_state(self) -> CircuitBreakerState:
+        return self.state

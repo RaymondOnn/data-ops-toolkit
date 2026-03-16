@@ -1,5 +1,5 @@
+import time
 from typing import Any
-from abc import abstractmethod
 
 import polars as pl
 
@@ -10,6 +10,14 @@ from src.services.registry import protect_service
 
 from libs.auth.models import Secret
 from libs.file import FileSystemClient, FileSystemSkills
+from libs.resilience.circuit_breaker import CircuitBreaker
+from libs.clients.base import ClientCantConnect
+
+breaker = CircuitBreaker(
+    failure_threshold=3,
+    recovery_timeout=300,
+    expected_exceptions=(ClientCantConnect, ConnectionError, TimeoutError)
+)
 
 
 class StorageService(Service):
@@ -50,7 +58,7 @@ class StorageService(Service):
             storage_options=merged_opts
         )
 
-    @protect_service(threshold=3) # type: ignore
+    @protect_service(breaker) # type: ignore
     def get_work_units(self, target: str, num_partitions: int) -> list[dict[str, Any]]:
         """
         Uses the internal client to split 50M rows.
@@ -63,7 +71,7 @@ class StorageService(Service):
         files = self.client.fs.glob(f"{path}/**/*")
         return [{"files": files[i::num_partitions]} for i in range(num_partitions)]
     
-    @protect_service(threshold=3) # type: ignore
+    @protect_service(breaker) # type: ignore
     def stage_data(self, source_dir: str, target_table: str) -> str:
         """
         Phase 1: Organize Parquet files into a staging directory.

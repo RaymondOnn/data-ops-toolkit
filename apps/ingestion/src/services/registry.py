@@ -6,20 +6,22 @@ import diskcache
 import structlog
 
 
-from src.utils.constants import ENGINE_CACHE_PATH
-from libs.resilence.circuit_breaker import (
+from src.utils.constants import DISKCACHE_FILE_PATH
+from libs.resilience.circuit_breaker import (
     CircuitBreaker, 
     CircuitBreakerTripped,
     CircuitBreakerState
 )
 
-
-
-
 LOG = structlog.getLogger(__name__)
 
 class ServiceRegistry:
-    _cache: diskcache.Cache = diskcache.Cache(f"{ENGINE_CACHE_PATH}/services")
+    _cache: diskcache.Cache = diskcache.Cache(
+            DISKCACHE_FILE_PATH,
+            timeout=10, # Increase timeout for slow PV file locks (NFS/EFS)
+            settings={'sqlite_journal_mode': 'wal'} # Ensure WAL mode is active for concurrent reads/writes
+        )
+    _local_failures: dict[str, int]= {} # In-memory buffer for THIS Pod
 
     @classmethod
     def get_status(cls, name: str) -> str:
@@ -43,70 +45,113 @@ class ServiceRegistry:
         return int(cls._cache.get(f"retries:{name}", 0))
 
     @classmethod
-    def increment_retry_attempt(cls, name: str) -> int:
-        with cls._cache.transact():
-            val = cls._cache.get(f"retries:{name}", 0) + 1
-            cls._cache.set(f"retries:{name}", val, expire=86400) # 24h TTL
-            return int(val)
+    def get_failure_count(cls, name: str) -> int:
+        """Retrieves the current consecutive failure count for a service."""
+        return int(cls._cache.get(f"fails:{name}", 0))
 
     @classmethod
-    def increment_failure(cls, name: str) -> int:
+    def increment_failure(cls, name: str, window_seconds: int = 5) -> int:
+        """Increments and returns the new failure count atomically."""
+        """
+        Dampens failure increments. Multiple failures within 
+        the window count as one to avoid swarming updates at the same time.
+        """
+        now = time.time()
+        
         with cls._cache.transact():
-            val: int = cls._cache.get(f"fails:{name}", 0) + 1
-            cls._cache.set(f"fails:{name}", val, expire=600)
-            return val
+            last_fail_time = float(cls._cache.get(f"last_reported:{name}", 0))
+            current_fails = int(cls._cache.get(f"fails:{name}", 0))
+            
+            # If we are within the window, ignore the increment but keep current count
+            if now - last_fail_time < window_seconds:
+                return current_fails
+            
+            # Outside window: increment and update timestamp
+            new_total = current_fails + 1
+            cls._cache.set(f"fails:{name}", new_total, expire=3600)
+            cls._cache.set(f"last_reported:{name}", now, expire=3600)
+            
+            # Perform Autonomous Logic: Trip the circuit if threshold reached
+            if new_total >= 3: # Example threshold
+                cls._cache.set(f"status:{name}", "OPEN", expire=300)
+                
+            return new_total
 
     @classmethod
     def reset(cls, name: str) -> None:
-        """Clear all health data upon successful recovery."""
-        cls._cache.delete(f"status:{name}")
-        cls._cache.delete(f"fails:{name}")
-        cls._cache.delete(f"last_fail:{name}")
-        cls._cache.delete(f"retries:{name}")
+        """Clears all failure metrics upon a successful call."""
+        with cls._cache.transact():
+            cls._cache.delete(f"fails:{name}")
+            cls._cache.delete(f"last_fail:{name}")
+            cls._cache.delete(f"retries:{name}")
+            cls._cache.set(f"status:{name}", "CLOSED")
 
         
-def protect_service(threshold: int = 3, timeout: int = 300)  -> Callable[..., Any]:
+def protect_service(breaker: CircuitBreaker) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """
+    Enhanced decorator that uses the CircuitBreaker logic 
+    backed by the global ServiceRegistry.
+    """
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        """
+        Decorator that wraps a function with CircuitBreaker logic 
+        backed by the global ServiceRegistry.
+
+        It fetches the global state from the ServiceRegistry, 
+        syncs the breaker instance with the global state, 
+        checks for a tripped breaker before calling the function, 
+        executes the function, and then updates the global state 
+        based on the breaker's state.
+
+        If the breaker is tripped, it will raise a CircuitBreakerTripped 
+        exception. If the function execution raises an exception, 
+        it will update the global state accordingly.
+
+        :param func: The function to be wrapped
+        :return: The wrapped function
+        """
         @functools.wraps(func)
         def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
-            # 1. Initialize logic engine with provided config
-            breaker = CircuitBreaker(threshold=threshold, recovery_timeout=timeout)
-            
-            # 1. Pull current persistent state
-            status = ServiceRegistry.get_status(self.name)
-            last_fail = ServiceRegistry.get_last_failure_time(self.name)
-            retries = ServiceRegistry.get_retry_attempts(self.name)
-            
-            # 2. Evaluate logical state
-            state = breaker.get_current_state(status, last_fail, retries)
+            # 1. FETCH GLOBAL STATE
+            # 'self.name' refers to the DB client name (e.g., "PostgresClient")
+            service_name = self.name 
+            status = ServiceRegistry.get_status(service_name)
+            last_fail = ServiceRegistry.get_last_failure_time(service_name)
+            fails = ServiceRegistry.get_failure_count(service_name)
 
-            if state == CircuitBreakerState.OPEN:
-                raise CircuitBreakerTripped(f"Circuit for {self.name} is OPEN. Backoff in effect.")
+            # 2. SYNC BREAKER INSTANCE WITH GLOBAL STATE
+            # We temporarily inject the registry state into your breaker logic
+            breaker.state = CircuitBreakerState(status)
+            breaker.failures = fails
+            breaker.last_failure_time = last_fail
+
+            # 3. BEFORE CALL CHECK
+            try:
+                breaker._before_call()
+            except CircuitBreakerTripped:
+                # If your class updated to HALF_OPEN, sync it back to registry
+                if breaker.state == CircuitBreakerState.HALF_OPEN:
+                    ServiceRegistry.update_status(service_name, CircuitBreakerState.HALF_OPEN)
+                raise
 
             try:
-                # 3. Attempt execution
+                # 4. EXECUTE
                 result = func(self, *args, **kwargs)
                 
-                # 4. If we were testing (HALF_OPEN) and succeeded, clear the registry
-                if state == CircuitBreakerState.HALF_OPEN:
-                    LOG.info("service_recovered", service=self.name)
-                
-                ServiceRegistry.reset(self.name)
+                # SUCCESS: Reset registry
+                breaker._on_success()
+                ServiceRegistry.reset(service_name)
                 return result
 
-            except Exception as e:
-                # 5. Handle Failure
-                fail_count = ServiceRegistry.increment_failure(self.name)
-                ServiceRegistry.set_last_failure_time(self.name, time.time())
+            except breaker.expected_exceptions as e:
+                # FAILURE: Update registry
+                breaker._on_failure(e)
                 
-                # If we fail during a recovery attempt (HALF_OPEN), increment retry count
-                if state == CircuitBreakerState.HALF_OPEN:
-                    ServiceRegistry.increment_retry_attempt(self.name)
-                
-                if breaker.should_trip(fail_count) or state == CircuitBreakerState.HALF_OPEN:
-                    ServiceRegistry.update_status(self.name, "OPEN")
-                    LOG.error("circuit_tripped", service=self.name, fail_count=fail_count)
+                # Persist the new state to the shared cache
+                ServiceRegistry.increment_failure(service_name)
+                ServiceRegistry.set_last_failure_time(service_name, time.time())
+                ServiceRegistry.update_status(service_name, breaker.state)
                 
                 raise e
         return wrapper
-    return decorator 
+    return decorator

@@ -6,7 +6,7 @@ import msgspec
 import structlog
 from src.core.models.job import Job
 from src.core.models.job.manifest import BasePayload
-from src.core.models.job.steps import JobBitmask, JobStep
+from src.core.models.steps import JobBitmask, JobStep
 
 LOG = structlog.getLogger(__name__)
 

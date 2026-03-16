@@ -106,6 +106,7 @@ class JobManifest(msgspec.Struct):
     dataset_name: str
     job_status: JobStatus = JobStatus.PENDING
     current_step: str
+    bitmask: int
 
     # Step-Specific Data (The "Body")
     start: Optional[BasePayload] = None

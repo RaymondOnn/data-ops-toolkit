@@ -2,10 +2,10 @@ import time
 from datetime import datetime
 
 import structlog
-from src.core.load.load import Loader, WriteContext
+from src.core.strategies.load.load import Loader, WriteContext
 from src.core.models.job import Job
 from src.core.models.job.manifest import PublishPayload
-from src.core.models.job.steps import JobBitmask, JobStep
+from src.core.models.steps import JobBitmask, JobStep
 from src.services.factory import ServiceFactory
 
 LOG = structlog.getLogger(__name__)
@@ -29,6 +29,8 @@ class PublishStep(JobStep):  # type: ignore
 
     def execute(self, job: "Job") -> str:
         start_time = time.perf_counter()
+        job_ctx = job.context
+
 
         try:
             manifest = self.get_manifest(job)
@@ -38,7 +40,7 @@ class PublishStep(JobStep):  # type: ignore
 
             # 1. Get the Service (Securely initialized on Ray worker via ServiceFactory)
             service = ServiceFactory.get_service(
-                job.context.sink_type, **job.context.sink_config
+                job_ctx.sink_type, **job_ctx.sink_config
             )
 
             # 2. Get the behavioral Strategy
@@ -46,9 +48,9 @@ class PublishStep(JobStep):  # type: ignore
 
             # 3. Create Context
             context = WriteContext(
-                target=job.context.target_table,
-                partition_col=job.context.partition_col,
-                partition_value=job.context.partition_value,
+                target=job_ctx.target_table,
+                partition_col=job_ctx.partition_col,
+                partition_value=job_ctx.partition_value,
             )
 
             # 2. FINISH THE JOB
@@ -59,14 +61,14 @@ class PublishStep(JobStep):  # type: ignore
                 write_ctx=context,
             )
             LOG.info(
-                "Job Published", job_id=job.id, table=job.context.target_destination
+                "Job Published", job_id=job.id, table=job_ctx.target_destination
             )
 
             # 3. PAYLOAD: The 'Success Receipt'
             duration_ms = round(time.time() - start_time, 2)
             payload = PublishPayload(
                 step_outcome="COMPLETED",
-                final_destination=job.context.target_identifier,
+                final_destination=job_ctx.target_identifier,
                 promotion_duration_secs=duration_ms,
                 completed_at=datetime.now().isoformat(),
             )

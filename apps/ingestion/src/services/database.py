@@ -1,7 +1,8 @@
-from typing import Any, Generator, Callable, TypeVar
+from typing import Any, Generator
 from abc import abstractmethod
 import time
 
+from libs.clients.base import ClientCantConnect
 import polars as pl
 
 
@@ -12,17 +13,20 @@ from src.services.registry import protect_service
 from libs.auth.models import Secret
 from libs.clients.database.base import DBClient
 from libs.clients.database.postgres import PostgresClient
-from libs.clients.database.oracle import OracleClient, 
+from libs.clients.database.oracle import OracleClient
 from libs.clients.database.clickhouse import ClickhouseClient
+from libs.resilience.circuit_breaker import CircuitBreaker
 
 
 
-F = TypeVar("F", bound=Callable[..., Any])
 
-# The Generic Fallback Logic
-# If a database doesn't support a native "Atomic Swap" or "Merge," the fallback pattern should be:
-# Stage: Create a temporary table and use standard batch inserts.
-# Promote: Wrap a DELETE and INSERT INTO ... SELECT in a single SQL transaction.
+# F = TypeVar("F", bound=Callable[..., Any])
+
+breaker = CircuitBreaker(
+    failure_threshold=3,
+    recovery_timeout=300,
+    expected_exceptions=(ClientCantConnect, ConnectionError, TimeoutError)
+)
 
 class DatabaseService(Service):
     """
@@ -41,7 +45,7 @@ class DatabaseService(Service):
         # All DBs use the client's load strategy (e.g., ORA_HASH, ctid)
         return self.client.get_load_strategy(target, partitions)
     
-    @protect_service(threshold=3) # type: ignore
+    @protect_service(breaker) # type: ignore
     def sql(self, query: str) -> list[tuple[Any, ...]]:
         """
         Executes a standard SQL query and returns a Polars DataFrame.
@@ -49,7 +53,7 @@ class DatabaseService(Service):
         """
         return self.client.sql(query)
     
-    @protect_service(threshold=3) # type: ignore
+    @protect_service(breaker) # type: ignore
     def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
         # Centralized protected fetch for all DB types
         return self.client.fetch_df(query)

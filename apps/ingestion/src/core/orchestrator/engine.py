@@ -8,10 +8,9 @@ import ray
 import structlog
 from filelock import FileLock
 
-from src.core.context.job import JobContext
 from src.core.models.job import Job, JobManifest, _JOB_ORDER
 from src.services.registry import ServiceRegistry
-from src.utils.constants import JOB_STEPS_BASE_DIR
+from src.utils.constants import JOB_STEPS_BASE_DIR, DISKCACHE_FILE_PATH
 
 
 LOG = structlog.getLogger(__name__)
@@ -23,18 +22,16 @@ CACHE_DIR = ".cache/ingestion"
 class Worker:
     def __init__(self, worker_id: str):
         self.worker_id = worker_id
-        self.cache = diskcache.Cache(CACHE_DIR)
+        self.cache = diskcache.Cache(
+            DISKCACHE_FILE_PATH,
+            timeout=10, # Increase timeout for slow PV file locks (NFS/EFS)
+            settings={'sqlite_journal_mode': 'wal'} # Ensure WAL mode is active for concurrent reads/writes
+        )
         self.lock = FileLock(LOCK_FILE)
         self._busy = False
 
     def process_step(self, key: str, config_file_path: str | Path) -> None:
         current_step, composite_key = key.split(":", 1)
-
-        # 1. Load the "Frozen" context from the folder.
-        # File ends with config.json
-        config_path = Path(config_file_path)
-        with open(config_path, "rb") as f:
-            ctx = msgspec.json.decode(f.read(), type=JobContext)
 
         # 1. Rehydrate Job
         with self.lock:
@@ -44,8 +41,7 @@ class Worker:
             job_id=meta["job_id"],
             run_id=meta["run_id"],
             worker_id=self.worker_id,
-            job_context=ctx,
-            start_step=current_step,
+            target_step=current_step,
         )
         self.is_busy = True
 
@@ -89,7 +85,7 @@ class IngestionEngine:
         # This ensures the shared cache path exists for all Ray workers
         self.registry = ServiceRegistry()
 
-        self.cache = diskcache.Cache(cache_dir)
+        self.cache = diskcache.Cache(DISKCACHE_FILE_PATH)
         self.lock = FileLock(f"{cache_dir}/orchestrator.lock")
 
         if not ray.is_initialized():
@@ -274,31 +270,6 @@ class IngestionEngine:
         
         # It must exist and be a valid link/directory
         return bool(active_path.exists())
-
-    # def _find_last_completed_step(self, job_meta: dict[str, Any]) -> str:
-    #     """
-    #     Scans the output_path for .success markers to find the furthest progress.
-    #     """
-    #     # Order of operations
-    #     steps = ["start", "raw", "transform", "audit", "load"]
-    #     last_completed = "start"
-
-    #     config = job_meta["config"]
-    #     base_path = Path(config.output_path)
-
-    #     for step in steps:
-    #         # We look for the marker: <step_name>/<job_id>/<run_id>/<dataset>/*.success
-    #         # This matches the logic in JobStep._get_checkpoint_path
-    #         marker_pattern = f"{step}/{job_meta['job_id']}/{job_meta['run_id']}/{config.dataset_name}/*.success"
-    #         markers = list(base_path.glob(marker_pattern))
-
-    #         if markers:
-    #             last_completed = step
-    #         else:
-    #             # If a step is missing a marker, the previous one was the last successful one
-    #             break
-
-    #     return last_completed
 
     def _get_next_step_name(self, current_step: str) -> str:
         """
