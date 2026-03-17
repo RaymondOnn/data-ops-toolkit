@@ -4,10 +4,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import msgspec
-import structlog
-
+import msgspec  # type: ignore
+import structlog  # type: ignore
 from src.core.models.job import Job, JobStatus
+from src.core.models.steps import JobSteps
 from src.services.database import DatabaseService
 from src.utils.constants import ALWAYS_ON_MODE, JOB_STEPS_BASE_DIR
 
@@ -17,16 +17,17 @@ LOG = structlog.getLogger(__name__)
 PID_FILE = Path(".daemon.pid")
 MISFIRE_GRACE_PERIOD_SECS = 3600
 
+
 def generate_run_id() -> str:
     """Generates a unique run ID for a job."""
-    from nanoid import generate
+    from nanoid import generate  # type: ignore
+
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     short_hash = generate(alphabet="0123456789abcdef", size=6)
     return f"{timestamp}-{short_hash}"
 
 
-
-# TODO: Check Disk Space 
+# TODO: Check Disk Space
 # - 85%+: Mark system DEGRADED, disable Raw stage
 # - 90%+: Mark system CRITICAL, alert on-call
 # - Load stage continues to clear backlog)
@@ -36,140 +37,157 @@ def generate_run_id() -> str:
 # TODO: Feature Toggles
 # TODO: Cancel Job
 
+
 class Orchestrator:
     def __init__(self, db_service: DatabaseService):
-        from src.core.orchestrator.state import StateStore
         from src.core.orchestrator.engine import IngestionEngine
         from src.core.orchestrator.lifecycle import LifecycleManager
         from src.core.orchestrator.signals import SignalProcessor
-        
-        
+        from src.core.orchestrator.state import StateStore
+
         self.heartbeat = Heartbeat()
-        self.last_heartbeat: float = 0
-        
         self.engine = IngestionEngine()
-        self.last_engine_scan: float = 0
-        
+
         if ALWAYS_ON_MODE:
             self.state_store = StateStore(db_service)
-            self.last_state_sync: float = 0        
-            self.last_job_trigger: float = 0 
             # State timers
             self.timers = {
-                "heartbeat": 0, 
-                "engine_scan": 0, 
-                "job_trigger": 0, 
-                "db_poll": 0, 
-                "recovery_sweep": 0, 
-                "state_sync": 0,
-                
+                "heartbeat": float(0),
+                "engine_scan": float(0),
+                "job_trigger": float(0),
+                "db_poll": float(0),
+                "recovery_sweep": float(0),
+                "state_sync": float(0),
             }
-            
+
             # Component Injection
             self.signals = SignalProcessor(self.state_store, self.engine)
             self.lifecycle = LifecycleManager(self.state_store, self.engine)
-            
+
             # 2. Wire the Signals to the Handlers (The Refactor Fix)
-            self.signals.register_command("RECOVER_ALL.cmd", self.lifecycle.handle_recovery)
-            self.signals.register_command("PURGE_EXPIRED.cmd", self.lifecycle.handle_expiry)
-            self.signals.register_command("RELOAD_CONFIG.cmd", self._reload_internal_config)
-            
+            self.signals.register_command(
+                "RECOVER_ALL.cmd", self.lifecycle.handle_recovery
+            )
+            self.signals.register_command(
+                "PURGE_EXPIRED.cmd", self.lifecycle.handle_expiry
+            )
+            self.signals.register_command(
+                "RELOAD_CONFIG.cmd", self._reload_internal_config
+            )
+
         LOG.info("Orchestrator initialized", mode=self.mode)
 
-    def run(self, job_id: str, overrides: dict[str, Any] | None = None) -> None:
+    def run(
+        self,
+        job_id: str,
+        dataset_id: str,
+        run_date_str: str | None = None,
+        overrides: dict[str, Any] | None = None,
+    ) -> None:
         if ALWAYS_ON_MODE:
             self._start_always_on_loop()
             self.mode = "ALWAYS_ON"
         else:
-            self._run_synchronous_task(job_id, overrides)
+            self._run_synchronous_task(
+                job_id,
+                dataset_id=dataset_id,
+                run_date_str=run_date_str,
+                overrides=overrides,
+            )
             self.mode = "TRIGGER"
-
 
     def _start_always_on_loop(self) -> None:
         """
         ARCHITECTURAL NOTE: We use a Polling Control Loop instead of an Event Watchdog.
-        1. Portability: Works identically on EC2 (local disk) and K8S (EFS/NFS) 
+        1. Portability: Works identically on EC2 (local disk) and K8S (EFS/NFS)
         where inotify events often fail to propagate across pods.
-        2. Backpressure: Prevents 'thundering herd' spikes by batching signal 
+        2. Backpressure: Prevents 'thundering herd' spikes by batching signal
         processing into predictable 'ticks'.
-        3. Self-Healing: Every tick performs a full state reconciliation, 
+        3. Self-Healing: Every tick performs a full state reconciliation,
         ensuring we recover from crashes automatically.
         """
-        self.heartbeat.ready()    
-        
+        self.heartbeat.ready()
+
         try:
             while True:
                 now = time.time()
                 self.signals._process_worker_signals()
- 
+
                 # --- 1. Systemd Heartbeat (Every 30s) ---
                 if now - self.timers["heartbeat"] > 30:
                     self.heartbeat.ping()
                     self.timers["heartbeat"] = int(now)
-                                
+
                 # --- 2. Database Polling (Every 60s) ---
-                if now - self.timers["db_poll"] > 60:                  
+                if now - self.timers["db_poll"] > 60:
                     # state_store.refresh() queries Postgres for active job definitions
-                    self.state_store.refresh() 
+                    self.state_store.refresh()
                     self._evaluate_triggers(self.state_store.get_active_definitions())
                     self.timers["db_poll"] = int(now)
-                    
-                
+
                 # 2. NEW: Sync the StateStore to Postgres
                 # This writes all buffered 'RUNNING', 'HELD', or 'COMPLETED' updates
                 if now - self.timers["state_sync"] > 30:
                     self.state_store.flush()
                     self.timers["state_sync"] = int(now)
-                    
+
                 # # --- 3. Job Triggering (Every 10s) ---
                 # if now - self.last_job_trigger > 10:
                 #     self.last_job_trigger = now
-                    
+
                 # --- 4. Engine Driving (Every Loop - High Priority) ---
                 # This drives the actual work (Ray workers/Recovery)
                 if now - self.timers["engine_scan"] > 10:
                     self.engine.scan_and_recover()
                     self.engine._process_jobs()
                     self.timers["engine_scan"] = int(now)
-                    
+
                 # 3. Maintenance: Run recovery sweep every 5 minutes
                 if now - self.timers["recovery_sweep"] > 300:
                     self.lifecycle._handle_recovery()
                     self.lifecycle._handle_expiry()
                     self.timers["recovery_sweep"] = int(now)
-                
+
                 # Small sleep to prevent 100% CPU usage
                 time.sleep(1)
         except KeyboardInterrupt:
             self.stop()
 
     def _run_synchronous_task(
-        self, 
-        job_id: str, 
-        overrides: dict[str, Any] | None = None
+        self,
+        job_id: str,
+        dataset_id: str,
+        run_date_str: str | None = None,
+        overrides: dict[str, Any] | None = None,
     ) -> None:
         """The Dumb Trigger Mode logic"""
         if not overrides:
             raise ValueError("Dumb mode requires a valid JobConfig.")
-        
-        self._trigger_job(job_id, overrides)
-        
+
+
+        self._trigger_job(
+            job_id,
+            dataset_id=dataset_id,
+            run_date_str=run_date_str,
+            overrides=overrides,
+        )
+
         # 2. Block until this specific job is finished
         LOG.info(f"Monitoring job {job_id} until completion...")
-        
+
         while True:
             # Run the engine cycle to drive the job forward
             self.engine._process_jobs()
-            
+
             # Check if our specific job is in the 'complete' prefix or marked COMPLETED
             # Note: We check all stage prefixes for the key
-            
+
             if self._is_job_finished(job_id):
                 LOG.info(f"Job {job_id} finished successfully.")
                 break
-            
+
             time.sleep(2)
-            
+
     def _is_job_finished(self, job_id: str) -> bool:
         """
         Checks if all tables associated with a job_id have cleared the pipeline.
@@ -184,22 +202,27 @@ class Orchestrator:
         # 2. Logical State Check via StateStore Mirror
         # We look for any run associated with this job_id that is still in an 'Active' state
         active_runs = [
-            run for run in self.state_store._mirror.values() 
+            run
+            for run in self.state_store._mirror.values()
             if run["job_id"] == job_id and run["status"] in JobStatus.active_statuses()
         ]
-        
+
         return len(active_runs) == 0
 
-    def _evaluate_triggers(self, job_records: list[dict[str, Any]]) -> None:
+    def _evaluate_triggers(
+        self,
+        job_records: list[dict[str, Any]],
+    ) -> None:
         """
-        Evaluates each job against its trigger type and 
+        Evaluates each job against its trigger type and
         fans out tables to the IngestionEngine.
-        
+
         Misfire Policy is handled here based on GRACE_PERIOD_SECS:
         -1: Fire Immediately (Always True)
         0 : Skip (Always False if delay > 0)
         >0: Grace Period (True if within bounds)
         """
+
         def provision_run(record: dict[str, Any]) -> None:
             from src.core.orchestrator.trigger import (
                 FileTriggerEvent,
@@ -208,17 +231,19 @@ class Orchestrator:
             )
 
             # Map of trigger types to their logic classes
-            trigger_map: dict[str, TriggerEvent]= {
+            trigger_map: dict[str, TriggerEvent] = {
                 "CRON": TimeTriggerEvent(),
                 "FILE": FileTriggerEvent(),
-                "MANUAL": TimeTriggerEvent(), # Ad-hoc always fires
+                "MANUAL": TimeTriggerEvent(),  # Ad-hoc always fires
             }
-            
-            
+
             trigger_type = record.get("trigger_type", "CRON")
             if trigger_map[trigger_type].should_fire(record):
-                self._trigger_job(job_id=record["job_id"])
-        
+                self._trigger_job(
+                    job_id=record["job_id"],
+                    dataset_id=record["dataset_id"],
+                )
+
         now = time.time()
 
         for record in job_records:
@@ -230,87 +255,127 @@ class Orchestrator:
 
             # Resolve grace period: Config override > System Default
             # -1 = Always Fire | 0 = Strict Skip | >0 = Threshold
-            grace_sec = record.get("misfire_grace_sec", )
+            grace_sec = record.get(
+                "misfire_grace_sec",
+            )
             delay = now - scheduled_time
-            
+
             # --- MISFIRE POLICY EVALUATION ---
             # CASE 1: The job is LATE (delay > 0)
-            if delay > 0: 
-                
+            if delay > 0:
                 # A: If grace_sec is -1, it's a "Manual Resume" or "Force Run"
                 # Policy -1 means 'run no matter how late we are'
                 if MISFIRE_GRACE_PERIOD_SECS == -1:
-                    LOG.info(f"[FORCE_RUN]: Job {record['job_id']} is {delay}s late. Policy: -1")
+                    LOG.info(
+                        f"[FORCE_RUN]: Job {record['job_id']} is {delay}s late. Policy: -1"
+                    )
                     provision_run(record)
                     continue
-                    
+
                 # B: If delay is within the grace period (delay < grace_sec)
                 if delay <= MISFIRE_GRACE_PERIOD_SECS:
-                    LOG.info(f"[CATCH_UP]]: Job {record['job_id']} within grace ({delay}s < {grace_sec}s)")
+                    LOG.info(
+                        f"[CATCH_UP]]: Job {record['job_id']} within grace ({delay}s < {grace_sec}s)"
+                    )
                     provision_run(record)
                     continue
-                    
+
                 # C: If delay is beyond the grace period
                 if delay > MISFIRE_GRACE_PERIOD_SECS:
-                    LOG.warning(f"[EXPIRED]: Job {record['job_id']} delayed by {delay}s. Policy: {grace_sec}s")
+                    LOG.warning(
+                        f"[EXPIRED]: Job {record['job_id']} delayed by {delay}s. Policy: {grace_sec}s"
+                    )
                     # We tell the StateStore to update the next run time without executing
                     self.state_store.skip_misfired_run(record["job_id"])
                     continue
 
             # CASE 2: The job is ON TIME (Standard Trigger Logic)
             provision_run(record)
-            
-                
+
     def stop(self) -> None:
         """Graceful shutdown for Always-On"""
         print("Shutting down gracefully...")
         # Close DB connections, stop Ray actors, etc.
         sys.exit(0)
-        
+
     def _trigger_job(
-        self, 
-        job_id: str, 
-        overrides: dict[str, Any] | None = None
+        self,
+        job_id: str,
+        dataset_id: str,
+        run_date_str: str | None = None,
+        overrides: dict[str, Any] | None = None,
     ) -> None:
-        from src.core.context.job import JobContextBuilder
-        from src.core.models.job import _JOB_ORDER
-        
+        from src.core.contexts.job import JobContextBuilder
+
+        # 'overrides' here is the result of parse_set_options:
+        # {"_global": {...}, "dataset_name": {...}}
         overrides = overrides or {}
-        
-        # 1. Load the latest YAML via Dynaconf for overrides
-        # This returns a list (1 to N configs depending on table count)
-        factory = JobContextBuilder("app.yaml", "job.yaml", env="production")
-        job_contexts = factory.build_job_contexts(job_id=job_id, overrides=overrides)
+        all_overrides = overrides or {"_global": {}}
+
+        # 1. Get the list of dataset configurations for this Job ID
+        # (This uses Dynaconf to load apps/ingestion/config/{job_id}/config.yaml)
+        builder = JobContextBuilder()
+        job_contexts = builder.build_job_contexts(
+            job_id=job_id,
+            run_date_str=run_date_str,
+        )
 
         for job_ctx in job_contexts:
-            #2. Create Initial Folder Structure
-            job_cfg_dir = Path(JOB_STEPS_BASE_DIR) / _JOB_ORDER[0]
-            job_cfg_dir.mkdir(parents=True)
-        
-            # 3. Freeze the Context into the folder
+            if dataset_id and dataset_id != job_ctx.dataset_id:
+                continue
+
+            # --- START: NEXT FUNCTIONALITY INTEGRATION ---
+
+            # Resolve specific overrides for this dataset slice
+            active_dataset_overrides = all_overrides.get("_global", {}).copy()
+            active_dataset_overrides.update(all_overrides.get(job_ctx.dataset_id, {}))
+
+            # Apply overrides to the JobContext object
+            for key, value in active_dataset_overrides.items():
+                if hasattr(job_ctx, key):
+                    setattr(job_ctx, key, value)
+                else:
+                    # Store unknown keys in custom_overrides so they aren't lost
+                    job_ctx.custom_overrides[key] = value
+
+            # Set the execution range (Target State)
+            job_ctx.from_step = overrides.get("from_step", JobSteps.first_step().label)
+            job_ctx.to_step = overrides.get("to_step", JobSteps.last_step().label)
+
+            # B. Generate the Unique Identity for this Run
             run_id = generate_run_id()
-            composite_key = f"{job_ctx.job_id}:{job_ctx.table}"
-            job_cfg_file = f"{composite_key}_{run_id}_config.json"
-            with open(job_cfg_dir / job_cfg_file, "wb") as f:
+            composite_key = f"{job_ctx.job_id}:{job_ctx.dataset_id}"
+            prefix = f"{composite_key}_{run_date_str}_{run_id}"
+
+            # C. Create the Folder Structure (Composite Key + Run ID)
+            # Path: storage/active/
+            active_root = Path(JOB_STEPS_BASE_DIR) / "active"
+            active_root.mkdir(parents=True, exist_ok=True)
+
+            # D. Write the Overlay File (The persistent audit trail)
+            if active_dataset_overrides:
+                # We save this as overrides.json inside the specific run folder
+                with open(active_root / f"{prefix}_overrides.json", "wb") as f:
+                    f.write(msgspec.json.encode(active_dataset_overrides))
+
+            # E. Freeze the Job Context (The instructions for the workers)
+            config_path = active_root / f"{prefix}_config.json"
+            with open(config_path, "wb") as f:
                 f.write(msgspec.json.encode(job_ctx))
-                
+
             # 4. Queue to Engine (Immediate move to DiskCache)
             self.engine.queue_jobs(
                 composite_key=composite_key,
                 run_id=run_id,
-                config_file_path=str(job_cfg_dir),
+                config_file_path=str(config_path),
             )
-            
+
             # 5. Optional: Update DB so it doesn't trigger again immediately
-            self.state_store.update_status(job_id, "TRIGGERED")
-            self.last_job_trigger = time.time()
-            
+            self.state_store.update_status(job_id, JobStatus.QUEUED)
+            self.timers["job_trigger"] = time.time()
 
     def _terminate_job(
-        self, 
-        job: Job, 
-        status: JobStatus, 
-        reason: str | None = None
+        self, job: Job, status: JobStatus, reason: str | None = None
     ) -> None:
         """
         Controlled Crash Handler.
@@ -321,19 +386,19 @@ class Orchestrator:
         # 1. Update the Job state
         # We pass the reason as the payload so it gets serialized into the manifest
         # update_manifest handles the msgspec encoding and file write internally
-        job.update_manifest({
-            "job_status": status, 
-            "current_step": JobStatus.CANCELLED, 
-        })
+        job.update_manifest(
+            {
+                "job_status": status,
+                "current_step": JobStatus.CANCELLED,
+            }
+        )
         job.request_status_sync(deep_sync=True)
-        
+
         # 2. Sync the StateStore
-        # Since request_status_sync created the .done file, we tell the StateStore 
+        # Since request_status_sync created the .done file, we tell the StateStore
         # to perform its final deep sync to pull the failure details into the DB.
         self.state_store.sync_from_folder(job.id, job.run_id)
-        
+
         # 3. Cleanup logic (Optional: move to failed or delete)
         if status == JobStatus.EXPIRED:
             self.lifecycle._cleanup_workspace(job.id)
-    
-    

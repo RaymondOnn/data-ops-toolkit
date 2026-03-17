@@ -30,7 +30,7 @@ class TransformStep(JobStep):  # type: ignore
         always processing the latest sanitized data without needing
         to know the specific physical timestamped folder.
         """
-        from src.core.transform.transform import TransformFactory
+        from src.core.strategies.transform.transform import TransformFactory
 
         start_time = time.perf_counter()
 
@@ -39,9 +39,7 @@ class TransformStep(JobStep):  # type: ignore
                 # 1. Initialize the LazyFrame (Logical Plan)
                 # Decision: Use the 'active' symlink path.
                 # Polars scans the metadata of all part_*.parquet files instantly.
-                raw_path = str(
-                    JOB_STEPS_BASE_DIR / "active" / job.id / "raw" / "part_*.parquet"
-                )
+                raw_path = (job.folder / "raw" / "part_*.parquet").resolve()
                 lf = handler.to_df(raw_path)
 
                 # 2. Apply Business Logic (Transformers)

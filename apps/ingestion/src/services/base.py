@@ -13,7 +13,7 @@ class Service(ABC):
         self.config = config
 
     @abstractmethod
-    def get_work_units(self, target: str, num_partitions: int) -> list[Any]:
+    def get_work_units(self, target: str, num_partitions: int) -> list[str]:
         """How this service splits 50M rows into chunks."""
         pass
     

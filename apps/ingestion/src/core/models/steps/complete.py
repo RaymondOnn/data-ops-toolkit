@@ -2,6 +2,7 @@ import shutil
 from datetime import datetime, timedelta
 
 import structlog
+
 from src.core.models.job import Job
 from src.core.models.job.manifest import CompletePayload
 from src.core.models.steps import JobBitmask, JobStep
@@ -31,7 +32,6 @@ class CompleteStep(JobStep):  # type: ignore
         from src.services.factory import ServiceFactory
         from src.services.file import StorageService
 
-        self.manifest = self.get_manifest(job)
         job_ctx = job.context
 
         # 1. Initialize Storage Service for Archival
@@ -60,9 +60,10 @@ class CompleteStep(JobStep):  # type: ignore
                     shutil.rmtree(target)
 
             # 4. Calculate Timestamps and Duration
-            start_ts = datetime.fromisoformat(job.manifest.start.ingestion_started_at)
             end_ts = datetime.now()
-            duration_secs = (end_ts - start_ts).total_seconds()
+            if job.manifest.start and job.manifest.start.timestamp:
+                start_ts = datetime.fromisoformat(job.manifest.start.timestamp)
+                duration_secs = (end_ts - start_ts).total_seconds()
 
             # 5. FINALIZE CANONICAL PAYLOAD
             payload = CompletePayload(
@@ -79,7 +80,7 @@ class CompleteStep(JobStep):  # type: ignore
             # 2. Store Manifest in Database (Current Execution Table)
             # Decision: By moving manifest data to SQL, we allow the BI team to
             # monitor job performance without needing file system access.
-            self._record_execution_to_db(job)
+            job.request_status_sync(deep_sync=True)
 
             # 4. Final Finalize (Post-Purge)
             # We don't use a symlink here; we just record SUCCESS in the DB/State Store
@@ -122,24 +123,3 @@ class CompleteStep(JobStep):  # type: ignore
         """
         retention_days = getattr(job.context, "retention_days", 2555)  # 7 years default
         return (end_timestamp + timedelta(days=retention_days)).date().isoformat()
-
-    def _record_execution_to_db(self, job: "Job") -> None:
-        """
-        Decision: Upsert final stats into the 'job_execution_history' table.
-        This provides a high-level audit trail for 50M row jobs.
-        """
-        db = ServiceFactory.get_service(job.context.target_type)
-        manifest = self.get_manifest(job)  # Final read of the audit trail
-
-        db.execute_query(
-            "INSERT INTO job_execution_history (job_id, run_id, rows_in, rows_out, duration) VALUES (%s, %s, %s, %s, %s)",
-            (
-                job.id,
-                job.run_id,
-                manifest.raw.total_rows,
-                manifest.write.rows_written,
-                manifest.total_duration,
-            ),
-        )
-
-

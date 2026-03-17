@@ -2,19 +2,17 @@ import shutil
 import time
 from pathlib import Path
 
-import msgspec
-import structlog
-from src.core.context.job import JobContext
+import msgspec  # type: ignore
+import structlog  # type: ignore
+from src.core.contexts.job import JobContext
 from src.core.models.job import Job, JobStatus
-from src.core.models.states.terminal import FailedState, HoldState
+from src.core.models.states.terminal import HoldState
 from src.core.orchestrator.engine import IngestionEngine
 from src.core.orchestrator.state import StateStore
 from src.utils.constants import JOB_STEPS_BASE_DIR
 from src.utils.dates import is_expired
 
 LOG = structlog.getLogger(__name__)
-
-STATE_MAP = {"HOLD": HoldState, "FAILED": FailedState}
 
 
 class LifecycleManager:
@@ -125,7 +123,7 @@ class LifecycleManager:
         Helper to load the JobContext from the active workspace.
         Standardized to look for 'config.json' directly.
         """
-        from src.core.context.job import JobContext
+        from src.core.contexts.job import JobContext
 
         # In our refactor, we standardized the filename to config.json
         config_path = folder / "config.json"
@@ -138,15 +136,23 @@ class LifecycleManager:
             # msgspec handles the mapping to JobContext class automatically
             return msgspec.json.decode(f.read(), type=JobContext)
 
-    def _cleanup_workspace(self, job_id: str) -> None:
+    def _cleanup_workspace(self, run_id: str) -> None:
         """
         The 'Janitor' method. Deletes active links and physical data.
         """
         # 1. Remove active links
-        active_path = JOB_STEPS_BASE_DIR / "active" / job_id
-        if active_path.exists():
+        # Find the active link for the run_id
+        active_root = JOB_STEPS_BASE_DIR / "active"
+        for path in active_root.rglob(run_id):
+            if path.is_dir:
+                active_path = path
+
+        if active_path:
+            composite_key, run_date = active_path.parent.name.split("_")
+            job_id, dataset_id = composite_key.split(":")
             shutil.rmtree(active_path)
 
+        # TODO: This needs updating. Cant remember to data folder structure
         # 2. Remove physical data vaults (raw, transform, etc)
         # Search data/ folders for {job_id}_*
         data_root = JOB_STEPS_BASE_DIR / "data"

@@ -5,12 +5,14 @@ from typing import Any, Optional
 import msgspec
 import structlog
 from msgspec import field, json
+
+
 from src.core.models.job import JobStatus
 
 LOG = structlog.getLogger(__name__)
 
 
-class ErrorPayload(msgspec.Struct):
+class ErrorPayload(msgspec.Struct): # type: ignore
     step: str
     error_type: str
     message: str
@@ -18,7 +20,7 @@ class ErrorPayload(msgspec.Struct):
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
-class BasePayload(msgspec.Struct):
+class BasePayload(msgspec.Struct): # type: ignore
     step_outcome: str
     commit_hash: str = ""
     source_params: dict[str, Any] = {}
@@ -99,7 +101,7 @@ class CompletePayload(BasePayload):
     retention_expiry: str | None  # Date when this log/archive can be deleted
 
 
-class JobManifest(msgspec.Struct):
+class JobManifest(msgspec.Struct): # type: ignore
     # Top-level Metadata (The "Header")
     job_id: str
     run_id: str

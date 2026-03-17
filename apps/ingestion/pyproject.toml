@@ -3,16 +3,27 @@ name = "ingestion"
 version = "0.1.0"
 description = "Data Ingestion Service"
 dependencies = [
+    "auth", # Depends on libs/auth
     "clients", # Depends on libs/clients
+    "file", # Depends on libs/file
+    "resilience", # Depends on libs/resilience
+    "utils", # Depends on libs/utils
     "ray",
-    "pandera", 
     "polars",
     "pyarrow",
-    "watchfiles",
     "diskcache",
-    "sdnotify",
     "msgspec",
-    "nanoid"
+    "nanoid",
+    "typer",
+    "structlog",
+    "filelock",
 ]
 requires-python = ">=3.11"
 
+[tool.uv.sources]
+# This tells uv: "Don't look on PyPI, look inside this monorepo"
+auth = { workspace = true }
+clients = { workspace = true }
+file = { workspace = true }
+resilience = { workspace = true }
+utils = { workspace = true }

@@ -5,9 +5,9 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
-import msgspec
-import structlog
-from src.core.context.job import JobContext
+import msgspec  # type: ignore
+import structlog  # type: ignore
+from src.core.contexts.job import JobContext
 from src.core.models.job.manifest import JobManifest
 from src.core.models.steps import JobStep
 from src.utils.constants import JOB_STEPS_BASE_DIR
@@ -15,8 +15,6 @@ from src.utils.constants import JOB_STEPS_BASE_DIR
 LOG = structlog.getLogger(__name__)
 if TYPE_CHECKING:
     from src.core.models.steps import JobSteps
-
-
 
 
 class JobStatus(StrEnum):
@@ -45,40 +43,72 @@ class JobStatus(StrEnum):
     BLOCKED = "BLOCKED"  # Manual HOLD or dependency missing
 
     @classmethod
-    def active_statuses(cls) -> set:
+    def active_statuses(cls) -> set["JobStatus"]:
         return {cls.QUEUED, cls.PENDING, cls.RUNNING, cls.PROVISIONING}
 
     @classmethod
-    def terminal_statuses(cls) -> set:
+    def terminal_statuses(cls) -> set["JobStatus"]:
         return {cls.SUCCESS, cls.FAILED, cls.CANCELLED}
 
 
 # TODO: Rename folders to include worker id?
 class Job:
-    _step: JobSteps
+    _step: JobStep
     _folder: Path
     _manifest_path: Path
-    
+
     def __init__(
         self,
-        job_id: str,
         run_id: str,
+        composite_key: str,
+        run_date: str,
         worker_id: str,
         target_step: str = JobSteps.START.name,
     ) -> None:
+        self.id, self.dataset_id = composite_key.split(":", 1)
         self.run_id = run_id
-        self.id = job_id
-        self.dataset = None
+        self.run_date = run_date
         self.worker_id = worker_id
         self.target_step = target_step
-        
+
+    @classmethod
+    def from_folder(
+        cls, folder_path: Path, target_step: Optional[JobSteps] = None
+    ) -> "Job":
+        """
+        Factory to rehydrate a Job. If a target_step is provided,
+        it performs an immediate check-in.
+        """
+        active_path = Path(folder_path)
+        run_id = active_path.name
+        composite_key, run_date = active_path.parent.name.split("_", 1)
+
+        instance = cls(
+            composite_key=composite_key,
+            run_id=run_id,
+            run_date=run_date,
+            worker_id="recovery",
+            target_step=target_step.label if target_step else JobSteps.START.label,
+        )
+        if target_step:
+            instance.check_in(target_step.label)
+        return instance
 
     @property
     def folder(self) -> Path:
-        if not self._folder:
+        """
+        Lazily creates the composite structure:
+        active/[job_id]:[dataset]_[run_date]/[run_id]
+        """
+        if not hasattr(self, "_folder") or not self._folder:
             # 1. Setup the Active Directory
             # Path: storage/active/{job_id}
-            folder = JOB_STEPS_BASE_DIR / "active" / f"{self.id}_{self.run_id}"
+            folder = (
+                JOB_STEPS_BASE_DIR
+                / "active"
+                / f"{self.id}:{self.dataset_id}_{self.run_date}"
+                / self.run_id
+            )
             folder.mkdir(parents=True, exist_ok=True)
 
             # 2. Store the initial manifest directly in the active root
@@ -91,7 +121,7 @@ class Job:
             data = {
                 "job_id": self.id,
                 "run_id": self.run_id,
-                "dataset_name": self.context.dataset_name,  # !: check attribute
+                "dataset_name": self.dataset_id,
                 "status": "RUNNING",
                 "current_step": self.step.name,
                 "bitmask": 0,
@@ -146,9 +176,12 @@ class Job:
     @property
     def step(self) -> JobStep:
         if not self._step:
-            step = self.manifest.current_step or "start"
-            JobStep.get_step_class_by_name(step)
+            step = self.manifest.current_step or JobSteps.START.label
+            self._step = JobStep.get_step_class_by_name(step)
         return self._step
+
+    def set_step(self, step: JobStep) -> None:
+        self._step = step
 
     def execute(self) -> None:
         """Execute the current job step.
@@ -232,25 +265,6 @@ class Job:
         # Filename contains run_id for Orchestrator lookup
         signal_path = signal_dir / f"{self.run_id}{ext}"
         signal_path.touch()  # Create hidden/temp
-
-    @classmethod
-    def from_folder(cls, folder_path: Path, target_step: Optional[JobSteps] = None) -> "Job":
-        """
-        Factory to rehydrate a Job. If a target_step is provided,
-        it performs an immediate check-in.
-        """
-        folder_name = Path(folder_path).name
-        job_id, run_id = folder_name.split("_")
-
-        instance = cls(
-            job_id=job_id,
-            run_id=run_id,
-            worker_id="recovery",
-            target_step=target_step,
-        )
-        if target_step:
-            instance.check_in(target_step)
-        return instance
 
     # TODO: Consider if this is needed
     # @property

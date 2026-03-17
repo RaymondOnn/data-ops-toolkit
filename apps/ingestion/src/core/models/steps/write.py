@@ -1,9 +1,11 @@
 import time
 import traceback
 
-import structlog
+import structlog # type: ignore
+
 from src.core.strategies.load.load import Loader
-from src.core.models.job import Job, JobBitmask, JobStep
+from src.core.models.job import Job
+from src.core.models.steps import JobBitmask, JobStep
 from src.core.models.job.manifest import ErrorPayload, WritePayload
 from src.services.factory import ServiceFactory
 from src.utils.constants import JOB_STEPS_BASE_DIR
@@ -29,7 +31,7 @@ class WriteStep(JobStep):  # type: ignore
 
         try:
             # 1. Resolve logical input (The partitioned parquet files)
-            source_dir = JOB_STEPS_BASE_DIR / "active" / job.id / "transform"
+            source_dir = (job.folder / "transform").resolve()
 
             # 1. Get the Service (Securely initialized on Ray worker via ServiceFactory)
             service = ServiceFactory.get_service(

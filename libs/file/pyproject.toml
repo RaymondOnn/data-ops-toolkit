@@ -1,9 +1,12 @@
 [project]
-name = "resilience"
+name = "file"
 version = "0.1.0"
 description = "Shared I/O and Database clients"
 dependencies = [
-    "sdnotify",
+    "fsspec",
+    "polars",
+    "charset-normalizer",
+    "xmltodict"
 ]
 requires-python = ">=3.11"
 

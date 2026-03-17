@@ -1,9 +1,9 @@
 [project]
-name = "resilience"
+name = "utils"
 version = "0.1.0"
 description = "Shared I/O and Database clients"
 dependencies = [
-    "sdnotify",
+    "structlog"
 ]
 requires-python = ">=3.11"
 

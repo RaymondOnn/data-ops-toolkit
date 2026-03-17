@@ -2,13 +2,14 @@ import time
 from pathlib import Path
 from typing import Any
 
-import diskcache
-import msgspec
-import ray
-import structlog
-from filelock import FileLock
+import diskcache # type: ignore
+import msgspec # type: ignore
+import ray # type: ignore
+import structlog # type: ignore
+from filelock import FileLock # type: ignore
 
-from src.core.models.job import Job, JobManifest, _JOB_ORDER
+from src.core.models.job import Job, JobManifest 
+from src.core.models.steps import _JOB_ORDER
 from src.services.registry import ServiceRegistry
 from src.utils.constants import JOB_STEPS_BASE_DIR, DISKCACHE_FILE_PATH
 
@@ -38,8 +39,9 @@ class Worker:
             meta = self.cache[key]
 
         job: Job = Job(
-            job_id=meta["job_id"],
+            composite_key=composite_key,
             run_id=meta["run_id"],
+            run_date=meta["run_date"],
             worker_id=self.worker_id,
             target_step=current_step,
         )
@@ -264,9 +266,13 @@ class IngestionEngine:
         Checks if the 'active' symlink for this step exists.
         This is the definitive proof of success in our new structure.
         """
-        # Logic: active/{job_id}/{step_name} 
-        # Example: active/job_123/transform
-        active_path = JOB_STEPS_BASE_DIR / "active" / f"{job_id}_{run_id}" / step_name
+        # Find active path
+        # Logic: active/{job_id}:{dataset_id}_{run_date}/run_id/step_name
+        # Example: active/job_123:dataset_456_2022-01-01/run_12345/transform
+        active_root = JOB_STEPS_BASE_DIR / "active"
+        for path in active_root.rglob(run_id):
+            if path.is_dir:
+                active_path = path / step_name
         
         # It must exist and be a valid link/directory
         return bool(active_path.exists())
@@ -297,7 +303,10 @@ class IngestionEngine:
         Instead of searching 5+ folders, we read the one 'active' manifest.
         This is O(1) instead of O(N).
         """
-        manifest_path = JOB_STEPS_BASE_DIR / "active" / f"{job_id}_{run_id}" / "manifest.json"
+        from src.utils.common import find_active_path
+        
+        active_path = find_active_path(run_id)
+        manifest_path = active_path / "manifest.json"
 
         if not manifest_path.exists():
             LOG.info("No active manifest found, starting fresh.", job_id=job_id)
@@ -319,7 +328,10 @@ class IngestionEngine:
         Decision: Direct Access.
         Finds the evolving manifest for the job in its active workspace.
         """
-        manifest_path = JOB_STEPS_BASE_DIR / "active" / f"{job_id}_{run_id}" / "manifest.json"
+        active_root = JOB_STEPS_BASE_DIR / "active"
+        for path in active_root.rglob(run_id):
+            if path.is_dir:
+                manifest_path = path / "manifest.json"
 
         if not manifest_path.exists():
             # During recovery, if a job exists in DB but not on disk, it's a 'Ghost'

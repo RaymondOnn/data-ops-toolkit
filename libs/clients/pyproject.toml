@@ -1,9 +1,13 @@
 [project]
-name = "resilience"
+name = "clients"
 version = "0.1.0"
 description = "Shared I/O and Database clients"
 dependencies = [
-    "sdnotify",
+    "clickhouse_connect",
+    "polars",
+    "oracledb",
+    "adbc_driver_snowflake",
+    "adbc_driver_postgresql",
 ]
 requires-python = ">=3.11"
 

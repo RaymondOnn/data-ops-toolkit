@@ -2,7 +2,6 @@ from typing import Any, Generator
 from abc import abstractmethod
 import time
 
-from libs.clients.base import ClientCantConnect
 import polars as pl
 
 
@@ -11,6 +10,7 @@ from src.services.base import Service
 from src.services.registry import protect_service
 
 from libs.auth.models import Secret
+from libs.clients.base import ClientCantConnect
 from libs.clients.database.base import DBClient
 from libs.clients.database.postgres import PostgresClient
 from libs.clients.database.oracle import OracleClient
@@ -41,9 +41,9 @@ class DatabaseService(Service):
         """Subclasses must initialize their specific DB client."""
         pass
     
-    def get_work_units(self, target: str, partitions: int) -> list[str]:
+    def get_work_units(self, target: str, num_partitions: int) -> list[str]:
         # All DBs use the client's load strategy (e.g., ORA_HASH, ctid)
-        return self.client.get_load_strategy(target, partitions)
+        return self.client.get_load_strategy(target, num_partitions)
     
     @protect_service(breaker) # type: ignore
     def sql(self, query: str) -> list[tuple[Any, ...]]:
@@ -59,7 +59,7 @@ class DatabaseService(Service):
         return self.client.fetch_df(query)
 
     @abstractmethod
-    def stage_data(self, df: pl.LazyFrame, target_table: str) -> str:
+    def stage_data(self, source_dir: str, target_table: str) -> str:
         """Phase 1: Returns the name of the temporary staging table."""
         pass
 

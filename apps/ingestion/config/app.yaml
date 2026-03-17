@@ -53,6 +53,7 @@ environments:
         storage_options:
           s3_storage_class: "DEEP_ARCHIVE"
           region: "us-east-1"
+          
       vault_cas:
         type: "cas_archive" # Maps to StorageVault
         account_id: "prod_aws_secure"

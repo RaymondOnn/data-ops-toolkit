@@ -1,9 +1,10 @@
 [project]
-name = "resilience"
+name = "auth"
 version = "0.1.0"
 description = "Shared I/O and Database clients"
 dependencies = [
-    "sdnotify",
+    "cryptography",
+    "boto3",
 ]
 requires-python = ">=3.11"
 

@@ -41,8 +41,9 @@ class CircuitBreaker:
                 result = func(*args, **kwargs)
                 self._on_success()
                 return result
-            except self.expected_exceptions as e:
-                self._on_failure(exception=e)
+            except Exception as e:
+                if isinstance(e, self.expected_exceptions):
+                    self._on_failure(exception=e)
                 raise
         return wrapper
 

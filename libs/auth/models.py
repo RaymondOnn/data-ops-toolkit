@@ -1,6 +1,6 @@
 from typing import Optional
 
-from .provider import SecretProvider
+from libs.auth.provider import SecretProvider
 
 
 

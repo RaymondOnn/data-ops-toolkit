@@ -1,10 +1,10 @@
 import os
 from typing import Optional
 
-from .providers import (
+from libs.auth.provider import (
     SecretProvider, 
     LocalSecretProvider, 
-    AWSSecretProvider
+    AWSSecretProvider,
 )
 
 

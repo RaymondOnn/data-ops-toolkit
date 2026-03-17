@@ -5,7 +5,7 @@ from .write import WriteStep
 # from .audit import AuditStep
 from .publish import PublishStep
 from .complete import CompleteStep
-from .base import JobStep, JobBitmask, _JOB_ORDER
+from .base import JobStep, JobBitmask, _JOB_ORDER, JobSteps
 
 
 __all__ = [

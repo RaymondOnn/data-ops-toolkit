@@ -1,17 +1,13 @@
 import shutil
 import time
-import traceback
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
-import structlog
-import msgspec
+import structlog # type: ignore
 
 
 from src.core.models.job.base import JobStatus
-from src.core.models.steps import JobBitmask
 from src.services.registry import ServiceRegistry
-from src.core.models.job.manifest import ErrorPayload
 
 if TYPE_CHECKING:
     from src.core.models.job import Job
@@ -25,7 +21,7 @@ class LifecycleState(ABC):
         self.job = job
 
     @abstractmethod
-    def on_enter(self) -> None:
+    def on_enter(self, data: dict[str, Any]) -> None:
         """Logic executed when a job is moved into this state."""
         pass
 
@@ -38,26 +34,15 @@ class HoldState(LifecycleState):
     folder_name = "HOLD"
     MAX_HOLD_TIME_HOURS = 24
 
-    def on_enter(self, exception: Exception | None = None) -> None:
+    def on_enter(self, data: dict[str, Any]) -> None:
         """Mark as blocked and update metadata for the UI."""
-        # Create the error payload
-        error_payload = ErrorPayload(
-            step=self.name,
-            error_type=type(exception).__name__,
-            message=str(exception),
-            stack_trace=traceback.format_exc(),
-            # worker_id=job.worker_id,
-            timestamp=time.time(),
-        )
-        error = msgspec.to_builtins(error_payload)
-        
         self.job.update_manifest({
             "job_status": JobStatus.BLOCKED,
-            "error": error,
+            "error": data,
             "retry_count": self.job.manifest.get("retry_count", 0) + 1
         })
         # Note: The move_to_folder call happens in the finalize() or manager
-        LOG.warn("Job entered HOLD", job_id=self.job.id, reason=str(error))
+        LOG.warn("Job entered HOLD", job_id=self.job.id, reason=str(data))
     # TODO: Need to straighten out the logic
     def can_recover(self) -> bool:
         """
@@ -83,22 +68,11 @@ class HoldState(LifecycleState):
 class FailedState(LifecycleState):
     folder_name = "FAILED"
 
-    def on_enter(self, exception: Exception | None = None) -> None:
+    def on_enter(self, data: dict[str, Any]) -> None:
         """Snapshot everything for post-mortem analysis."""
-        # Create the error payload
-        error_payload = ErrorPayload(
-            step=self.name,
-            error_type=type(exception).__name__,
-            message=str(exception),
-            stack_trace=traceback.format_exc(),
-            # worker_id=job.worker_id,
-            timestamp=time.time(),
-        )
-        error = msgspec.to_builtins(error_payload)
-        
         self.job.update_manifest({
             "job_status": JobStatus.FAILED,
-            "error": error,
+            "error": data,
         })
         LOG.error("Job FAILED", job_id=self.job.id)
 
@@ -109,7 +83,7 @@ class FailedState(LifecycleState):
 class SuccessState(LifecycleState):
     folder_name = "DONE"
 
-    def on_enter(self, exception: Exception | None = None) -> None:
+    def on_enter(self, data: dict[str, Any]) -> None:
         """
         The Garbage Collector: 
         1. Identifies symlinks to the /data/ vault.
@@ -136,7 +110,7 @@ class SuccessState(LifecycleState):
             # (If you want to keep a record, move the manifest to an archive folder here)
             self.job.update_manifest({
                 "job_status": JobStatus.SUCCESS.value,
-                "bitmask": JobBitmask.ALL_DONE.value,
+                **data,
             })
 
             # 3. Final Wipe: Remove the entire job run folder
@@ -151,3 +125,6 @@ class SuccessState(LifecycleState):
 
     def can_recover(self) -> bool:
         return False
+
+
+STATE_MAP = {"HOLD": HoldState, "FAILED": FailedState}

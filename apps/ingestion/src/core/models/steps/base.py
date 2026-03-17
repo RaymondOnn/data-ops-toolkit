@@ -1,5 +1,6 @@
 import shutil
 import time
+import traceback
 from abc import ABC, abstractmethod
 from enum import IntEnum, IntFlag, auto
 from pathlib import Path
@@ -7,8 +8,10 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 import structlog
+
+
 from src.core.models.job import JobStatus
-from src.core.models.job.manifest import AuditPayload, JobManifest
+from src.core.models.job.manifest import AuditPayload, JobManifest, ErrorPayload
 from src.utils.constants import JOB_STEPS_BASE_DIR
 
 from libs.clients.base import ClientCantConnect
@@ -78,7 +81,7 @@ class JobSteps(IntEnum):
         return mapping[self]
 
     @classmethod
-    def next_step(cls, current_label: str) -> "JobSteps" | None:
+    def next_step(cls, current_label: str) -> "JobSteps | None":
         """Finds the next step in the sequence based on a string label."""
         current_enum = cls[current_label.upper()]
         try:
@@ -87,13 +90,21 @@ class JobSteps(IntEnum):
             return None  # We have reached the end of the pipeline
 
     @classmethod
-    def prev_step(cls, current_label: str) -> "JobSteps" | None:
+    def prev_step(cls, current_label: str) -> "JobSteps| None":
         """Finds the next step in the sequence based on a string label."""
         current_enum = cls[current_label.upper()]
         try:
             return cls(current_enum.value - 1)
         except ValueError:
             return None  # We have reached the start of the pipeline
+
+    @classmethod
+    def first_step(cls) -> "JobSteps":
+        return cls(0)
+
+    @classmethod
+    def last_step(cls) -> "JobSteps":
+        return cls(len(cls) - 1)
 
 
 _JOB_ORDER = [step.label for step in sorted(JobSteps)]
@@ -151,7 +162,7 @@ class JobStep(ABC):
             shutil.move(str(job.folder), str(new_path))
 
             # Update the job instance reference so subsequent saves hit the new path
-            job.folder = new_path
+            job._folder = new_path
 
     def finalize(
         self,
@@ -167,9 +178,21 @@ class JobStep(ABC):
         """
         results = results or {}
         data = msgspec.to_builtins(job.manifest)
+        target = job.context.to_step
 
         # 2. MUTATE (same as before)
         if exception:
+            # Create the error payload
+            error_payload = ErrorPayload(
+                step=self.name,
+                error_type=type(exception).__name__,
+                message=str(exception),
+                stack_trace=traceback.format_exc(),
+                # worker_id=job.worker_id,
+                timestamp=time.time(),
+            )
+            error = msgspec.to_builtins(error_payload)
+
             # 2. ROUTING LOGIC (The "Sorting Hat")
             if isinstance(exception, (CircuitBreakerTripped, ClientCantConnect)):
                 # If we fail during CompleteStep, it's Deferred (Ready to wrap up)
@@ -180,26 +203,38 @@ class JobStep(ABC):
                 # )
                 from src.core.models.states.terminal import HoldState
 
-                HoldState(job).on_enter(exception)
+                HoldState(job).on_enter(data=error)
                 target_category = "HOLD"
             else:
                 from src.core.models.states.terminal import FailedState
 
-                FailedState(job).on_enter(exception)
+                FailedState(job).on_enter(data=error)
                 target_category = "FAILED"
 
             self.move_to_folder(job, target_category)
         else:
+            # Update the bitmask
             current_mask = data["bitmask"]
             new_mask = current_mask | self.bitmask
-            if new_mask.is_fully_complete():
+
+            next_step = JobSteps.next_step(self.name)
+            reached_target = job.context.target_step == self.name
+
+
+            if new_mask.is_fully_complete() or reached_target:
                 from src.core.models.states.terminal import SuccessState
 
-                SuccessState(job).on_enter()
-                data["job_status"] = JobStatus.SUCCESS
+                SuccessState(job).on_enter(
+                    data={
+                        "bitmask": new_mask,
+                        self.name: results or {},
+                    }
+                )
+                LOG.info("Job reached target state", job_id=job.id, target=job.target_step)
+            else:
+                # Continue the chain (The Orchestrator will pick this up in the next scan)
+                LOG.info("Job progressing to next step", job_id=job.id, next=next_step.label)
 
-            if results:
-                data[self.name] = results
 
         # 4. SYMLINK (Pointer to immutable data)
         if data_folder:
@@ -232,97 +267,5 @@ class JobStep(ABC):
                 return cls(step=step)
         raise ValueError(f"Unknown step name: {name}")
 
-    def get_manifest(self, job: "Job") -> JobManifest:
-        """Helper to read the current state of the world."""
-        if job.manifest_path and not job.manifest_path.exists():
-            raise FileNotFoundError(f"Manifest missing at {job.manifest_path}")
-
-        with open(job.manifest_path, "rb") as f:
-            return msgspec.json.decode(f.read(), type=JobManifest)
 
 
-class AuditStep(JobStep):
-    manifest: AuditPayload
-
-    def execute(self, job: "Job") -> str:
-        start_time = time.perf_counter()
-
-        try:
-            manifest: JobManifest = self.get_manifest(job)
-            write_meta: AuditPayload = (
-                manifest.write
-            )  # Access staging info from WriteStep
-
-            # 1. Internal Heuristic Checks (The 'Stand-in' Logic)
-            # While the external app is missing, we check basic things:
-            # - Did we lose more than 10% of data?
-            # - Are there nulls in the Primary Key?
-            internal_results = self._run_internal_checks(job, write_meta)
-
-            # 2. External App Mock Hook
-            # This is where you will eventually call your validation API
-            external_status = "NOT_AVAILABLE"
-
-            # # 1. Construct the Shell Command
-            # # We pass the staging artifact (table/path) as an argument to the app
-            # cmd = [
-            #     "validation-app",
-            #     "--source", write_meta.staging_artifact,
-            #     "--job-id", job.id,
-            #     "--run-id", job.run_id
-            # ]
-
-            # # 2. Run the Command
-            # # capture_output=True allows us to save the logs into our manifest
-            # process = subprocess.run(
-            #     cmd,
-            #     capture_output=True,
-            #     text=True,
-            #     check=False  # We handle the error manually to finalize the manifest
-            # )
-
-            # 3. Build Payload
-            duration_ms = int((time.perf_counter() - start_time) * 1000)
-
-            payload = AuditPayload(
-                step_outcome="COMPLETED",
-                validation_passed=internal_results["passed"],
-                total_checks_run=len(internal_results["checks"]),
-                failed_checks=internal_results["failures"],
-                external_app_status=external_status,
-                audit_duration_ms=duration_ms,
-            )
-
-            self.finalize(job, results=payload)
-
-            # If validation fails, we stop the pipeline here!
-            if not payload.validation_passed:
-                raise ValueError(
-                    f"Audit failed for Job {job.id}. See manifest for details."
-                )
-
-            return self._transit(job)
-
-        except Exception as e:
-            self.finalize(job, exception=e)
-            raise
-
-    def _run_internal_checks(
-        self, job: "Job", write_meta: AuditPayload
-    ) -> dict[str, Any]:
-        """Simple baseline checks while the real app is under construction."""
-        # Example: Check if rows_affected is 0
-        checks = []
-        failures = []
-
-        # Check 1: Row count > 0
-        checks.append("row_count_not_zero")
-        if write_meta.rows_affected == 0:
-            failures.append(
-                {
-                    "check": "row_count_not_zero",
-                    "message": "No rows were loaded to staging.",
-                }
-            )
-
-        return {"passed": len(failures) == 0, "checks": checks, "failures": failures}
