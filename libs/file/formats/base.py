@@ -4,8 +4,8 @@ import io
 from abc import ABC, abstractmethod
 from typing import Any
 
-import polars as pl # type: ignore
-import fsspec # type: ignore
+import polars as pl
+import fsspec
 
 LOG = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ class FormatHandler(ABC):
         pass
 
     @abstractmethod
-    def from_df(self, lf: pl.LazyFrame, target: str) -> None: 
+    def from_df(self, df: pl.LazyFrame | pl.DataFrame, target: str) -> None:
         """High-level: LazyFrame -> File (Streaming)"""
         pass
 
@@ -63,11 +63,11 @@ class FormatHandler(ABC):
 class HandlerFactory:
     @staticmethod
     def get_handler(ext: str, fs, opts: dict) -> FormatHandler:
-        from libs.file.formats import JSONHandler, JSONLHandler, CSVHandler, ParquetHandler, XMLHandler
+        from libs.file.formats import JSONHandler, CSVHandler, ParquetHandler, XMLHandler
         mapping = {
-            "json": JSONHandler,   # Defensive / Eager
-            "jsonl": JSONLHandler, # Performance / Lazy
-            "ndjson": JSONLHandler,# Alias for JSONL
+            "json": JSONHandler,
+            "jsonl": JSONHandler,
+            "ndjson": JSONHandler,
             "csv": CSVHandler,
             "parquet": ParquetHandler,
             "xml": XMLHandler

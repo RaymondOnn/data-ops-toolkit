@@ -1,8 +1,8 @@
 
 
-from typing import Any, Generator
+from typing import Any, Generator, Sequence
 
-from clickhouse_connect import Client
+from clickhouse_connect.driver.client import Client
 import polars as pl
 from libs.clients.database.base import DBClient
 
@@ -16,10 +16,10 @@ class ClickhouseClient(DBClient):
         
         try:
             self._connection = clickhouse_connect.get_client(
-                host=self.config.get('host', 'localhost'),
-                port=self.config.get('port', 8123),
-                username=self.config.get('user'),
-                password=self.config.get('password')
+                host=str(self.config.get('host', 'localhost')),
+                port=int(self.config.get('port', 8123)),
+                username=str(self.config.get('user')),
+                password=str(self.config.get('password'))
             )
             self._ping(self._connection)
         except Exception as e:
@@ -30,13 +30,13 @@ class ClickhouseClient(DBClient):
     def _ping(self, conn: Client) -> None:
         conn.ping()
 
-    def get_load_strategy(self, table_name: str, partitions: int = 5) -> list[str]:
+    def get_load_strategy(self, table_name: str, num_partitions: int = 5) -> list[str]:
         return [
-            f"SELECT * FROM {table_name} WHERE cityHash64(*) % {partitions} = {i}"
-            for i in range(partitions)
+            f"SELECT * FROM {table_name} WHERE cityHash64(*) % {num_partitions} = {i}"
+            for i in range(num_partitions)
         ]
 
-    def sql(self, query: str) -> list[tuple[Any, ...]]:
+    def sql(self, query: str) -> list[Sequence[Any]]:
         # Returns a list of tuples by default
         result = self.connect().query(query)
         return list(result.result_rows)

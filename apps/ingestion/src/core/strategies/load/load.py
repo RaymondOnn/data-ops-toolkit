@@ -57,6 +57,6 @@ class Loader:
             staging_table=staging_table, 
             target_table=write_ctx.target_destination, 
             partition_col=write_ctx.partition_col, 
-            partition_val=write_ctx.partition_val
+            partition_val=write_ctx.partition_value
         )
         

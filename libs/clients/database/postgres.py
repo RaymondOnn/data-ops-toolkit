@@ -1,32 +1,33 @@
-from contextlib import suppress
-from typing import TYPE_CHECKING, Any, Generator
+from typing import TYPE_CHECKING, Any, Generator, Sequence
 
-import polars as pl # type: ignore
+import polars as pl
 
 from libs.clients.database.base import DBClient
 from libs.clients.base import ClientCantConnect
 
 if TYPE_CHECKING:
-    from adbc_driver_postgresql.dbapi import Connection # type: ignore
+    from adbc_driver_postgresql.dbapi import Connection
 
 class PostgresClient(DBClient):
     def __init__(self, **config: Any) -> None:
         super().__init__(**config)
     
-    def connect(self) -> Connection:
+    def connect(self) -> "Connection":
         # INLINE IMPORT: Prevents pickling the driver across the network
-        import adbc_driver_postgresql.dbapi as adbc_pg # type: ignore
+        import adbc_driver_postgresql.dbapi as adbc_pg
         
         if not self._connection:
             try:
-                self.uri = f"postgresql://{self.config['user']}:{self.config['password']}@{self.config['host']}/{self.config['database']}"
+                # Support both 'database' and 'db_name' for backward compatibility
+                db_name = self.config.get("database", self.config.get("db_name"))
+                self.uri = f"postgresql://{self.config['user']}:{self.config['password']}@{self.config['host']}/{db_name}"
                 self._connection = adbc_pg.connect(self.uri)
                 self._ping(self._connection)
             except Exception as e:
                 raise ClientCantConnect(str(e))
         return self._connection
 
-    def _ping(self, conn: Connection) -> None:
+    def _ping(self, conn: "Connection") -> None:
             # We don't use self.sql() here to avoid recursive reconnect logic
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
@@ -41,7 +42,7 @@ class PostgresClient(DBClient):
             for i in range(num_partitions)
         ]
 
-    def sql(self, query: str) -> list[tuple[Any, ...]]:
+    def sql(self, query: str) -> list[Sequence[Any]]:
         """
         Executes raw SQL using the package driver.
         Used for commands and small metadata fetches.
@@ -55,16 +56,13 @@ class PostgresClient(DBClient):
         with self.connect().cursor() as cursor:
             cursor.execute(query)
             # ADBC native streaming to Arrow, then to Pandas
-            reader = cursor.fetch_record_batch_reader()
+            reader = cursor.fetch_record_batch()
             for batch in reader:
                 # ADBC to Arrow to Polars is zero-copy and very fast
                 yield pl.from_arrow(batch)
                 
     def reconnect(self) -> None:
-        if self.connection:
-            with suppress(Exception):
-                self.connection.close()
-        self.connect()
+        super().reconnect()
 
     def write_table(self, lf: pl.LazyFrame, table_name: str) -> None:
         try:
@@ -73,7 +71,7 @@ class PostgresClient(DBClient):
             # the driver supports it, or handles the handoff in Arrow chunks.
             lf.collect().write_database(
                 table_name=table_name,
-                connection=self._connection,
+                connection=self.connection,
                 engine="adbc",
                 if_table_exists="append"
             )
@@ -83,7 +81,7 @@ class PostgresClient(DBClient):
             self.reconnect()
             lf.collect().write_database(
                 table_name=table_name,
-                connection=self._connection,
+                connection=self.connection,
                 engine="adbc",
                 if_table_exists="append"
             )

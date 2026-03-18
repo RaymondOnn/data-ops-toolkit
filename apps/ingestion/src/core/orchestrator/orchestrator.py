@@ -4,13 +4,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import msgspec  # type: ignore
-import structlog  # type: ignore
+import msgspec
+import structlog
 from src.core.models.job import Job, JobStatus
 from src.core.models.steps import JobSteps
 from src.services.database import DatabaseService
 from src.utils.constants import ALWAYS_ON_MODE, JOB_STEPS_BASE_DIR
 
+from src.core.contexts.builder import JobContextBuilder
 from libs.resilience.heartbeat import Heartbeat
 
 LOG = structlog.getLogger(__name__)
@@ -20,7 +21,7 @@ MISFIRE_GRACE_PERIOD_SECS = 3600
 
 def generate_run_id() -> str:
     """Generates a unique run ID for a job."""
-    from nanoid import generate  # type: ignore
+    from nanoid import generate
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     short_hash = generate(alphabet="0123456789abcdef", size=6)
@@ -39,11 +40,13 @@ def generate_run_id() -> str:
 
 
 class Orchestrator:
-    def __init__(self, db_service: DatabaseService):
+    def __init__(self, db_service: DatabaseService, builder: Any):
         from src.core.orchestrator.engine import IngestionEngine
         from src.core.orchestrator.lifecycle import LifecycleManager
         from src.core.orchestrator.signals import SignalProcessor
         from src.core.orchestrator.state import StateStore
+        
+        self.builder: JobContextBuilder = builder
 
         self.heartbeat = Heartbeat()
         self.engine = IngestionEngine()
@@ -195,7 +198,8 @@ class Orchestrator:
         A job is finished if no associated runs are in an 'Active' state.
         """
         # 1. Physical Workspace Check (The primary breadcrumb)
-        active_path = JOB_STEPS_BASE_DIR / "active" / f"{job_id}_{run_id}"
+        active_path = JOB_STEPS_BASE_DIR / "active"
+        
         if active_path.exists():
             return False
 
@@ -305,17 +309,14 @@ class Orchestrator:
         run_date_str: str | None = None,
         overrides: dict[str, Any] | None = None,
     ) -> None:
-        from src.core.contexts.job import JobContextBuilder
-
         # 'overrides' here is the result of parse_set_options:
         # {"_global": {...}, "dataset_name": {...}}
         overrides = overrides or {}
         all_overrides = overrides or {"_global": {}}
 
         # 1. Get the list of dataset configurations for this Job ID
-        # (This uses Dynaconf to load apps/ingestion/config/{job_id}/config.yaml)
-        builder = JobContextBuilder()
-        job_contexts = builder.build_job_contexts(
+        # Uses the injected builder which already has app_settings loaded
+        job_contexts = self.builder.build_job_contexts(
             job_id=job_id,
             run_date_str=run_date_str,
         )
@@ -402,3 +403,21 @@ class Orchestrator:
         # 3. Cleanup logic (Optional: move to failed or delete)
         if status == JobStatus.EXPIRED:
             self.lifecycle._cleanup_workspace(job.id)
+
+
+def create_orchestrator(app_cfg_path: str | None = None) -> Orchestrator:
+    """
+    Bootstrap helper to initialize the Orchestrator with its dependencies.
+    Resolves configuration first to properly initialize services.
+    """
+    from src.services.factory import ServiceFactory
+    
+    # 1. Initialize Builder (loads global app.yaml)
+    builder = JobContextBuilder(app_cfg_path=app_cfg_path)
+    
+    # 2. Initialize Database Service using resolved config
+    db_config = builder.app_settings.get("services", {}).get("database", {})
+    db_service = ServiceFactory.get_service("db", **db_config)
+    
+    # 3. Return fully wired Orchestrator
+    return Orchestrator(db_service=db_service, builder=builder)

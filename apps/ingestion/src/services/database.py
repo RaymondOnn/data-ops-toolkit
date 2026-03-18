@@ -1,9 +1,8 @@
-from typing import Any, Generator
+from typing import Any, Generator, Sequence
 from abc import abstractmethod
 import time
 
 import polars as pl
-
 
 from src.services.factory import ServiceFactory
 from src.services.base import Service
@@ -17,10 +16,6 @@ from libs.clients.database.oracle import OracleClient
 from libs.clients.database.clickhouse import ClickhouseClient
 from libs.resilience.circuit_breaker import CircuitBreaker
 
-
-
-
-# F = TypeVar("F", bound=Callable[..., Any])
 
 breaker = CircuitBreaker(
     failure_threshold=3,
@@ -45,15 +40,15 @@ class DatabaseService(Service):
         # All DBs use the client's load strategy (e.g., ORA_HASH, ctid)
         return self.client.get_load_strategy(target, num_partitions)
     
-    @protect_service(breaker) # type: ignore
-    def sql(self, query: str) -> list[tuple[Any, ...]]:
+    @protect_service(breaker)
+    def sql(self, query: str) -> list[Sequence[Any]]:
         """
         Executes a standard SQL query and returns a Polars DataFrame.
         Used for smaller metadata queries or status checks.
         """
         return self.client.sql(query)
     
-    @protect_service(breaker) # type: ignore
+    @protect_service(breaker)
     def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
         # Centralized protected fetch for all DB types
         return self.client.fetch_df(query)
@@ -84,7 +79,7 @@ class PostgresService(DatabaseService):
         secret: Secret = config["password"]
         return PostgresClient(
             host=config["host"],
-            db_name=config["database"],
+            database=config["database"],
             user=config["user"],
             password=secret.resolve(sanitize=True),
             port=config.get("port", 5432)
@@ -98,8 +93,8 @@ class PostgresService(DatabaseService):
         # It will treat all parquet files in the folder as a single dataset.
         lf = pl.scan_parquet(f"{source_dir}/*.parquet")
         
-        # 1. Get the raw connection from the DBAPI
-        conn = self.client.connect().raw_connection()
+        # 1. Get the connection from the DBAPI
+        conn = self.client.connect()
         
         try:
             with conn.cursor() as cursor:
@@ -108,7 +103,11 @@ class PostgresService(DatabaseService):
                 
                 with cursor.copy(copy_sql) as copy:
                     # Stream in 100k chunks to keep RAM flat
-                    for batch_df in lf.collect().iter_slices(n_rows=100_000):
+                    df = lf.collect()
+                    if not isinstance(df, pl.DataFrame):
+                        raise TypeError(f"Expected polars.DataFrame, got {type(df)}")
+                        
+                    for batch_df in df.iter_slices(n_rows=100_000):
                         # write_csv returns bytes, which we feed into the copy pipe
                         copy.write(batch_df.write_csv(include_header=False))
             
@@ -200,6 +199,15 @@ class OracleService(DatabaseService):
 
 @ServiceFactory.register("clickhouse")
 class ClickHouseService(DatabaseService):
+    def _init_client(self, **config: Any) -> ClickhouseClient:
+        secret: Secret = config["password"]
+        return ClickhouseClient(
+            host=config.get("host", "localhost"),
+            port=config.get("port", 8123),
+            user=config.get("user", "default"),
+            password=secret.resolve(sanitize=True) if secret else ""
+        )
+
     def stage_data(self, source_dir: str, target_table: str) -> str:
         staging_table = f"stg_{target_table}_{int(time.time())}"
         try:

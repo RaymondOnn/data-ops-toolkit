@@ -34,9 +34,12 @@ class CSVHandler(FormatHandler):
         buffer = self.read_mem(target, **kwargs)
         return pl.read_csv(buffer, encoding=kwargs.get("encoding", "utf-8")).lazy()
 
-    def from_df(self, lf: pl.LazyFrame, target: str) -> None:
+    def from_df(self, df: pl.LazyFrame | pl.DataFrame, target: str) -> None:
         """Streaming write for 50M rows."""
-        lf.sink_csv(target)
+        if isinstance(df, pl.LazyFrame):
+            df.sink_csv(target)
+        else:
+            df.write_csv(target)
 
     def write_file(self, data: bytes, target: str) -> None:
         with self.fs.open(target, "wb") as f:

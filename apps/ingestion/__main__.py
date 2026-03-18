@@ -1,11 +1,9 @@
-from ty_extensions import Unknown
 from datetime import datetime
 from typing import Optional
 
-import typer  # type: ignore
-import structlog # type: ignore
+import typer
+import structlog
 
-from src.core.models.job import Job
 from src.core.models.steps import JobSteps
 
 
@@ -45,22 +43,18 @@ def run(
     """
     Execute the ingestion pipeline for a specific date and dataset.
     """
-    from src.services.factory import ServiceFactory
-    from src.core.orchestrator import Orchestrator
-    from src.core.contexts.job import parse_set_options
-    
-    typer.echo(f"Initializing {dataset} for {run_date.date()} (ID: {job_id})")
-    
-    # 1. Parse strings into a dictionary
-    # These overrides will be used by JobContextBuilder in trigger_job
+    from src.core.contexts import parse_set_options
+    from src.core.orchestrator import create_orchestrator
+
+    typer.echo(f"🚀 Initializing {dataset} for {run_date.date()} (ID: {job_id})")
+
+    # 1. Configuration & Overrides
     overrides = parse_set_options(settings)
 
     # 2. Initialize Orchestrator
-    # (Requires db_service, but in Trigger mode, we might mock it or pass None)
-    db = ServiceFactory.get_service("db")  # Ensure this handles config-based init
-    orchestrator = Orchestrator(db_service=db, )
+    orchestrator = create_orchestrator()
 
-    # 3. Hand off to Orchestrator (This triggers _run_synchronous_task)
+    # 3. Hand off to Orchestrator
     try:
         orchestrator.run(
             job_id=job_id,
@@ -70,6 +64,9 @@ def run(
         )
     except Exception as e:
         typer.secho(f"💥 Critical Failure: {e}", fg=typer.colors.RED)
+        if state["debug"]:
+            import traceback
+            traceback.print_exc()
         raise typer.Exit(code=1)
 
 
@@ -102,10 +99,10 @@ def test(
 
 @app.command()
 def recover():
-    # ... (Your 'recover' logic) ...
+    """Recover jobs from a failed state."""
+    # ... placeholder ...
     pass
 
 
 if __name__ == "__main__":
-    # This makes 'python -m ingest' work
     app()

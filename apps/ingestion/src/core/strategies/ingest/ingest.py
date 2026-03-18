@@ -6,6 +6,7 @@ import polars as pl
 import ray
 import structlog
 from src.core.ingest.base import Reader, ReaderContext
+from src.core.strategies.ingest.factory import ReaderFactory
 from src.services.base import DatabaseService, Service
 
 LOG = structlog.getLogger(__name__)
@@ -52,22 +53,28 @@ class DataReader(Reader):
         # 3. Define the extraction task (Runs in parallel on Ray Workers)
         def fetch_task(payload: dict[str, Any]) -> pl.DataFrame:
             """This function runs on the Ray Worker (K8S Pod)."""
-            # 1. Importing this triggers the __init__.py discovery logic
-            # and populates ServiceFactory.registry automatically.
             from src.services.factory import ServiceFactory
             from src.core.schema import apply_schema_contract
 
-            # 2. Get the singleton instance for this process
-            # It will use the Diskcache to check if it's allowed to run.
             service = ServiceFactory.get_service(
-                payload["source_type"], payload["account_id"], **payload["config"]
+                payload["source_type"], **payload["config"]
             )
             
             # 1. Extraction
-            df: pl.DataFrame = service.fetch_df(payload["unit"])
+            # Support both DB query string and File list dict
+            unit = payload["unit"]
+            if isinstance(unit, dict) and "files" in unit:
+                unit = unit["files"]
+                
+            result = service.fetch_df(unit)
+            
+            # Convert LazyFrame to DataFrame for Ray compatibility
+            if isinstance(result, pl.LazyFrame):
+                df = result.collect()
+            else:
+                df = result
             
             # 2. Guarding (Function Call)
-            # We pass the schema items that were sent in the payload            
             return apply_schema_contract(
                 df, 
                 payload.get("schema_items", [])
@@ -111,21 +118,34 @@ class DataReader(Reader):
         return metadata_list
 
     @abstractmethod
-    def get_work_units(self, client: Any, context: ReaderContext) -> list[str]:
+    def get_work_units(self, client: Any, context: ReaderContext) -> list[Any]:
         pass
 
 
+
+@ReaderFactory.register("flat_file")
+class FileDataReader(DataReader):
+    def get_work_units(
+        self, client: Any, context: ReaderContext
+    ) -> list[Any]:
+        if not context.source_path:
+            raise ValueError("source_path is required for FileDataReader")
+            
+        return client.get_work_units(context.source_path, context.num_partitions)
+
+
+@ReaderFactory.register("database")
 class DBDataReader(DataReader):
     def __init__(self) -> None:
         super().__init__()
 
     def get_work_units(
-        self, service: DatabaseService, context: ReaderContext
-    ) -> list[str]:
+        self, client: DatabaseService, context: ReaderContext
+    ) -> list[Any]:
         # Uses ORA_HASH for Oracle or ctid for Postgres
         # to generate N unique queries for the 50M rows
         if not context.target_table:
             raise ValueError("target_table is required for DBDataReader")
 
-        units = service.get_work_units(context.target_table, context.num_partitions)
+        units = client.get_work_units(context.target_table, context.num_partitions)
         return [str(unit) for unit in units]

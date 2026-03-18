@@ -3,7 +3,7 @@ import re
 import xmltodict
 import polars as pl
 
-from libs.clients.fs.format.base import FormatHandler
+from libs.file.formats.base import FormatHandler
 
 class XMLHandler(FormatHandler):
     def read_mem(self, target: str, **kwargs) -> io.BytesIO:
@@ -21,7 +21,7 @@ class XMLHandler(FormatHandler):
         data = xmltodict.parse(buffer.read())
         return pl.DataFrame(data).lazy()
 
-    def from_df(self, lf: pl.LazyFrame, target: str):
+    def from_df(self, df: pl.LazyFrame | pl.DataFrame, target: str) -> None:
         raise NotImplementedError("Streaming XML write is not supported by Polars.")
 
     def write_file(self, data: bytes, target: str):

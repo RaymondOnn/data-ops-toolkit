@@ -63,7 +63,7 @@ class CircuitBreaker:
         self.state = CircuitBreakerState.CLOSED
         self.failures = 0
 
-    def _on_failure(self, exception: Exception) -> None:
+    def _on_failure(self, exception: BaseException) -> None:
         """Handle increments and state transitions on error."""
         self.failures += 1
         

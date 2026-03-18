@@ -5,7 +5,7 @@ from typing import Optional, Union, Callable, Any
 import polars as pl
 import fsspec
 
-from libs.clients.fs.format.base import HandlerFactory
+from libs.file.formats.base import HandlerFactory
 
 LOG = logging.getLogger(__name__)
 

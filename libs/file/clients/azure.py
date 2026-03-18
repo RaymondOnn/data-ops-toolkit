@@ -2,8 +2,10 @@ import logging
 from typing import Any, Optional
 
 import fsspec
+from adlfs import AzureBlobFileSystem
 
 from libs.file.base import FileSystemClient
+
 
 
 LOG = logging.getLogger(__name__)
@@ -22,7 +24,7 @@ class AzureClient(FileSystemClient):
         super().__init__(url, storage_options)
         self.fs = self.connect()
 
-    def connect(self) -> fsspec.AzureBlobFileSystem:
+    def connect(self) -> AzureBlobFileSystem:
         if not self.fs:
 
             # Map generic 'password' to Azure-specific 'account_key'

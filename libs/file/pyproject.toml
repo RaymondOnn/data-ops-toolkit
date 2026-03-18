@@ -6,7 +6,10 @@ dependencies = [
     "fsspec",
     "polars",
     "charset-normalizer",
-    "xmltodict"
+    "xmltodict",
+    "s3fs",
+    "adlfs",
+    "gcsfs",
 ]
 requires-python = ">=3.11"
 

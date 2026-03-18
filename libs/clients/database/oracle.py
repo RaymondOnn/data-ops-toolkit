@@ -1,4 +1,4 @@
-from typing import Any, Generator
+from typing import Any, Generator, Sequence
 
 
 from oracledb import Connection
@@ -18,7 +18,7 @@ class OracleClient(DBClient):
 
         # Thin mode: no instant client required
         if self._connection:
-            return
+            return self._connection
         
         try:
             self._connection = oracledb.connect(
@@ -29,28 +29,28 @@ class OracleClient(DBClient):
             self._ping(self._connection)
         except Exception as e:
             raise ClientCantConnect(str(e))
-        else:
-            return self._connection
+        
+        return self._connection
             
     
     def _ping(self, conn: Connection) -> None: 
         conn.ping()
             
-    def get_load_strategy(self, table_name: str, partitions: int = 10) -> list[str]:
+    def get_load_strategy(self, table_name: str, num_partitions: int = 10) -> list[str]:
         """
         Uses ORA_HASH to create N virtual partitions without needing a PK.
         """
         queries = []
-        for i in range(partitions):
+        for i in range(num_partitions):
             # ORA_HASH(rowid, N) creates N buckets based on physical location
             sql = f"""
                 SELECT * FROM {table_name} 
-                WHERE ORA_HASH(rowid, {partitions-1}) = {i}
+                WHERE ORA_HASH(rowid, {num_partitions-1}) = {i}
             """
             queries.append(sql)
         return queries
 
-    def sql(self, query: str) -> list[tuple[Any, ...]]:
+    def sql(self, query: str) -> list[Sequence[Any]]:
         """
         Executes raw SQL using the package driver.
         Used for commands and small metadata fetches.
@@ -63,21 +63,30 @@ class OracleClient(DBClient):
 
     def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
         """Fetched concurrently by Ray, but limited by the Manager's Session Lock."""
-        # Note: In your specific case, we yield chunks to stay under 2GB
         cursor = self.connect().cursor()
         try:
             cursor.execute(query)
+
+            # Ensure we have a valid description (required for column names)
+            if cursor.description is None:
+                return
+
+            columns = [c[0] for c in cursor.description]
+
             while True:
                 rows = cursor.fetchmany(50_000)
                 if not rows:
                     break
-                yield pl.from_dicts(
-                    [dict(zip([c[0] for c in cursor.description], r)) for r in rows]
-                )
+                
+                # Optimized: Use DataFrame constructor with schema instead of list-of-dicts
+                yield pl.DataFrame(rows, schema=columns, orient="row")
+
         except Exception as e:
             # If connection died, reset to None so next call reconnects
             self._connection = None
             raise e
+        finally:
+            cursor.close()
 
     def write_table(
         self, lf: pl.LazyFrame, table_name: str, batch_size: int = 100_000

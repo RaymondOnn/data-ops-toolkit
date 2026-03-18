@@ -1,0 +1,21 @@
+datasets:
+  orders:
+    source_type: "local"
+    source_params:
+      account_id: "local_storage"
+      url: "file:///Users/main/Documents/Code/Github/data-ops-toolkit/apps/ingestion"
+    source_path: "samples/sample_orders.csv"
+    load_mode: "snapshot"
+    target_destination: "orders"
+    num_partitions: 1
+    sink_type: "clickhouse"
+    sink_config:
+      account_id: "local_clickhouse"
+      host: "localhost"
+      port: 8123
+      username: "default"
+      password: "password"
+      database: "default"
+    destination_type: "clickhouse"
+    partition_col: "updated_at"
+    partition_value: "2023-10-27"

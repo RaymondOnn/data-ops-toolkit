@@ -1,8 +1,6 @@
 import time
 from typing import Any
 
-import polars as pl
-
 
 from src.services.base import Service
 from src.services.factory import ServiceFactory
@@ -58,7 +56,7 @@ class StorageService(Service):
             storage_options=merged_opts
         )
 
-    @protect_service(breaker) # type: ignore
+    @protect_service(breaker)
     def get_work_units(self, target: str, num_partitions: int) -> list[dict[str, Any]]:
         """
         Uses the internal client to split 50M rows.
@@ -71,7 +69,7 @@ class StorageService(Service):
         files = self.client.fs.glob(f"{path}/**/*")
         return [{"files": files[i::num_partitions]} for i in range(num_partitions)]
     
-    @protect_service(breaker) # type: ignore
+    @protect_service(breaker)
     def stage_data(self, source_dir: str, target_table: str) -> str:
         """
         Phase 1: Organize Parquet files into a staging directory.
@@ -86,7 +84,7 @@ class StorageService(Service):
         
         return staging_path
     
-    @protect_service(threshold=3) # type: ignore
+    @protect_service(breaker) # type: ignore
     def promote_data(
         self, 
         staging_table: str, 
@@ -114,13 +112,12 @@ class StorageService(Service):
 @ServiceFactory.register("flat_file")
 class FlatFileService(StorageService):
     """Specifically for reading raw data from landing zones."""
-    def __init__(self, name: str, account_id: str, **config: Any) -> None:
+    def __init__(self, name: str, **config: Any) -> None:
         super().__init__(
             name=name,
             url=config.get("url", "file:///tmp/landing"),
             capabilities=[FileSystemSkills.FILE],
             storage_options=config.get("storage_options", {}),
-            account_id=account_id,
             **config
         )
 
@@ -128,13 +125,12 @@ class FlatFileService(StorageService):
 @ServiceFactory.register("standard_archive")
 class StandardArchiveService(StorageService):
     """Standard archival for job artifacts and logs."""
-    def __init__(self, name: str, account_id: str, **config: Any) -> None:
+    def __init__(self, name: str, **config: Any) -> None:
         super().__init__(
             name=name,
             url=config.get("url", "s3://archive-bucket"),
             capabilities=[FileSystemSkills.ARCHIVE],
             storage_options=config.get("storage_options", {}),
-            account_id=account_id,
             **config
         )
 

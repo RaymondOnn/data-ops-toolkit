@@ -2,7 +2,7 @@ import io
 
 import polars as pl
 
-from libs.clients.fs.format.base import FormatHandler
+from libs.file.formats.base import FormatHandler
 
 
 

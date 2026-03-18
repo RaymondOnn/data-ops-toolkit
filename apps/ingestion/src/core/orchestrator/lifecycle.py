@@ -2,8 +2,8 @@ import shutil
 import time
 from pathlib import Path
 
-import msgspec  # type: ignore
-import structlog  # type: ignore
+import msgspec
+import structlog
 from src.core.contexts.job import JobContext
 from src.core.models.job import Job, JobStatus
 from src.core.models.states.terminal import HoldState
@@ -11,6 +11,7 @@ from src.core.orchestrator.engine import IngestionEngine
 from src.core.orchestrator.state import StateStore
 from src.utils.constants import JOB_STEPS_BASE_DIR
 from src.utils.dates import is_expired
+from src.utils.common import find_path
 
 LOG = structlog.getLogger(__name__)
 
@@ -48,7 +49,7 @@ class LifecycleManager:
 
                 # 3. Construct the composite key for the Engine
                 # Line 313 fix: composite_key = "job_id:table"
-                composite_key = f"{job.id}:{job.context.target_table}"
+                composite_key = f"{job.id}:{job.context.dataset_id}"
                 LOG.info(
                     "Recovering job", run_id=job.run_id, step=job.manifest.current_step
                 )
@@ -143,9 +144,7 @@ class LifecycleManager:
         # 1. Remove active links
         # Find the active link for the run_id
         active_root = JOB_STEPS_BASE_DIR / "active"
-        for path in active_root.rglob(run_id):
-            if path.is_dir:
-                active_path = path
+        active_path = find_path(active_root, run_id)
 
         if active_path:
             composite_key, run_date = active_path.parent.name.split("_")

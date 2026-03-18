@@ -30,7 +30,8 @@ class ServiceFactory:
         Acts as the Singleton Manager. 
         Returns a service instance based on account_id.
         """
-        instance_key = f"{type}:{config['account_id']}"
+        account_id = config.get("account_id", "default")
+        instance_key = f"{type}:{account_id}"
         
         if instance_key not in cls._INSTANCES:
             service_cls = cls._SERVICES.get(type.casefold())
@@ -45,10 +46,8 @@ class ServiceFactory:
                 from libs.auth.models import Secret
                 
                 provider = AuthFactory.get_provider()
-                # We inject the Secret object into the config
                 config["password"] = Secret(config["secret_key"], provider)
                 
-            # The service is instantiated with the Secret object already in its config
             cls._INSTANCES[instance_key] = service_cls(
                 name=instance_key, 
                 account_id=account_id, 

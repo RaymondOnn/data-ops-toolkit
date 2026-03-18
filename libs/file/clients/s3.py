@@ -2,6 +2,7 @@ import logging
 from typing import Any, Optional
 
 import fsspec
+from s3fs import S3FileSystem
 
 from libs.file.base import FileSystemClient
 
@@ -24,14 +25,14 @@ class S3Client(FileSystemClient):
         super().__init__(url, storage_options)            
         self.fs = self.connect()
         
-    def connect(self) -> fsspec.S3FileSystem:
+    def connect(self) -> S3FileSystem:
         """Establishes the S3 connection using mapped credentials."""
         if not self.fs:
             # Map generic 'password' to S3-specific 'secret'
             if 'password' in self.opts:
                 self.opts['secret'] = self.opts.pop('password')
                 
-            self.fs: fsspec.S3FileSystem = fsspec.filesystem("s3", **self.opts)
+            self.fs: S3FileSystem = fsspec.filesystem("s3", **self.opts)
         return self.fs
 
     def reconnect(self, max_retries: int = 3) -> None:
@@ -42,7 +43,7 @@ class S3Client(FileSystemClient):
                 self.connection = None # Force clear
                 self.connect()
                 return
-            except Exception as e:
+            except Exception:
                 if i == max_retries - 1: raise
                 time.sleep(2 ** i)
                 

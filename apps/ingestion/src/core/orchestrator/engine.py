@@ -2,16 +2,17 @@ import time
 from pathlib import Path
 from typing import Any
 
-import diskcache # type: ignore
-import msgspec # type: ignore
-import ray # type: ignore
-import structlog # type: ignore
-from filelock import FileLock # type: ignore
+import diskcache
+import msgspec
+import ray
+import structlog
+from filelock import FileLock
 
 from src.core.models.job import Job, JobManifest 
 from src.core.models.steps import _JOB_ORDER
 from src.services.registry import ServiceRegistry
 from src.utils.constants import JOB_STEPS_BASE_DIR, DISKCACHE_FILE_PATH
+from src.utils.common import find_path
 
 
 LOG = structlog.getLogger(__name__)
@@ -270,9 +271,9 @@ class IngestionEngine:
         # Logic: active/{job_id}:{dataset_id}_{run_date}/run_id/step_name
         # Example: active/job_123:dataset_456_2022-01-01/run_12345/transform
         active_root = JOB_STEPS_BASE_DIR / "active"
-        for path in active_root.rglob(run_id):
-            if path.is_dir:
-                active_path = path / step_name
+
+        active_path = find_path(active_root, run_id)
+        active_path = active_path / step_name
         
         # It must exist and be a valid link/directory
         return bool(active_path.exists())
@@ -303,9 +304,10 @@ class IngestionEngine:
         Instead of searching 5+ folders, we read the one 'active' manifest.
         This is O(1) instead of O(N).
         """
-        from src.utils.common import find_active_path
+        from src.utils.common import find_path
         
-        active_path = find_active_path(run_id)
+        active_root = JOB_STEPS_BASE_DIR / "active"
+        active_path = find_path(active_root, run_id)
         manifest_path = active_path / "manifest.json"
 
         if not manifest_path.exists():
@@ -318,7 +320,7 @@ class IngestionEngine:
 
             # Logic: If the current step is done, move forward. 
             # Otherwise, the step crashed mid-way; resume/retry it.
-            if meta.status == "COMPLETED":
+            if meta.step_status == "COMPLETED":
                 return self._get_next_step_name(meta.current_step)
             
             return str(meta.current_step)
@@ -329,9 +331,8 @@ class IngestionEngine:
         Finds the evolving manifest for the job in its active workspace.
         """
         active_root = JOB_STEPS_BASE_DIR / "active"
-        for path in active_root.rglob(run_id):
-            if path.is_dir:
-                manifest_path = path / "manifest.json"
+        active_path = find_path(active_root, run_id)
+        manifest_path = active_path / "manifest.json"
 
         if not manifest_path.exists():
             # During recovery, if a job exists in DB but not on disk, it's a 'Ghost'

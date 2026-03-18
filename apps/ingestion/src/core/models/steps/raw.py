@@ -60,7 +60,7 @@ class RawStep(JobStep):  # type: ignore
             # Decision: DataReader.fetch uses the functional apply_schema_contract
             # inside the Ray workers to prevent double-handling.
             service = ServiceFactory.get_service(
-                job_ctx.source_type, **job_ctx.source_params
+                job_ctx.source_type, **job_ctx.source_config
             )
             reader: Reader = ReaderFactory.get_reader(ctx.source_type)
             LOG.info(f"Executing raw ingestion using strategy: {ctx.source_type}")
@@ -118,9 +118,7 @@ class RawStep(JobStep):  # type: ignore
             # We map the strategy output to our RawPayload schema
             payload = RawPayload(
                 step_outcome="COMPLETED",
-                artifact_folder=str(
-                    data_store
-                ),  # ?: Point to virtual or physical folder
+                artifact_folder=data_store,  # ?: Point to virtual or physical folder
                 file_count=len(file_infos),
                 files=file_infos,
                 raw_row_count=total_rows,

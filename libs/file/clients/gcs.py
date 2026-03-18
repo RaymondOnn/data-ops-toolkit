@@ -1,5 +1,6 @@
 from typing import Any, Optional
 import fsspec
+from gcsfs import GCSFileSystem
 
 from libs.file.base import FileSystemClient
 
