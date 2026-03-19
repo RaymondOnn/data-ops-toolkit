@@ -1,4 +1,3 @@
-
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -40,14 +39,14 @@ def parse_set_options(settings: list[str] | None) -> dict[str, Any]:
     result = {"_global": {}}
     if not settings:
         return result
-    
+
     for item in settings:
         if "=" not in item:
-            continue # Or raise an error for invalid format
-            
+            continue  # Or raise an error for invalid format
+
         key_val = item.split("=", 1)
         raw_key, value = key_val[0].strip(), key_val[1].strip()
-        
+
         # Simple Type Inference
         if value.isdigit():
             value = int(value)
@@ -65,15 +64,16 @@ def parse_set_options(settings: list[str] | None) -> dict[str, Any]:
             result[dataset_scope][clean_key.strip()] = value
         else:
             result["_global"][raw_key] = value
-            
+
     return result
+
 
 class JobContextBuilder:
     def __init__(self, app_cfg_path: str | None = None, env: str = APP_CURRENT_ENV):
         # 1. Initialize Dynaconf with the global app config and environment overrides
         self.app_cfg_path = app_cfg_path or APP_DEFAULT_CONFIG
         self.env = env
-        
+
         self.app_settings = Dynaconf(
             envvar_prefix="APP",
             argv_prefix="--APP",
@@ -84,9 +84,9 @@ class JobContextBuilder:
         )
 
     def _resolve_relative_date(
-        self, 
+        self,
         spec: dict[str, Any],
-        run_date_str: str | None = None, 
+        run_date_str: str | None = None,
     ) -> str:
         """Resolves T-x logic into a formatted string."""
         if run_date_str:
@@ -94,26 +94,26 @@ class JobContextBuilder:
         else:
             offset = spec.get("offset_days", 0)
             date_val = datetime.now() + timedelta(days=offset)
-        
+
         fmt = date_val.strftime(spec.get("format", "%Y-%m-%d"))
         return f"'{fmt}'" if spec.get("wrap_quotes") else fmt
 
     def build_job_contexts(
-        self, 
-        job_id: str, 
+        self,
+        job_id: str,
         run_date_str: str | None = None,
         overrides_json: Path | None = None,
     ) -> list[JobContext]:
         """Maps merged config into a list of msgspec JobContext objects."""
-        
+
         job_cfg_path = Path("apps/ingestion/config") / job_id / "config.yaml"
-        
-        # We create a new Dynaconf instance for this specific job run, 
+
+        # We create a new Dynaconf instance for this specific job run,
         # using the pre-loaded app_settings as the base.
         settings_files = [self.app_cfg_path, job_cfg_path]
         if overrides_json:
             settings_files.append(overrides_json)
-            
+
         settings = Dynaconf(
             envvar_prefix="APP",
             argv_prefix="--APP",
@@ -141,7 +141,7 @@ class JobContextBuilder:
             archive_conf = ds_cfg.get("archive", settings.get("archive", {}))
             service_ref = archive_conf.get("service_ref")
             service_details = settings.get(f"services.{service_ref}", {})
-            
+
             # Instantiate JobContext via msgspec
             ctx_data = {
                 "job_id": job_id,
@@ -152,34 +152,33 @@ class JobContextBuilder:
                 "extraction": {
                     "source_type": settings.get("source.type"),
                     "source_identifier": ds_cfg.get("source_path"),
-                    "num_partitions": ds_cfg.get("num_partitions", settings.get("num_partitions", 10)),
+                    "num_partitions": ds_cfg.get(
+                        "num_partitions", settings.get("num_partitions", 10)
+                    ),
                     "load_mode": ds_cfg.get("load_mode", "snapshot"),
                     "source_config": settings.get("source.config", {}),
                     "source_params": {"filter_sql": resolved_sql},
-                    "schema_items": ds_cfg.get("schema_items", [])
+                    "schema_items": ds_cfg.get("schema_items", []),
                 },
                 "transform": {
                     "script": ds_cfg.get("transform_script"),
-                    "params": ds_cfg.get("transform_params", {})
+                    "params": ds_cfg.get("transform_params", {}),
                 },
                 "load": {
                     "sink_type": ds_cfg.get("sink_type", settings.get("sink.type")),
                     "sink_identifier": ds_cfg.get("target_destination"),
                     "sink_config": ds_cfg.get("sink_config", settings.get("sink.config", {})),
                     "partition_col": ds_cfg.get("partition_col"),
-                    "partition_value": ds_cfg.get("partition_value") or actual_val
+                    "partition_value": ds_cfg.get("partition_value") or actual_val,
                 },
                 "archival": {
                     "enabled": archive_conf.get("enable_archival", True),
                     "type": service_details.get("type", "standard_archive"),
                     "config": service_details,
-                    "base_path": archive_conf.get("base_path", "/mnt/archive/ingestion")
-                }
+                    "base_path": archive_conf.get("base_path", "/mnt/archive/ingestion"),
+                },
             }
-            
-            ctx = msgspec.json.decode(
-                msgspec.json.encode(ctx_data),
-                type=JobContext
-            )
+
+            ctx = msgspec.json.decode(msgspec.json.encode(ctx_data), type=JobContext)
             contexts.append(ctx)
         return contexts

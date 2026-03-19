@@ -5,8 +5,6 @@ import polars as pl
 from libs.file.formats.base import FormatHandler
 
 
-
-
 class ParquetHandler(FormatHandler):
     def read_mem(self, target: str, **kwargs) -> io.BytesIO:
         """Parquet is binary; read directly into buffer."""
@@ -28,10 +26,10 @@ class ParquetHandler(FormatHandler):
         """
         if isinstance(df, pl.LazyFrame):
             df.sink_parquet(
-                target, 
-                maintain_order=False, # Faster performance
-                compression="snappy", 
-                row_group_size=100_000 # Optimized for 2GB RAM
+                target,
+                maintain_order=False,  # Faster performance
+                compression="snappy",
+                row_group_size=100_000,  # Optimized for 2GB RAM
             )
         else:
             df.write_parquet(target, compression="snappy")
@@ -39,5 +37,3 @@ class ParquetHandler(FormatHandler):
     def write_file(self, data: bytes, target: str):
         with self.fs.open(target, "wb") as f:
             f.write(data)
-            
-            

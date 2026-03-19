@@ -107,9 +107,7 @@ class CompleteStep(JobStep):  # type: ignore
             if src_folder.exists():
                 dest_folder = f"{archive_root}/{step}"
                 # target_archive.mkdir(parents=True, exist_ok=True)
-                object_store.archive_data(
-                    source_dir=src_folder, archive_path=dest_folder
-                )
+                object_store.archive_data(source_dir=src_folder, archive_path=dest_folder)
 
     def _calculate_expiry(self, job: "Job", end_timestamp: datetime) -> str:
         # e.g., standard 7-year retention or 30-day GDPR limit

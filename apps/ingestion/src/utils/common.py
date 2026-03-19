@@ -1,6 +1,4 @@
-
 from pathlib import Path
-
 
 
 def find_path(search_dir: Path, file_pattern: str) -> Path:

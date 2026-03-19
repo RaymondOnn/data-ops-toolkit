@@ -2,6 +2,7 @@ from .start import StartStep
 from .raw import RawStep
 from .transform import TransformStep
 from .write import WriteStep
+
 # from .audit import AuditStep
 from .publish import PublishStep
 from .complete import CompleteStep
@@ -19,5 +20,4 @@ __all__ = [
     "CompleteStep",
     "JobBitmask",
     "_JOB_ORDER",
-
 ]

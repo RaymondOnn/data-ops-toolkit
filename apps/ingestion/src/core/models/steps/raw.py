@@ -59,16 +59,12 @@ class RawStep(JobStep):  # type: ignore
             # 2. Extract & Guard (The Ray Orchestration)
             # Decision: DataReader.fetch uses the functional apply_schema_contract
             # inside the Ray workers to prevent double-handling.
-            service = ServiceFactory.get_service(
-                job_ctx.source_type, **job_ctx.source_config
-            )
+            service = ServiceFactory.get_service(job_ctx.source_type, **job_ctx.source_config)
             reader: Reader = ReaderFactory.get_reader(ctx.source_type)
             LOG.info(f"Executing raw ingestion using strategy: {ctx.source_type}")
 
             # 3. We create a temporary physical folder in 'data'
-            data_store = (
-                JOB_STEPS_BASE_DIR / "data" / self.name / f"{job.id}_{int(time.time())}"
-            )
+            data_store = JOB_STEPS_BASE_DIR / "data" / self.name / f"{job.id}_{int(time.time())}"
             data_store.mkdir(parents=True, exist_ok=True)
 
             # 4. Execute the Ingestion

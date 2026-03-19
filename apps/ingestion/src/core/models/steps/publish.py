@@ -31,7 +31,6 @@ class PublishStep(JobStep):  # type: ignore
         start_time = time.perf_counter()
         job_ctx = job.context
 
-
         try:
             manifest = self.get_manifest(job)
             write_meta = manifest.write
@@ -39,9 +38,7 @@ class PublishStep(JobStep):  # type: ignore
                 raise ValueError("Write metadata not found in manifest.")
 
             # 1. Get the Service (Securely initialized on Ray worker via ServiceFactory)
-            service = ServiceFactory.get_service(
-                job_ctx.sink_type, **job_ctx.sink_config
-            )
+            service = ServiceFactory.get_service(job_ctx.sink_type, **job_ctx.sink_config)
 
             # 2. Get the behavioral Strategy
             loader = Loader()
@@ -60,9 +57,7 @@ class PublishStep(JobStep):  # type: ignore
                 staging_info=write_meta.staging_artifact,
                 write_ctx=context,
             )
-            LOG.info(
-                "Job Published", job_id=job.id, table=job_ctx.target_destination
-            )
+            LOG.info("Job Published", job_id=job.id, table=job_ctx.target_destination)
 
             # 3. PAYLOAD: The 'Success Receipt'
             duration_ms = round(time.time() - start_time, 2)

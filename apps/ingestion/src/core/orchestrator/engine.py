@@ -8,7 +8,7 @@ import ray
 import structlog
 from filelock import FileLock
 
-from src.core.models.job import Job, JobManifest 
+from src.core.models.job import Job, JobManifest
 from src.core.models.steps import _JOB_ORDER
 from src.services.registry import ServiceRegistry
 from src.utils.constants import JOB_STEPS_BASE_DIR, DISKCACHE_FILE_PATH
@@ -26,8 +26,10 @@ class Worker:
         self.worker_id = worker_id
         self.cache = diskcache.Cache(
             DISKCACHE_FILE_PATH,
-            timeout=10, # Increase timeout for slow PV file locks (NFS/EFS)
-            settings={'sqlite_journal_mode': 'wal'} # Ensure WAL mode is active for concurrent reads/writes
+            timeout=10,  # Increase timeout for slow PV file locks (NFS/EFS)
+            settings={
+                "sqlite_journal_mode": "wal"
+            },  # Ensure WAL mode is active for concurrent reads/writes
         )
         self.lock = FileLock(LOCK_FILE)
         self._busy = False
@@ -104,12 +106,8 @@ class IngestionEngine:
         }
 
         # Initialize specialized pools
-        self.io_pool: list[ray.actor.ActorHandle] = [
-            Worker.remote(f"io_{i}") for i in range(15)
-        ]
-        self.cpu_pool: list[ray.actor.ActorHandle] = [
-            Worker.remote(f"cpu_{i}") for i in range(4)
-        ]
+        self.io_pool: list[ray.actor.ActorHandle] = [Worker.remote(f"io_{i}") for i in range(15)]
+        self.cpu_pool: list[ray.actor.ActorHandle] = [Worker.remote(f"cpu_{i}") for i in range(4)]
 
     def run(self) -> None:
         """Main loop managing multiple jobs."""
@@ -202,9 +200,7 @@ class IngestionEngine:
                     counts[step] = counts.get(step, 0) + 1
         return counts
 
-    def _get_idle_worker_from_pool(
-        self, pool: list[ray.actor.ActorHandle]
-    ) -> Any | None:
+    def _get_idle_worker_from_pool(self, pool: list[ray.actor.ActorHandle]) -> Any | None:
         for w in pool:
             if ray.get(w.is_idle.remote()):
                 return w
@@ -217,7 +213,7 @@ class IngestionEngine:
             for key in list(self.cache.iterkeys()):
                 if ":" not in key:
                     continue
-                
+
                 step, composite_key = key.split(":", 1)
                 meta = self.cache[key]
 
@@ -240,14 +236,17 @@ class IngestionEngine:
         job_id = job_meta["job_id"]
         run_id = job_meta["run_id"]
 
-
         # 1. Verify if the step actually finished on disk but failed to transit
         # We check for the .success marker in the current step's folder
         if self._check_step_completion_on_disk(job_id, run_id, step_name):
             # If the symlink exists, the worker finished 'finalize' but the engine died
             next_step = self._get_next_step_name(step_name)
-            LOG.info("Recovery: Step was successful on disk. Promoting.", 
-                    job_id=job_id, from_step=step_name, to_step=next_step)
+            LOG.info(
+                "Recovery: Step was successful on disk. Promoting.",
+                job_id=job_id,
+                from_step=step_name,
+                to_step=next_step,
+            )
 
             del self.cache[key]
             if next_step != "complete":
@@ -256,8 +255,11 @@ class IngestionEngine:
         else:
             # If no symlink exists, the worker died mid-stream or before finalize.
             # Reset to PENDING in the SAME queue to allow a retry.
-            LOG.info("Recovery: No physical proof of success. Resetting for retry.", 
-                    job_id=job_id, step=step_name)
+            LOG.info(
+                "Recovery: No physical proof of success. Resetting for retry.",
+                job_id=job_id,
+                step=step_name,
+            )
             job_meta["status"] = "PENDING"
             job_meta["last_hb"] = time.time()
             self.cache[key] = job_meta
@@ -274,7 +276,7 @@ class IngestionEngine:
 
         active_path = find_path(active_root, run_id)
         active_path = active_path / step_name
-        
+
         # It must exist and be a valid link/directory
         return bool(active_path.exists())
 
@@ -283,7 +285,6 @@ class IngestionEngine:
         Decision: Use List-Index Lookup.
         Leveraging a list makes the pipeline order explicit and easy to change.
         """
-        
 
         try:
             current_idx = _JOB_ORDER.index(current_step)
@@ -299,30 +300,30 @@ class IngestionEngine:
         """
         Decision: Single-File Peep.
         Peeps at the manifests on disk to find where the job stalled.
-        Used during System Recovery or Orchestrator Boot-up to decide exactly 
+        Used during System Recovery or Orchestrator Boot-up to decide exactly
         where to resume a job that was interrupted.
         Instead of searching 5+ folders, we read the one 'active' manifest.
         This is O(1) instead of O(N).
         """
         from src.utils.common import find_path
-        
+
         active_root = JOB_STEPS_BASE_DIR / "active"
         active_path = find_path(active_root, run_id)
         manifest_path = active_path / "manifest.json"
 
         if not manifest_path.exists():
             LOG.info("No active manifest found, starting fresh.", job_id=job_id)
-            return str(_JOB_ORDER[0]) # Usually 'start'
+            return str(_JOB_ORDER[0])  # Usually 'start'
 
         with open(manifest_path, "rb") as f:
             # msgspec is fast enough to do this in the main recovery loop
             meta = msgspec.json.decode(f.read(), type=JobManifest)
 
-            # Logic: If the current step is done, move forward. 
+            # Logic: If the current step is done, move forward.
             # Otherwise, the step crashed mid-way; resume/retry it.
             if meta.step_status == "COMPLETED":
                 return self._get_next_step_name(meta.current_step)
-            
+
             return str(meta.current_step)
 
     def get_latest_manifest(self, job_id: str, run_id: str) -> JobManifest:

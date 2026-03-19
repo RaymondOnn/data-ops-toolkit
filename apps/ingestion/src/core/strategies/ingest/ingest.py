@@ -41,8 +41,7 @@ class DataReader(Reader):
                 "source_type": context.source_type,
                 "config": service.config,  # Connection params
                 "account_id": service.account_id,
-                "schema_items": context.schema_items
-                
+                "schema_items": context.schema_items,
             }
             for unit in work_units
         ]
@@ -56,30 +55,24 @@ class DataReader(Reader):
             from src.services.factory import ServiceFactory
             from src.core.schema import apply_schema_contract
 
-            service = ServiceFactory.get_service(
-                payload["source_type"], **payload["config"]
-            )
-            
+            service = ServiceFactory.get_service(payload["source_type"], **payload["config"])
+
             # 1. Extraction
             # Support both DB query string and File list dict
             unit = payload["unit"]
             if isinstance(unit, dict) and "files" in unit:
                 unit = unit["files"]
-                
+
             result = service.fetch_df(unit)
-            
+
             # Convert LazyFrame to DataFrame for Ray compatibility
             if isinstance(result, pl.LazyFrame):
                 df = result.collect()
             else:
                 df = result
-            
-            # 2. Guarding (Function Call)
-            return apply_schema_contract(
-                df, 
-                payload.get("schema_items", [])
-            )
 
+            # 2. Guarding (Function Call)
+            return apply_schema_contract(df, payload.get("schema_items", []))
 
         # 4. Map the task across the cluster
         # .iter_batches() makes this a generator!
@@ -111,9 +104,7 @@ class DataReader(Reader):
             df.write_parquet(file_path, compression="snappy")
 
             # Capture metadata for the RawStep to process
-            metadata_list.append(
-                {"path": file_path, "rows": len(df), "schema": df.schema}
-            )
+            metadata_list.append({"path": file_path, "rows": len(df), "schema": df.schema})
 
         return metadata_list
 
@@ -122,15 +113,12 @@ class DataReader(Reader):
         pass
 
 
-
 @ReaderFactory.register("flat_file")
 class FileDataReader(DataReader):
-    def get_work_units(
-        self, client: Any, context: ReaderContext
-    ) -> list[Any]:
+    def get_work_units(self, client: Any, context: ReaderContext) -> list[Any]:
         if not context.source_path:
             raise ValueError("source_path is required for FileDataReader")
-            
+
         return client.get_work_units(context.source_path, context.num_partitions)
 
 
@@ -139,9 +127,7 @@ class DBDataReader(DataReader):
     def __init__(self) -> None:
         super().__init__()
 
-    def get_work_units(
-        self, client: DatabaseService, context: ReaderContext
-    ) -> list[Any]:
+    def get_work_units(self, client: DatabaseService, context: ReaderContext) -> list[Any]:
         # Uses ORA_HASH for Oracle or ctid for Postgres
         # to generate N unique queries for the 50M rows
         if not context.target_table:

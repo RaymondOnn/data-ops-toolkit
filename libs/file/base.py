@@ -10,14 +10,11 @@ from libs.clients.base import BaseIOClient
 
 LOG = logging.getLogger(__name__)
 
+
 # TODO: Qurantine for file ingestion job
 class FileSystemClient(BaseIOClient, ABC):
-    def __init__(
-        self, 
-        url: str, 
-        storage_options: Optional[dict[str, Any]] = None
-    ):
-        self.url = url.rstrip('/')
+    def __init__(self, url: str, storage_options: Optional[dict[str, Any]] = None):
+        self.url = url.rstrip("/")
         self.opts = storage_options or {}
         self.fs = None
 
@@ -25,14 +22,13 @@ class FileSystemClient(BaseIOClient, ABC):
     def connect(self) -> fsspec.AbstractFileSystem:
         raise NotImplementedError("Subclasses must implement connect() method.")
 
-        
-    # ?: Perhaps quarantine file as a separate method    
+    # ?: Perhaps quarantine file as a separate method
     # def validate_integrity(self, path: str) -> bool:
     #     """Self-healing: Checks for 0-byte files and moves them to quarantine."""
     #     ful l_path = self._get_full_path(path)
     #     if not self.fs.exists(full_path):
     #         return False
-        
+
     #     if self.fs.size(full_path) == 0:
     #         LOG.error("Zero-byte file detected", extra={"path": full_path, "event": "quarantine"})
     #         quarantine_path = f"{self.url}/quarantine/{path.split('/')[-1]}"
@@ -40,10 +36,7 @@ class FileSystemClient(BaseIOClient, ABC):
     #         self.fs.move(full_path, quarantine_path)
     #         return False
     #     return True
-    
-    
-    
-    
+
     def resolve_path(self, path: str) -> str:
         """The fsspec equivalent of Path.resolve()."""
         if "://" in path and self.fs:
@@ -62,6 +55,7 @@ class FileSystemClient(BaseIOClient, ABC):
             # Local to Remote (Upload)
             self.fs.put(local_source, remote_dest)
 
+
 # We import these at the top level or inside the function
 # To keep memory low, we can import them inside the Enum if needed
 class FileSystemSkills(Enum):
@@ -77,14 +71,14 @@ class FileSystemSkills(Enum):
     def mixin_class(self):
         """Dynamic import to keep the 2GB RAM footprint small."""
         import importlib
+
         module_path, class_name = self.class_path.rsplit(".", 1)
         module = importlib.import_module(module_path)
         return getattr(module, class_name)
-        
+
+
 def create_fs_client(
-    url: str, 
-    capabilities: list[FileSystemSkills], 
-    storage_options: Optional[dict[str, Any]] = None
+    url: str, capabilities: list[FileSystemSkills], storage_options: Optional[dict[str, Any]] = None
 ) -> FileSystemClient:
     """
     Assembles a Managed Client with dynamic capabilities (Ingestion, Archive, etc.).
@@ -99,9 +93,9 @@ def create_fs_client(
         # "gs://": GCSClient,
         # "gcs://": GCSClient,
         "abfs://": AzureClient,
-        "az://": AzureClient
+        "az://": AzureClient,
     }
-    
+
     # Default to LocalClient if no cloud protocol is detected
     base_class = LocalClient
     for prefix, cls in protocol_map.items():

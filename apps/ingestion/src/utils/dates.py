@@ -1,6 +1,7 @@
 import time
 from datetime import datetime, time as dt_time, timedelta
 
+
 def get_end_of_day_ts() -> float:
     """
     Returns the Unix timestamp for 23:59:59 of the current day.
@@ -11,6 +12,7 @@ def get_end_of_day_ts() -> float:
     eod = datetime.combine(now.date(), dt_time(23, 59, 59))
     return eod.timestamp()
 
+
 def is_expired(expires_at: float | None) -> bool:
     """
     Helper to check if a timestamp has passed.
@@ -18,6 +20,7 @@ def is_expired(expires_at: float | None) -> bool:
     if expires_at is None:
         return False
     return time.time() > expires_at
+
 
 def epoch_to_iso(epoch: float | None) -> str:
     """
@@ -28,6 +31,7 @@ def epoch_to_iso(epoch: float | None) -> str:
         return "N/A"
     # Using local time for logging/UI clarity
     return datetime.fromtimestamp(epoch).isoformat()
+
 
 def iso_to_epoch(iso_str: str) -> float:
     """

@@ -52,10 +52,7 @@ class TransformStep(JobStep):  # type: ignore
                 # Decision: Use sink_parquet via our handler's execution-aware logic.
                 # This triggers the Polars Rust engine to stream chunks through the plan.
                 data_store = (
-                    JOB_STEPS_BASE_DIR
-                    / "data"
-                    / self.name
-                    / f"{job.id}_{int(time.time())}"
+                    JOB_STEPS_BASE_DIR / "data" / self.name / f"{job.id}_{int(time.time())}"
                 )
                 data_store.mkdir(parents=True, exist_ok=True)
 

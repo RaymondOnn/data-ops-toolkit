@@ -45,7 +45,7 @@ class Orchestrator:
         from src.core.orchestrator.lifecycle import LifecycleManager
         from src.core.orchestrator.signals import SignalProcessor
         from src.core.orchestrator.state import StateStore
-        
+
         self.builder: JobContextBuilder = builder
 
         self.heartbeat = Heartbeat()
@@ -68,15 +68,9 @@ class Orchestrator:
             self.lifecycle = LifecycleManager(self.state_store, self.engine)
 
             # 2. Wire the Signals to the Handlers (The Refactor Fix)
-            self.signals.register_command(
-                "RECOVER_ALL.cmd", self.lifecycle.handle_recovery
-            )
-            self.signals.register_command(
-                "PURGE_EXPIRED.cmd", self.lifecycle.handle_expiry
-            )
-            self.signals.register_command(
-                "RELOAD_CONFIG.cmd", self._reload_internal_config
-            )
+            self.signals.register_command("RECOVER_ALL.cmd", self.lifecycle.handle_recovery)
+            self.signals.register_command("PURGE_EXPIRED.cmd", self.lifecycle.handle_expiry)
+            self.signals.register_command("RELOAD_CONFIG.cmd", self._reload_internal_config)
 
         LOG.info("Orchestrator initialized", mode=self.mode)
 
@@ -167,7 +161,6 @@ class Orchestrator:
         if not overrides:
             raise ValueError("Dumb mode requires a valid JobConfig.")
 
-
         self._trigger_job(
             job_id,
             dataset_id=dataset_id,
@@ -199,7 +192,7 @@ class Orchestrator:
         """
         # 1. Physical Workspace Check (The primary breadcrumb)
         active_path = JOB_STEPS_BASE_DIR / "active"
-        
+
         if active_path.exists():
             return False
 
@@ -270,9 +263,7 @@ class Orchestrator:
                 # A: If grace_sec is -1, it's a "Manual Resume" or "Force Run"
                 # Policy -1 means 'run no matter how late we are'
                 if MISFIRE_GRACE_PERIOD_SECS == -1:
-                    LOG.info(
-                        f"[FORCE_RUN]: Job {record['job_id']} is {delay}s late. Policy: -1"
-                    )
+                    LOG.info(f"[FORCE_RUN]: Job {record['job_id']} is {delay}s late. Policy: -1")
                     provision_run(record)
                     continue
 
@@ -375,9 +366,7 @@ class Orchestrator:
             self.state_store.update_status(job_id, JobStatus.QUEUED)
             self.timers["job_trigger"] = time.time()
 
-    def _terminate_job(
-        self, job: Job, status: JobStatus, reason: str | None = None
-    ) -> None:
+    def _terminate_job(self, job: Job, status: JobStatus, reason: str | None = None) -> None:
         """
         Controlled Crash Handler.
         Uses the Job's internal status updater to ensure consistency.
@@ -411,13 +400,13 @@ def create_orchestrator(app_cfg_path: str | None = None) -> Orchestrator:
     Resolves configuration first to properly initialize services.
     """
     from src.services.factory import ServiceFactory
-    
+
     # 1. Initialize Builder (loads global app.yaml)
     builder = JobContextBuilder(app_cfg_path=app_cfg_path)
-    
+
     # 2. Initialize Database Service using resolved config
     db_config = builder.app_settings.get("services", {}).get("database", {})
     db_service = ServiceFactory.get_service("db", **db_config)
-    
+
     # 3. Return fully wired Orchestrator
     return Orchestrator(db_service=db_service, builder=builder)

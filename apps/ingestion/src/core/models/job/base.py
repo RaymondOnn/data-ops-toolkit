@@ -72,9 +72,7 @@ class Job:
         self.target_step = target_step
 
     @classmethod
-    def from_folder(
-        cls, folder_path: Path, target_step: Optional[JobSteps] = None
-    ) -> "Job":
+    def from_folder(cls, folder_path: Path, target_step: Optional[JobSteps] = None) -> "Job":
         """
         Factory to rehydrate a Job. If a target_step is provided,
         it performs an immediate check-in.
@@ -165,13 +163,9 @@ class Job:
                 # msgspec decodes directly into your JobContext class
                 return msgspec.json.decode(f.read(), type=JobContext)
         except (StopIteration, FileNotFoundError):
-            LOG.error(
-                "JobContext configuration missing on disk", folder=str(self.folder)
-            )
+            LOG.error("JobContext configuration missing on disk", folder=str(self.folder))
             # Return an empty/default context if appropriate for your logic
-            raise FileNotFoundError(
-                f"Config for job {self.id} not found in {self.folder}"
-            )
+            raise FileNotFoundError(f"Config for job {self.id} not found in {self.folder}")
 
     @property
     def step(self) -> JobStep:
@@ -231,9 +225,7 @@ class Job:
         new_path.parent.mkdir(parents=True, exist_ok=True)
 
         if self.folder.exists():
-            LOG.info(
-                "Relocating metadata folder", src=str(self.folder), dst=str(new_path)
-            )
+            LOG.info("Relocating metadata folder", src=str(self.folder), dst=str(new_path))
 
             # Atomic move across the filesystem
             shutil.move(str(self.folder), str(new_path))

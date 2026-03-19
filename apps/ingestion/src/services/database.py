@@ -20,13 +20,15 @@ from libs.resilience.circuit_breaker import CircuitBreaker
 breaker = CircuitBreaker(
     failure_threshold=3,
     recovery_timeout=300,
-    expected_exceptions=(ClientCantConnect, ConnectionError, TimeoutError)
+    expected_exceptions=(ClientCantConnect, ConnectionError, TimeoutError),
 )
+
 
 class DatabaseService(Service):
     """
     Intermediate layer for all SQL-based sources.
     """
+
     def __init__(self, name: str, **config: Any):
         super().__init__(name, **config)
         self.client: DBClient = self._init_client(**config)
@@ -35,11 +37,11 @@ class DatabaseService(Service):
     def _init_client(self, **config: Any) -> Any:
         """Subclasses must initialize their specific DB client."""
         pass
-    
+
     def get_work_units(self, target: str, num_partitions: int) -> list[str]:
         # All DBs use the client's load strategy (e.g., ORA_HASH, ctid)
         return self.client.get_load_strategy(target, num_partitions)
-    
+
     @protect_service(breaker)
     def sql(self, query: str) -> list[Sequence[Any]]:
         """
@@ -47,7 +49,7 @@ class DatabaseService(Service):
         Used for smaller metadata queries or status checks.
         """
         return self.client.sql(query)
-    
+
     @protect_service(breaker)
     def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
         # Centralized protected fetch for all DB types
@@ -60,14 +62,11 @@ class DatabaseService(Service):
 
     @abstractmethod
     def promote_data(
-        self, 
-        staging_table: str, 
-        target_table: str, 
-        partition_col: str, 
-        partition_val: str
+        self, staging_table: str, target_table: str, partition_col: str, partition_val: str
     ) -> None:
         """Phase 2: Moves data to production (Swap/Merge/Append)."""
         pass
+
 
 @ServiceFactory.register("postgres")
 class PostgresService(DatabaseService):
@@ -82,35 +81,35 @@ class PostgresService(DatabaseService):
             database=config["database"],
             user=config["user"],
             password=secret.resolve(sanitize=True),
-            port=config.get("port", 5432)
+            port=config.get("port", 5432),
         )
-    
+
     def stage_data(self, source_dir: str, target_table: str) -> str:
         staging_table = f"stg_{target_table}_{int(time.time())}"
         self.client.sql(f"CREATE UNLOGGED TABLE {staging_table} (LIKE {target_table})")
-        
+
         # Polars scan_parquet handles a directory path natively.
         # It will treat all parquet files in the folder as a single dataset.
         lf = pl.scan_parquet(f"{source_dir}/*.parquet")
-        
+
         # 1. Get the connection from the DBAPI
         conn = self.client.connect()
-        
+
         try:
             with conn.cursor() as cursor:
                 # 2. Open the COPY pipe
                 copy_sql = f"COPY {staging_table} FROM STDIN WITH (FORMAT CSV, HEADER FALSE)"
-                
+
                 with cursor.copy(copy_sql) as copy:
                     # Stream in 100k chunks to keep RAM flat
                     df = lf.collect()
                     if not isinstance(df, pl.DataFrame):
                         raise TypeError(f"Expected polars.DataFrame, got {type(df)}")
-                        
+
                     for batch_df in df.iter_slices(n_rows=100_000):
                         # write_csv returns bytes, which we feed into the copy pipe
                         copy.write(batch_df.write_csv(include_header=False))
-            
+
             # Commit only if the entire 50M row stream succeeded
             conn.commit()
             return staging_table
@@ -120,11 +119,7 @@ class PostgresService(DatabaseService):
             raise e
 
     def promote_data(
-        self, 
-        staging_table: str, 
-        target_table: str, 
-        partition_col: str, 
-        partition_val: str
+        self, staging_table: str, target_table: str, partition_col: str, partition_val: str
     ) -> None:
         # Transactional Swap
         sql = f"""
@@ -137,20 +132,21 @@ class PostgresService(DatabaseService):
         DROP TABLE {staging_table};
         """
         self.client.sql(sql)
-        
+
+
 ServiceFactory.register("oracle")
+
+
 class OracleService(DatabaseService):
     def _init_client(self, **config: Any) -> Any:
         secret: Secret = config["password"]
         return OracleClient(
-            user=config['user'],
-            password=secret.resolve(sanitize=True),
-            dsn=config['dsn']
+            user=config["user"], password=secret.resolve(sanitize=True), dsn=config["dsn"]
         )
-    
+
     def stage_data(self, source_dir: str, target_table: str) -> str:
         staging_table = f"STG_{target_table}"
-    
+
         # Oracle 'ORACLE_BIGDATA' driver can read all files in a location
         # if the location is defined as a directory or a specific URI pattern
         sql = f"""
@@ -171,11 +167,7 @@ class OracleService(DatabaseService):
         return staging_table
 
     def promote_data(
-        self, 
-        staging_table: str, 
-        target_table: str, 
-        partition_col: str, 
-        partition_val: str
+        self, staging_table: str, target_table: str, partition_col: str, partition_val: str
     ) -> None:
         # If partition_val is '2026-03-10', we wipe that day and replace it
         sql = f"""
@@ -197,6 +189,7 @@ class OracleService(DatabaseService):
         """
         self.client.sql(sql)
 
+
 @ServiceFactory.register("clickhouse")
 class ClickHouseService(DatabaseService):
     def _init_client(self, **config: Any) -> ClickhouseClient:
@@ -205,35 +198,31 @@ class ClickHouseService(DatabaseService):
             host=config.get("host", "localhost"),
             port=config.get("port", 8123),
             user=config.get("user", "default"),
-            password=secret.resolve(sanitize=True) if secret else ""
+            password=secret.resolve(sanitize=True) if secret else "",
         )
 
     def stage_data(self, source_dir: str, target_table: str) -> str:
         staging_table = f"stg_{target_table}_{int(time.time())}"
         try:
             self.client.sql(f"CREATE TEMPORARY TABLE {staging_table} AS {target_table}")
-            
+
             # ClickHouse pulls the folder directly - no Python RAM used
             path_pattern = f"{source_dir.rstrip('/')}/*.parquet"
             sql = f"INSERT INTO {staging_table} SELECT * FROM file('{path_pattern}', 'Parquet')"
-            
+
             self.client.sql(sql)
             return staging_table
-            
+
         except Exception:
             # Cleanup staging on failure to prevent orphan temp tables
             self.client.sql(f"DROP TABLE IF EXISTS {staging_table}")
             raise
-    
+
     def promote_data(
-        self, 
-        staging_table: str, 
-        target_table: str, 
-        partition_col: str, 
-        partition_val: str
+        self, staging_table: str, target_table: str, partition_col: str, partition_val: str
     ) -> None:
         """
-        Atomic metadata swap. 
+        Atomic metadata swap.
         ClickHouse moves the actual data parts on disk
         Note: {partition_val} must match the internal ClickHouse partition ID format.
         """

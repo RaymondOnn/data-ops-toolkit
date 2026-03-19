@@ -14,7 +14,6 @@ CURRENT_EXECUTION_TBL = "CURRENT_EXECUTION"
 
 # TODO: Logging to Error Log? Workflow for refresh current_execution for the day
 class StateStore:
-
     def __init__(self, db_service: DatabaseService) -> None:
         self.service = db_service  # Database-specific logic here
         self._mirror: dict[str, dict[str, Any]] = {}  # {job_id: {record_data}}
@@ -44,9 +43,7 @@ class StateStore:
             # On subsequent ticks, only update if the DB has newer info
             if run_id not in self._mirror:
                 self._mirror[run_id] = r
-                LOG.debug(
-                    "Loaded active run from DB", run_id=run_id, status=r["job_status"]
-                )
+                LOG.debug("Loaded active run from DB", run_id=run_id, status=r["job_status"])
 
     def get_active_definitions(self) -> list[dict[str, Any]]:
         """Returns the current list of jobs for the Orchestrator to evaluate."""
@@ -107,9 +104,7 @@ class StateStore:
                             "total_rows_in": getattr(m_data.raw, "total_rows", 0),
                             "total_rows_out": getattr(m_data.write, "rows_written", 0),
                             "total_duration": m_data.total_duration,
-                            "logic_version": getattr(
-                                m_data.transform, "logic_version", "1.0"
-                            ),
+                            "logic_version": getattr(m_data.transform, "logic_version", "1.0"),
                         }
                     }
                 )

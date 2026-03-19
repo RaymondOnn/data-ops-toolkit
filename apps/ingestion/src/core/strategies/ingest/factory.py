@@ -1,21 +1,17 @@
-
 from typing import Callable
 
 from src.core.ingest.base import Reader
-
 
 
 class ReaderFactory:
     _STRATEGIES: dict[str, type[Reader]] = {}
 
     @classmethod
-    def register(
-        cls, 
-        source_type: str
-    ) -> Callable[[type[Reader]], type[Reader]]:
+    def register(cls, source_type: str) -> Callable[[type[Reader]], type[Reader]]:
         def wrapper(wrapped_class: type[Reader]) -> type[Reader]:
             cls._STRATEGIES[source_type.casefold()] = wrapped_class
             return wrapped_class
+
         return wrapper
 
     @classmethod

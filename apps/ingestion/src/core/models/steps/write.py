@@ -1,7 +1,7 @@
 import time
 import traceback
 
-import structlog # type: ignore
+import structlog  # type: ignore
 
 from src.core.strategies.load.load import Loader
 from src.core.models.job import Job
@@ -28,15 +28,12 @@ class WriteStep(JobStep):  # type: ignore
         start_time = time.perf_counter()
         job_ctx = job.context
 
-
         try:
             # 1. Resolve logical input (The partitioned parquet files)
             source_dir = (job.folder / "transform").resolve()
 
             # 1. Get the Service (Securely initialized on Ray worker via ServiceFactory)
-            service = ServiceFactory.get_service(
-                job_ctx.sink_type, **job_ctx.sink_config
-            )
+            service = ServiceFactory.get_service(job_ctx.sink_type, **job_ctx.sink_config)
 
             # 2. Get the behavioral Strategy
             loader = Loader()
@@ -53,9 +50,7 @@ class WriteStep(JobStep):  # type: ignore
                 step_outcome="COMPLETED",
                 target_identifier=job_ctx.target_destination,
                 sink_type=job_ctx.destination_type,
-                staging_artifact=(
-                    staging_results.staging_path or staging_results.staging_table,
-                ),
+                staging_artifact=(staging_results.staging_path or staging_results.staging_table,),
                 rows_inserted=staging_results.rows,
                 partition_col=job_ctx.partition_col,
                 partition_value=job_ctx.partition_value,
@@ -72,9 +67,7 @@ class WriteStep(JobStep):  # type: ignore
                 error_type=type(exc).__name__,
                 message=str(exc),
                 stack_trace=traceback.format_exc(),
-                is_transient=isinstance(
-                    exc, (requests.RequestException, ConnectionError)
-                ),
+                is_transient=isinstance(exc, (requests.RequestException, ConnectionError)),
             )
             self.finalize(job, exception=payload)
             raise

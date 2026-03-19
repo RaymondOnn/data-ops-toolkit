@@ -3,7 +3,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any, TYPE_CHECKING
 
-import structlog # type: ignore
+import structlog  # type: ignore
 
 
 from src.core.models.job.base import JobStatus
@@ -14,9 +14,10 @@ if TYPE_CHECKING:
 
 LOG = structlog.getLogger(__name__)
 
+
 class LifecycleState(ABC):
     folder_name: str  # e.g., "HOLD", "FAILED", "DONE"
-    
+
     def __init__(self, job: Job):
         self.job = job
 
@@ -29,20 +30,24 @@ class LifecycleState(ABC):
     def can_recover(self) -> bool:
         """Logic to determine if the job can return to 'active'."""
         pass
-    
+
+
 class HoldState(LifecycleState):
     folder_name = "HOLD"
     MAX_HOLD_TIME_HOURS = 24
 
     def on_enter(self, data: dict[str, Any]) -> None:
         """Mark as blocked and update metadata for the UI."""
-        self.job.update_manifest({
-            "job_status": JobStatus.BLOCKED,
-            "error": data,
-            "retry_count": self.job.manifest.get("retry_count", 0) + 1
-        })
+        self.job.update_manifest(
+            {
+                "job_status": JobStatus.BLOCKED,
+                "error": data,
+                "retry_count": self.job.manifest.get("retry_count", 0) + 1,
+            }
+        )
         # Note: The move_to_folder call happens in the finalize() or manager
         LOG.warn("Job entered HOLD", job_id=self.job.id, reason=str(data))
+
     # TODO: Need to straighten out the logic
     def can_recover(self) -> bool:
         """
@@ -55,7 +60,7 @@ class HoldState(LifecycleState):
         if hold_duration > (self.MAX_HOLD_TIME_HOURS * 3600):
             LOG.error("Job expired in HOLD, moving to FAILED", job_id=self.job.id)
             self.job.update_manifest({"job_status": JobStatus.EXPIRED})
-            self.job.move_to_folder("FAILED") # Self-escalation
+            self.job.move_to_folder("FAILED")  # Self-escalation
             self.job.request_status_sync()
             return False
 
@@ -70,22 +75,25 @@ class FailedState(LifecycleState):
 
     def on_enter(self, data: dict[str, Any]) -> None:
         """Snapshot everything for post-mortem analysis."""
-        self.job.update_manifest({
-            "job_status": JobStatus.FAILED,
-            "error": data,
-        })
+        self.job.update_manifest(
+            {
+                "job_status": JobStatus.FAILED,
+                "error": data,
+            }
+        )
         LOG.error("Job FAILED", job_id=self.job.id)
 
     def can_recover(self) -> bool:
         """Manual intervention required."""
         return False
-    
+
+
 class SuccessState(LifecycleState):
     folder_name = "DONE"
 
     def on_enter(self, data: dict[str, Any]) -> None:
         """
-        The Garbage Collector: 
+        The Garbage Collector:
         1. Identifies symlinks to the /data/ vault.
         2. Deletes the physical data files (50M rows).
         3. Cleans up the metadata folder.
@@ -98,26 +106,32 @@ class SuccessState(LifecycleState):
                 if item.is_symlink():
                     # Get the real path of the 50M row data file in the vault
                     real_data_path = item.resolve()
-                    
+
                     if real_data_path.exists():
                         real_data_path.unlink()
                         LOG.debug("Deleted vault data", path=str(real_data_path))
-                    
+
                     # Remove the symlink itself
                     item.unlink()
 
             # 2. Finalize the manifest status for logs/history before deletion
             # (If you want to keep a record, move the manifest to an archive folder here)
-            self.job.update_manifest({
-                "job_status": JobStatus.SUCCESS.value,
-                **data,
-            })
+            self.job.update_manifest(
+                {
+                    "job_status": JobStatus.SUCCESS.value,
+                    **data,
+                }
+            )
 
             # 3. Final Wipe: Remove the entire job run folder
             # Caution: Ensure you actually want to delete the metadata folder!
             shutil.rmtree(self.job.folder)
-            
-            LOG.info("Job lifecycle complete. Resources released.", job_id=self.job.id, run_id=self.job.run_id)
+
+            LOG.info(
+                "Job lifecycle complete. Resources released.",
+                job_id=self.job.id,
+                run_id=self.job.run_id,
+            )
 
         except Exception as e:
             LOG.error("Cleanup failed. Moving to FAILED for review.", error=str(e))

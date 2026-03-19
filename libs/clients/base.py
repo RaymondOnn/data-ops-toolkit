@@ -1,7 +1,9 @@
 from abc import ABC, abstractmethod
 
+
 class ClientCantConnect(Exception):
     pass
+
 
 class BaseIOClient(ABC):
     def __enter__(self):

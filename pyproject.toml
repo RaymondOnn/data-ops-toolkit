@@ -1,9 +1,12 @@
 [project]
-name = "my-portfolio-monorepo"
+name = "dataops-toolkit"
 version = "0.1.0"
 description = "High performance Python monorepo using uv and pex"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "uv",
+    "ruff",
+]
 
 [tool.uv]
 # Define the workspace members
@@ -13,18 +16,78 @@ workspace = { members = ["apps/*", "libs/*"] }
 strict = true
 ignore_missing_imports = true
 
-
 # Line length and target version
-line-length = 100
 target-version = "py311"
 
-[lint]
-# Enable Pyflakes (`F`) and a subset of the pycodestyle (`E`)  codes by default.
-# Unlike Flake8, Ruff doesn't enable pycodestyle warnings (`W`) or
-# McCabe complexity (`C901`) by default.
-select = ["E4", "E7", "E9", "F", "I"] # I = isort (import sorting)
-ignore = []
 
-[format]
-quote-style = "double"
+[tool.ruff]
+line-length = 100
+indent-width = 4
+output-format = "grouped"
+respect-gitignore = true
+extend-exclude = [
+    "doc/",
+]
+show-fixes = true
+
+[tool.ruff.format]
 indent-style = "space"
+line-ending = "lf"
+quote-style = "double"
+docstring-code-format = true
+
+[tool.ruff.lint]
+extend-select = [
+    "A",        # detect shadowed builtins
+    "B",        # flake8-bugbear
+    "BLE",      # disallow catch-all exceptions
+    "C4",       # Catch incorrect use of comprehensions, dict, list, etc
+    "COM",      # enforce trailing comma rules
+    "DTZ",      # require strict timezone manipulation with datetime
+    "E",        # PyCodeStyle errors
+    "F",        # Pyflakes rules
+    "FBT",      # detect boolean traps
+    "FA",       # Enforce from __future__ import annotations
+    "G",        # Better usage of built-in logging
+    "I",        # Sort imports properly
+    "ISC",      # Good use of string concatenation
+    "ICN",      # Use common import conventions
+    "LOG",      # Checks for issues using the standard library logging module.
+    "PL",       # pylint
+    "PTH",      # Use pathlib instead of os.path
+    "PYI",      # Linting rules for type annotations.
+    "N",        # enforce naming conventions, e.g. ClassName vs function_name
+    "NPY",      # Some numpy-specific things
+    "RET",      # Good return practices
+    "RUF",      # Ruff lint
+    "Q",        # Linting rules for quites
+    "SIM",      # flake8-simplify: Common simplification rules
+    "TC",       # Enforce importing certain types in a TYPE_CHECKING block
+    "TD",       # Be diligent with TODO comments
+    "TCH",      # Move type only imports to type-checking condition.
+    "TID",      # Some good import practices
+    "UP",       # Warn if certain things can changed due to newer Python versions
+    "W",        # PyCodeStyle warnings
+]
+ignore = ["SIM112", "G004", "PLR2004", "W293", "W291", "PLR0913", "COM812"]
+
+[tool.ruff.lint.pydocstyle]
+# https://github.com/google/styleguide/blob/gh-pages/pyguide.md#38-comments-and-docstrings
+convention = "google"
+
+[tool.pytest.ini_options]
+
+minversion = "7.0"              # Minimum pytest version
+pythonpath = ["src"]            # Add current directory to Python path
+addopts = [
+    "-ra",                      # Show summary of all tests
+    "-q",                       # Quiet mode
+    "--strict-markers",         # Error on unknown markers
+    "--strict-config",          # Error on config issues
+    "-v",                       # Verbose output
+]
+# Ignore specific warnings
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]

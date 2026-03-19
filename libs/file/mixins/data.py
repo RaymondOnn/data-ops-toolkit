@@ -9,12 +9,12 @@ from libs.file.formats.base import HandlerFactory
 
 LOG = logging.getLogger(__name__)
 
+
 class FlatFileMixin:
-    
     fs: fsspec.AbstractFileSystem
     opts: dict[str, Any]
     resolve_path: Callable[[str], str]
-    
+
     def validate_before_read(self, fs: fsspec.AbstractFileSystem, target: str) -> bool:
         """Step 2.5: Sanity checks. Returns False if file is invalid."""
         if not fs.exists(target):
@@ -33,11 +33,11 @@ class FlatFileMixin:
         return True
 
     def fetch_df(
-        self, 
-        path_or_list: Union[str, list[str]], 
-        file_pattern: Optional[str] = None, 
+        self,
+        path_or_list: Union[str, list[str]],
+        file_pattern: Optional[str] = None,
         force_repair: bool = False,
-        **kwargs: dict[str, Any]
+        **kwargs: dict[str, Any],
     ) -> pl.LazyFrame:
         """
         Orchestrates the ingestion using specialized FormatHandlers.
@@ -55,8 +55,8 @@ class FlatFileMixin:
                 continue
 
             # 3. Identify Handler & Detect Encoding
-            ext = target.split('.')[-1].lower()
-            handler = HandlerFactory.get_handler(ext, fs, getattr(self, 'opts'))
+            ext = target.split(".")[-1].lower()
+            handler = HandlerFactory.get_handler(ext, fs, getattr(self, "opts"))
 
             # Step 3: Encoding Detection (Crucial for CSV/JSON/XML)
             # Only run if not Parquet to save cycles
@@ -66,12 +66,7 @@ class FlatFileMixin:
 
             # 4. Delegate to Handler (Handles Streaming vs Repair internally)
             # Note: 50M row safety happens inside handler.to_df()
-            lf = handler.to_df(
-                target, 
-                encoding=encoding, 
-                force_repair=force_repair,
-                **kwargs
-            )
+            lf = handler.to_df(target, encoding=encoding, force_repair=force_repair, **kwargs)
             lfs.append(lf)
 
         # 5. Final Consolidation
@@ -80,12 +75,12 @@ class FlatFileMixin:
 
     def write_data(self, lf: pl.LazyFrame, path: str) -> None:
         """
-        Unified write entry point. Uses optimized streaming sinks 
+        Unified write entry point. Uses optimized streaming sinks
         (sink_parquet, sink_ndjson, sink_csv) via handlers.
         """
         full_path = self.resolve_path(path)
-        ext = full_path.split('.')[-1].lower()
-        handler = HandlerFactory.get_handler(ext, self.fs, getattr(self, 'opts'))
+        ext = full_path.split(".")[-1].lower()
+        handler = HandlerFactory.get_handler(ext, self.fs, getattr(self, "opts"))
 
         # Ensure directory exists for local paths
         self.fs.makedirs(self.fs._parent(full_path), exist_ok=True)
@@ -93,7 +88,9 @@ class FlatFileMixin:
         LOG.info(f"Starting high-volume write to: {full_path}")
         handler.from_df(lf, full_path)
 
-    def get_reader_context(self, path: str, pattern: Optional[str] = None) -> tuple[fsspec.AbstractFileSystem, list[str]]:
+    def get_reader_context(
+        self, path: str, pattern: Optional[str] = None
+    ) -> tuple[fsspec.AbstractFileSystem, list[str]]:
         """
         Internal helper to resolve targets (Folder, Archive, or Pre-partitioned list)
         """
@@ -104,7 +101,9 @@ class FlatFileMixin:
         ext = next((e for e in archive_map if full_path.lower().endswith(e)), None)
 
         if ext:
-            fs = fsspec.filesystem(archive_map[ext], fo=full_path, remote_options=getattr(self, 'opts'))
+            fs = fsspec.filesystem(
+                archive_map[ext], fo=full_path, remote_options=getattr(self, "opts")
+            )
             all_files = fs.find("")
         else:
             fs = self.fs
@@ -117,7 +116,7 @@ class FlatFileMixin:
                 raise FileNotFoundError(f"Pattern {pattern} not found in {full_path}")
             targets = matches
         else:
-            data_exts = ('.csv', '.parquet', '.json')
+            data_exts = (".csv", ".parquet", ".json")
             targets = [f for f in all_files if f.lower().endswith(data_exts)]
 
         if not targets:
@@ -125,9 +124,11 @@ class FlatFileMixin:
 
         return fs, targets
 
-    def _get_encoded_stream(self, fs: fsspec.AbstractFileSystem, target: str) -> tuple[io.IOBase, str]:
+    def _get_encoded_stream(
+        self, fs: fsspec.AbstractFileSystem, target: str
+    ) -> tuple[io.IOBase, str]:
         """
-        Internal helper to detect encoding and provide a 'rewindable' or 
+        Internal helper to detect encoding and provide a 'rewindable' or
         reconstructed stream for Polars.
         """
         from charset_normalizer import from_bytes
@@ -141,12 +142,12 @@ class FlatFileMixin:
         encoding = best_match.encoding if best_match else "utf-8"
 
         LOG.info(
-            "Encoding detected", 
+            "Encoding detected",
             extra={
-                "file": target, 
-                "encoding": encoding, 
-                "confidence": best_match.rating if best_match else "N/A"
-            }
+                "file": target,
+                "encoding": encoding,
+                "confidence": best_match.rating if best_match else "N/A",
+            },
         )
 
         # 2. Handle the "Reset" / Rewind logic
@@ -163,7 +164,7 @@ class FlatFileMixin:
 
     def get_load_strategy(self, path: str, file_pattern: str | None = None) -> list[list[str]]:
         """
-        Splits a folder/archive into 1GB chunks so each Ray worker/batch 
+        Splits a folder/archive into 1GB chunks so each Ray worker/batch
         stays safely under the 2GB limit.
         """
         fs, targets = self.get_reader_context(path, file_pattern)
@@ -171,7 +172,7 @@ class FlatFileMixin:
         partitions = []
         current_batch: list[str] = []
         current_size = 0
-        LIMIT = 1 * 1024**3 # 1GB target per partition
+        LIMIT = 1 * 1024**3  # 1GB target per partition
 
         for t in targets:
             size = fs.size(t)

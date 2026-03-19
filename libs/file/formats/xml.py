@@ -5,6 +5,7 @@ import polars as pl
 
 from libs.file.formats.base import FormatHandler
 
+
 class XMLHandler(FormatHandler):
     def read_mem(self, target: str, **kwargs) -> io.BytesIO:
         """Removes illegal ASCII control characters."""

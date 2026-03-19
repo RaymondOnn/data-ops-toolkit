@@ -1,4 +1,4 @@
-import re 
+import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, cast
@@ -9,12 +9,11 @@ import polars as pl
 LOG = structlog.getLogger(__name__)
 
 
-
-
 class Transformer(ABC):
     """
     The 'Contract' for all transformation logic.
     """
+
     @abstractmethod
     def apply(self, lf: pl.LazyFrame, **params: Any) -> None:
         """
@@ -23,12 +22,13 @@ class Transformer(ABC):
         """
         raise NotImplementedError("Subclasses must implement this method")
 
+
 class NoOpTransformer(Transformer):
     def apply(self, lf: pl.LazyFrame, **params: Any) -> None:
         # Write to transform folder as a single file (or same shard)
         output_file = Path(output_folder) / "transformed_data.parquet"
         lf.sink_parquet(output_file)
-        
+
         # return {
         #     "rows": lf.collect().height,  # Total rows preserved
         #     "valid_schema": True,
@@ -41,23 +41,19 @@ class DefaultTransformer:
     Standard normalization layer for all datasets.
     Ensures structural consistency and uniqueness before the load stage.
     """
+
     def apply(self, lf: pl.LazyFrame, **params: Any) -> None:
         # 1. STANDARDIZE: Column naming (snake_case)
         lf = self._standardize_column_names(lf)
 
         # 2. CLEAN: Trim whitespace from all string columns
         # We do this before empty-to-null conversion so that '  ' becomes null
-        lf = lf.with_columns(
-            pl.col(pl.Utf8).str.strip_chars()
-        )
+        lf = lf.with_columns(pl.col(pl.Utf8).str.strip_chars())
 
         # 3. NULL CONVERSION: Convert empty strings ('') to NULL
         # Critical for DB integrity so that whitespace-only values don't become blank entries
         lf = lf.with_columns(
-            pl.col(pl.Utf8).map_elements(
-                lambda s: None if s == "" else s, 
-                return_dtype=pl.Utf8
-            )
+            pl.col(pl.Utf8).map_elements(lambda s: None if s == "" else s, return_dtype=pl.Utf8)
         )
 
         # 4. DEDUPLICATE: Global uniqueness via metadata hash
@@ -67,12 +63,10 @@ class DefaultTransformer:
         # # 5. AUTO-FLATTEN: Unpack nested Structs
         # lf = self._auto_flatten_structs(lf)
 
-
     def _standardize_column_names(self, lf: pl.LazyFrame) -> pl.LazyFrame:
         """Forces snake_case and removes special characters."""
         mapping = {
-            col: col.lower().strip().replace(" ", "_").replace("-", "_") 
-            for col in lf.columns
+            col: col.lower().strip().replace(" ", "_").replace("-", "_") for col in lf.columns
         }
         return lf.rename(mapping)
 
@@ -83,8 +77,7 @@ class DefaultTransformer:
         """
         return lf.with_columns(
             pl.col(pl.Utf8).map_elements(
-                lambda s: None if s is not None and s.strip() == "" else s,
-                return_dtype=pl.Utf8
+                lambda s: None if s is not None and s.strip() == "" else s, return_dtype=pl.Utf8
             )
         )
 
@@ -94,8 +87,8 @@ class DefaultTransformer:
         if struct_cols:
             lf = lf.unnest(struct_cols)
         return lf
-        
-        
+
+
 class BitmaskTransformer:
     # Stage 1: The Decipher Map
     _OPS = {
@@ -107,7 +100,7 @@ class BitmaskTransformer:
         32: "TO_DATE",
         64: "COALESCE_0",
         128: "ROUND_2",
-        256: "DIGITS_ONLY"
+        256: "DIGITS_ONLY",
     }
 
     def apply(self, lf: pl.LazyFrame, column_masks: list[tuple[str, int]]) -> pl.LazyFrame:
@@ -119,13 +112,13 @@ class BitmaskTransformer:
             for bit, op_label in self._OPS.items():
                 if int(mask) & bit:
                     buckets.setdefault(op_label, []).append(col_name)
-        
+
         if not buckets:
             return lf
 
         # STAGE 3: Apply Transformations (Batch grouped)
         exprs = []
-        
+
         # String Operations
         if "CAST_STR" in buckets:
             exprs.append(pl.col(buckets["CAST_STR"]).cast(pl.Utf8))
@@ -155,21 +148,23 @@ class BitmaskTransformer:
             lf = lf.drop_nulls(subset=buckets["DROP_NULL"])
 
         return lf
-    
-    
+
+
 class TransformFactory:
     """
-        Decision: Dynamic Module Loading.
-        Allows for job-specific logic (e.g., complex bitmasking for a specific vendor)
-        without bloating the core engine codebase.
-        """
+    Decision: Dynamic Module Loading.
+    Allows for job-specific logic (e.g., complex bitmasking for a specific vendor)
+    without bloating the core engine codebase.
+    """
+
     @staticmethod
     def get_transformer(job_id: str) -> "Transformer":
         import importlib
+
         # Example: job_sales_daily -> JobSalesDaily
-        class_name = "".join(x.capitalize() for x in re.split(r'[-_]', job_id))
+        class_name = "".join(x.capitalize() for x in re.split(r"[-_]", job_id))
         module_path = f"src.core.transform.custom.{job_id}"
-        
+
         try:
             module = importlib.import_module(module_path)
             # Dynamically get the class named after the job_id

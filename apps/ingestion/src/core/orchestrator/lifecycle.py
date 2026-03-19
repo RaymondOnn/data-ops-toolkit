@@ -50,9 +50,7 @@ class LifecycleManager:
                 # 3. Construct the composite key for the Engine
                 # Line 313 fix: composite_key = "job_id:table"
                 composite_key = f"{job.id}:{job.context.dataset_id}"
-                LOG.info(
-                    "Recovering job", run_id=job.run_id, step=job.manifest.current_step
-                )
+                LOG.info("Recovering job", run_id=job.run_id, step=job.manifest.current_step)
 
                 # 4. Re-queue into the Ingestion Engine
                 # This moves the job back into the active processing queue
@@ -113,9 +111,7 @@ class LifecycleManager:
                         )
 
                 except Exception as e:
-                    LOG.error(
-                        "Expiry check failed", run_id=data["run_id"], error=str(e)
-                    )
+                    LOG.error("Expiry check failed", run_id=data["run_id"], error=str(e))
 
         self.state_store.flush()
 

@@ -2,8 +2,8 @@ import os
 from typing import Optional
 
 from libs.auth.provider import (
-    SecretProvider, 
-    LocalSecretProvider, 
+    SecretProvider,
+    LocalSecretProvider,
     AWSSecretProvider,
 )
 
@@ -19,12 +19,12 @@ class AuthFactory:
         if cls._provider is None:
             # Check for a 'STAGE' or 'ENV' variable
             env = os.getenv("APP_ENV", "dev").lower()
-            
+
             if env == "prod":
                 # AWSSecretProvider from your secret.py
                 cls._provider = AWSSecretProvider(region="ap-southeast-1")
             else:
                 # LocalSecretProvider from your secret.py
                 cls._provider = LocalSecretProvider()
-                
+
         return cls._provider

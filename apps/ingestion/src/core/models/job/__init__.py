@@ -1,2 +1,11 @@
 from .base import Job, JobStatus
-from .manifest import JobManifest, ErrorPayload, RawPayload, TransformPayload, WritePayload, AuditPayload, PublishPayload, CompletePayload
+from .manifest import (
+    JobManifest,
+    ErrorPayload,
+    RawPayload,
+    TransformPayload,
+    WritePayload,
+    AuditPayload,
+    PublishPayload,
+    CompletePayload,
+)

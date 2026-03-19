@@ -1,6 +1,7 @@
 import os
 import sdnotify
 
+
 class Heartbeat:
     """A simple wrapper around systemd's watchdog notifications."""
 

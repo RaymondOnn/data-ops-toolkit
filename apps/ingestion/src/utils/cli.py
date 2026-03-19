@@ -3,5 +3,4 @@
 # python cli.py resume --run-id run_1
 from typing import Optional, Any
 
-import typer # type: ignore
-
+import typer  # type: ignore

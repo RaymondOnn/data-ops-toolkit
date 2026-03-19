@@ -15,11 +15,10 @@ class OracleClient(DBClient):
         import oracledb
         from libs.clients.base import ClientCantConnect
 
-
         # Thin mode: no instant client required
         if self._connection:
             return self._connection
-        
+
         try:
             self._connection = oracledb.connect(
                 user=self.config["user"],
@@ -29,13 +28,12 @@ class OracleClient(DBClient):
             self._ping(self._connection)
         except Exception as e:
             raise ClientCantConnect(str(e))
-        
+
         return self._connection
-            
-    
-    def _ping(self, conn: Connection) -> None: 
+
+    def _ping(self, conn: Connection) -> None:
         conn.ping()
-            
+
     def get_load_strategy(self, table_name: str, num_partitions: int = 10) -> list[str]:
         """
         Uses ORA_HASH to create N virtual partitions without needing a PK.
@@ -45,7 +43,7 @@ class OracleClient(DBClient):
             # ORA_HASH(rowid, N) creates N buckets based on physical location
             sql = f"""
                 SELECT * FROM {table_name} 
-                WHERE ORA_HASH(rowid, {num_partitions-1}) = {i}
+                WHERE ORA_HASH(rowid, {num_partitions - 1}) = {i}
             """
             queries.append(sql)
         return queries
@@ -77,7 +75,7 @@ class OracleClient(DBClient):
                 rows = cursor.fetchmany(50_000)
                 if not rows:
                     break
-                
+
                 # Optimized: Use DataFrame constructor with schema instead of list-of-dicts
                 yield pl.DataFrame(rows, schema=columns, orient="row")
 
@@ -88,15 +86,13 @@ class OracleClient(DBClient):
         finally:
             cursor.close()
 
-    def write_table(
-        self, lf: pl.LazyFrame, table_name: str, batch_size: int = 100_000
-    ) -> None:
+    def write_table(self, lf: pl.LazyFrame, table_name: str, batch_size: int = 100_000) -> None:
         """
         Streams LazyFrame in chunks and uses executemany for batch binds.
         """
         # 1. Get column names and build the INSERT statement
         columns = lf.columns
-        placeholders = ", ".join([f":{i+1}" for i in range(len(columns))])
+        placeholders = ", ".join([f":{i + 1}" for i in range(len(columns))])
         sql = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})"
 
         # 2. Iterate through the LazyFrame in batches

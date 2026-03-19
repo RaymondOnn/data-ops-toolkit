@@ -220,7 +220,6 @@ class JobStep(ABC):
             next_step = JobSteps.next_step(self.name)
             reached_target = job.context.target_step == self.name
 
-
             if new_mask.is_fully_complete() or reached_target:
                 from src.core.models.states.terminal import SuccessState
 
@@ -235,7 +234,6 @@ class JobStep(ABC):
                 # Continue the chain (The Orchestrator will pick this up in the next scan)
                 LOG.info("Job progressing to next step", job_id=job.id, next=next_step.label)
 
-
         # 4. SYMLINK (Pointer to immutable data)
         if data_folder:
             active_link = job.folder / self.name
@@ -243,9 +241,7 @@ class JobStep(ABC):
                 active_link.unlink()
 
             # Pointer: active/job_id/run_id/step -> ../../../data/step/folder
-            relative_target = (
-                Path("..") / ".." / ".." / "data" / self.name / data_folder.name
-            )
+            relative_target = Path("..") / ".." / ".." / "data" / self.name / data_folder.name
             active_link.symlink_to(relative_target)
 
         # 5. ATOMIC SWAP
@@ -266,6 +262,3 @@ class JobStep(ABC):
                 step = JobSteps(idx)
                 return cls(step=step)
         raise ValueError(f"Unknown step name: {name}")
-
-
-

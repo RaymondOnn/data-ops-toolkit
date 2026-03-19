@@ -16,7 +16,6 @@
 # LOG = logging.getLogger(__name__)
 
 
-
 # def repair_json(stream: BytesIO) -> BytesIO:
 #     """Handles common 'Trailing Comma' issues in JSON arrays/objects."""
 #     content = stream.read().decode("utf-8")
@@ -44,15 +43,15 @@
 
 # class FileClient(BaseIOClient):
 #     def __init__(
-#         self, 
-#         url: str, 
-#         file_pattern: str | None=None, 
+#         self,
+#         url: str,
+#         file_pattern: str | None=None,
 #         storage_options: dict[str, Any] | None=None
 #     ) -> None:
 #         self.url = url  # This is the "Base" path or folder
 #         self.file_pattern = file_pattern
 #         self.opts = storage_options or {}
-        
+
 #         protocol = self.url.split("://")[0] if "://" in self.url else "file"
 #         self.fs = fsspec.filesystem(protocol, **self.opts)
 
@@ -118,9 +117,6 @@
 
 #     # --- REPAIR LOGIC ---
 
-    
-
-    
 
 #     def upload(self, local_path: str, remote_name: str) -> None:
 #         """The 'FileService' logic: Uploads/Archivers a file."""
@@ -163,14 +159,13 @@
 #         return file_hash
 
 
-
 #     def fetch_df(self, raw_stream: io.BytesIO) -> tuple[BytesIO, Any | Literal['utf-8']]:
 #         """
 #         Peeks at the start of a binary stream to infer encoding
 #         and returns a wrapper or a decoded buffer.
 #         """
 #         raw_stream = self.fs.open(self.url, mode="rb")
-        
+
 #         # 1. Read a sample (usually 16KB-32KB is plenty)
 #         sample = raw_stream.read(32768)
 
@@ -195,8 +190,6 @@
 #             # If the stream doesn't support seek (like some SFTP streams),
 #             # we must prepend the sample back to the stream
 #             return io.BytesIO(sample + raw_stream.read()), encoding
-        
-
 
 
 #     def quarantine(self, reason: str) -> None:
