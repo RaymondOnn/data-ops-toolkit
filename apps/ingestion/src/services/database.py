@@ -65,8 +65,8 @@ class DatabaseService(Service):
         return self.client.fetch_df(query)
 
     @abstractmethod
-    def stage_data(self, source_dir: Path, target_table: str) -> str:
-        """Phase 1: Returns the name of the temporary staging table."""
+    def stage_data(self, source_dir: Path, target_table: str) -> tuple[str, int]:
+        """Phase 1: Returns the name of the temporary staging table and rows loaded."""
         pass
 
     @abstractmethod
@@ -97,7 +97,7 @@ class PostgresService(DatabaseService):
             port=config.get("port", 5432),
         )
 
-    def stage_data(self, source_dir: Path, target_table: str) -> str:
+    def stage_data(self, source_dir: Path, target_table: str) -> tuple[str, int]:
         staging_table = f"stg_{target_table}_{int(time.time())}"
         self.client.sql(f"CREATE UNLOGGED TABLE {staging_table} (LIKE {target_table})")
 
@@ -120,6 +120,8 @@ class PostgresService(DatabaseService):
                     df = lf.collect()
                     if not isinstance(df, pl.DataFrame):
                         raise TypeError(f"Expected polars.DataFrame, got {type(df)}")
+                    
+                    rows_staged = df.height
 
                     for batch_df in df.iter_slices(n_rows=100_000):
                         # write_csv returns bytes, which we feed into the copy pipe
@@ -127,7 +129,7 @@ class PostgresService(DatabaseService):
 
             # Commit only if the entire 50M row stream succeeded
             conn.commit()
-            return staging_table
+            return staging_table, rows_staged
         except Exception as e:
             conn.rollback()
             self.client.reconnect()
@@ -165,7 +167,7 @@ class OracleService(DatabaseService):
             dsn=config["dsn"],
         )
 
-    def stage_data(self, source_dir: Path, target_table: str) -> str:
+    def stage_data(self, source_dir: Path, target_table: str) -> tuple[str, int]:
         staging_table = f"STG_{target_table}"
 
         # Oracle 'ORACLE_BIGDATA' driver can read all files in a location
@@ -185,7 +187,9 @@ class OracleService(DatabaseService):
         REJECT LIMIT UNLIMITED
         """
         self.client.sql(sql)
-        return staging_table
+        res = self.client.sql(f"SELECT COUNT(*) FROM {staging_table}")
+        rows_staged = int(res[0][0]) if res and res[0] else 0
+        return staging_table, rows_staged
 
     def promote_data(
         self,
@@ -226,7 +230,7 @@ class ClickHouseService(DatabaseService):
             password=secret.resolve(sanitize=True) if secret else "",
         )
 
-    def stage_data(self, source_dir: Path, target_table: str) -> str:
+    def stage_data(self, source_dir: Path, target_table: str) -> tuple[str, int]:
         staging_table = f"stg_{target_table}_{int(time.time())}"
         try:
             self.client.sql(f"CREATE TEMPORARY TABLE {staging_table} AS {target_table}")
@@ -236,7 +240,9 @@ class ClickHouseService(DatabaseService):
             sql = f"INSERT INTO {staging_table} SELECT * FROM file('{path_pattern}', 'Parquet')"
 
             self.client.sql(sql)
-            return staging_table
+            res = self.client.sql(f"SELECT COUNT(*) FROM {staging_table}")
+            rows_staged = int(res[0][0]) if res and res[0] else 0
+            return staging_table, rows_staged
 
         except Exception:
             # Cleanup staging on failure to prevent orphan temp tables

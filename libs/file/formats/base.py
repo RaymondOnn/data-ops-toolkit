@@ -1,10 +1,18 @@
-import logging
 import io
+import logging
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any
 
-import polars as pl
 import fsspec
+import polars as pl
+
+from libs.file.formats import (
+    CSVHandler,
+    JSONHandler,
+    ParquetHandler,
+    XMLHandler,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -20,22 +28,22 @@ class FormatHandler(ABC):
         self.opts = storage_options or {}
 
     @abstractmethod
-    def to_df(self, target: str, **kwargs: Any) -> pl.LazyFrame:
+    def to_df(self, input_file: Path, **kwargs: Any) -> pl.LazyFrame:
         """High-level: Streaming/Repair -> LazyFrame"""
         pass
 
     @abstractmethod
-    def from_df(self, df: pl.LazyFrame | pl.DataFrame, target: str) -> None:
+    def from_df(self, df: pl.LazyFrame | pl.DataFrame, output_file: Path) -> None:
         """High-level: LazyFrame -> File (Streaming)"""
         pass
 
     @abstractmethod
-    def read_mem(self, target: str, **kwargs: Any) -> io.BytesIO:
+    def read_mem(self, input_file: Path, **kwargs: Any) -> io.BytesIO:
         """Low-level: Read + Repair -> Memory Buffer"""
         pass
 
     @abstractmethod
-    def write_file(self, data: bytes, target: str) -> None:
+    def write_file(self, data: bytes, output_file: Path) -> None:
         """Low-level: Raw Bytes -> Storage"""
         pass
 
@@ -59,14 +67,13 @@ class FormatHandler(ABC):
 
 class HandlerFactory:
     @staticmethod
-    def get_handler(ext: str, fs, opts: dict) -> FormatHandler:
-        from libs.file.formats import (
-            JSONHandler,
-            CSVHandler,
-            ParquetHandler,
-            XMLHandler,
-        )
-
+    def get_handler(
+        ext: str,
+        fs: fsspec.AbstractFileSystem | None = None,
+        storage_options: dict[str, Any] | None = None,
+    ) -> FormatHandler:
+        storage_options = storage_options or {}
+        fs = fs or fsspec.filesystem("file")
         mapping = {
             "json": JSONHandler,
             "jsonl": JSONHandler,
@@ -75,4 +82,4 @@ class HandlerFactory:
             "parquet": ParquetHandler,
             "xml": XMLHandler,
         }
-        return mapping[ext](fs, opts)
+        return mapping[ext](fs, storage_options)

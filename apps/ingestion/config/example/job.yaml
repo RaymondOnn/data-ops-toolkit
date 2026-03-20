@@ -36,10 +36,12 @@ datasets:
       # Example for bitmask transformer
       type: bitmask
       params:
-        bitmask_mapping:
-          column1: 43
-          column2: 23
-          column3: 12
+        column_bitmasks:
+          - "order_id": 1
+          - "customer_id": 2
+          - "order_date": 4
+          - "total_amount": 8
+          - "status": 16
       
       # Example for custom transformer
       type: custom

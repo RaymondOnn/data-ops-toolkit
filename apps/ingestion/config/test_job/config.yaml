@@ -15,6 +15,15 @@ datasets:
       source_identifier: "samples/sample_orders.csv"
       source_params:
         url: "file:///Users/main/Documents/Code/Github/data-ops-toolkit/apps/ingestion"
+    transform:
+      type: "BitmaskTransformer"
+      options:
+        column_bitmasks:
+          - "order_id": 1
+          - "customer_id": 2
+          - "order_date": 4
+          - "total_amount": 8
+          - "status": 16
     load:
       service_ref: "clickhouse_db"
       sink_identifier: "orders"

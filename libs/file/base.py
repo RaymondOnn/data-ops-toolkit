@@ -1,8 +1,8 @@
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Optional
-from pathlib import Path
 from enum import Enum
+from pathlib import Path
+from typing import Any
 
 import fsspec
 
@@ -13,13 +13,14 @@ LOG = logging.getLogger(__name__)
 
 # TODO: Qurantine for file ingestion job
 class FileSystemClient(BaseIOClient, ABC):
-    def __init__(self, url: str, storage_options: Optional[dict[str, Any]] = None):
+    def __init__(self, url: str, storage_options: dict[str, Any] | None = None):
         self.url = url.rstrip("/")
         self.opts = storage_options or {}
-        self.fs = None
+        self._fs: fsspec.AbstractFileSystem | None = None
 
+    @property
     @abstractmethod
-    def connect(self) -> fsspec.AbstractFileSystem:
+    def fs(self) -> fsspec.AbstractFileSystem:
         raise NotImplementedError("Subclasses must implement connect() method.")
 
     # ?: Perhaps quarantine file as a separate method
@@ -57,9 +58,29 @@ class FileSystemClient(BaseIOClient, ABC):
             # Local to Remote (Upload)
             self.fs.put(local_source, remote_dest)
 
+    def exists(self, path: str | Path) -> bool:
+        return self.fs.exists(self.resolve_path(str(path)))
 
-# We import these at the top level or inside the function
-# To keep memory low, we can import them inside the Enum if needed
+    def delete_dir(self, path: str | Path) -> None:
+        full_path = self.resolve_path(str(path))
+        if self.fs.exists(full_path):
+            self.fs.rm(full_path, recursive=True)
+
+    def move_dir(self, source_path: str | Path, target_path: str | Path) -> None:
+        self.fs.mv(
+            self.resolve_path(str(source_path)),
+            self.resolve_path(str(target_path)),
+            recursive=True,
+        )
+
+    def copy_dir(self, source_path: str | Path, target_path: str | Path) -> None:
+        self.fs.cp(
+            self.resolve_path(str(source_path)),
+            self.resolve_path(str(target_path)),
+            recursive=True,
+        )
+
+
 class FileSystemSkills(Enum):
     FILE = ("file", "libs.file.mixins.data.FlatFileMixin")
     CAS = ("cas", "libs.file.mixins.cas.CASArchiveMixin")
@@ -82,7 +103,7 @@ class FileSystemSkills(Enum):
 def create_fs_client(
     url: str,
     capabilities: list[FileSystemSkills],
-    storage_options: Optional[dict[str, Any]] = None,
+    storage_options: dict[str, Any] | None = None,
 ) -> FileSystemClient:
     """
     Assembles a Managed Client with dynamic capabilities (Ingestion, Archive, etc.).

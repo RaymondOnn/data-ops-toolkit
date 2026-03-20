@@ -23,6 +23,7 @@ class ExtractConfig(msgspec.Struct):
 class TransformConfig(msgspec.Struct):
     """Configuration for data transformation."""
 
+    transform_type: str  # e.g. "default", "bitmask", "custom"
     script: str | None = None
     params: dict[str, Any] = {}
 

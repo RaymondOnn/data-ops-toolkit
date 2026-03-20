@@ -1,12 +1,13 @@
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
+import msgspec
 import polars as pl
 import structlog
-import msgspec
 from src.core.models.job.manifest import TransformPayload
 from src.core.models.steps import JobStep
-from src.core.strategies.transform.transform import TransformFactory
+from src.core.strategies.transform.base import TransformContext
+from src.core.strategies.transform.factory import TransformFactory
 
 from libs.file.formats.parquet import ParquetHandler
 
@@ -15,6 +16,7 @@ if TYPE_CHECKING:
 
 
 LOG = structlog.getLogger(__name__)
+APP_TRANSFORM_OUTPUT_EXT = "parquet"
 
 
 class TransformStep(JobStep):
@@ -34,6 +36,13 @@ class TransformStep(JobStep):
         start_ts = datetime.now(UTC).isoformat()
         try:
             with ParquetHandler() as handler:
+                ctx = TransformContext(
+                    options=job.context.transform.params,
+                    source_dir=(job.folder / "extract" / "part_*.parquet").resolve(),
+                    destination_dir=job.folder / "transform",
+                    output_format=APP_TRANSFORM_OUTPUT_EXT,
+                    type=job.context.transform.transform_type,
+                )
                 # 1. Initialize the LazyFrame (Logical Plan)
                 # Decision: Use the 'active' symlink path.
                 # Polars scans the metadata of all part_*.parquet files instantly.
@@ -43,17 +52,21 @@ class TransformStep(JobStep):
                 # 2. Apply Business Logic (Transformers)
                 # These add to the 'Plan' but do not execute yet.
                 # Decision: Use the factory to apply bitmasking and custom logic.
-                transformer = TransformFactory.get_transformer(job.context)
-                tr_lf = transformer.apply(lf)
+                transformer = TransformFactory.get_transformer(
+                    job.context.transform.transform_type,
+                    dataset_id=job.context.dataset_id,
+                    job_id=job.id,
+                )
+                tr_lf = transformer.apply(lf, ctx)
 
                 # 3. Stream to Physical Storage
-                # Decision: Use sink_parquet via our handler's execution-aware logic.
-                # This triggers the Polars Rust engine to stream chunks through the plan.
+                # Decision: Use sink_parquet via our handler's logic.
+                # This triggers the Polars Rust engine to stream chunks.
                 data_store = (
                     job.exec_ctx.workspace_dir
                     / "data"
                     / self.name
-                    / f"{job.id}_{int(time.time())}"
+                    / f"{job.id}_{int(datetime.now(UTC).timestamp())}"
                 )
                 data_store.mkdir(parents=True, exist_ok=True)
 
@@ -69,10 +82,14 @@ class TransformStep(JobStep):
                 pl.scan_parquet(str(data_store / "*.parquet"))
                 .select(
                     count=pl.len(),
-                    schema=pl.map_batches(lambda _: str(tr_lf.schema)),
+                    schema=pl.lit(str(tr_lf.schema)),
                 )
                 .collect()  # This is safe because it's only 1 row of metadata
             )
+
+            # Polars' InProcessQuery object support
+            if hasattr(stats, "fetch_blocking"):
+                stats = cast("Any", stats).fetch_blocking()
 
             payload = TransformPayload(
                 logic_version=getattr(transformer, "version", "1.0.0"),

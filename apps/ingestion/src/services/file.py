@@ -70,10 +70,10 @@ class StorageService(Service):
         return [{"files": files[i::num_partitions]} for i in range(num_partitions)]
 
     @protect_service(breaker)
-    def stage_data(self, source_dir: Path, target_table: str) -> str:
+    def stage_data(self, source_dir: Path, target_table: str) -> tuple[str, int]:
         """
         Phase 1: Organize Parquet files into a staging directory.
-        Returns the path to the staged folder.
+        Returns a tuple of (path to the staged folder, number of items loaded).
         """
         # Create a unique staging path: e.g., tmp/staging/orders_1710123456/
         staging_path = f"tmp/staging/{target_table}_{int(time.time())}"
@@ -82,7 +82,10 @@ class StorageService(Service):
         # operation (S3-to-S3) to avoid pulling 50M rows into our 2GB RAM.
         self.client.copy_dir(source_dir, staging_path)
 
-        return staging_path
+        staging_full_path = self.client.resolve_path(staging_path)
+        files_staged = len(self.client.fs.find(staging_full_path))
+
+        return staging_path, files_staged
 
     @protect_service(breaker)
     def promote_data(
@@ -106,6 +109,13 @@ class StorageService(Service):
         # 2. Atomic Move: Move the staged folder to the production path
         # On S3, this is a metadata-only rename or a fast copy/delete
         self.client.move_dir(staging_table, final_path)
+
+    @protect_service(breaker)
+    def archive_data(self, source_dir: Path, archive_path: str) -> None:
+        """
+        Archive data to the destination path.
+        """
+        self.client.copy_dir(source_dir, archive_path)
 
 
 # --- Role 1: Reading Flat Files (Landing Zone) ---

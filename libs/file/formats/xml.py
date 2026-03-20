@@ -1,30 +1,33 @@
 import io
 import re
-import xmltodict
+from pathlib import Path
+from typing import Any
+
 import polars as pl
+import xmltodict
 
 from libs.file.formats.base import FormatHandler
 
 
 class XMLHandler(FormatHandler):
-    def read_mem(self, target: str, **kwargs) -> io.BytesIO:
+    def read_mem(self, input_file: Path, **kwargs: Any) -> io.BytesIO:
         """Removes illegal ASCII control characters."""
         encoding = kwargs.get("encoding", "utf-8")
-        with self.fs.open(target, "rb") as f:
+        with self.fs.open(input_file, "rb") as f:
             raw = f.read().decode(encoding, errors="ignore")
             # Regex Repair: Strip chars 0-31 except \t, \n, \r
             clean = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", raw)
             return io.BytesIO(clean.encode("utf-8"))
 
-    def to_df(self, target: str, **kwargs) -> pl.LazyFrame:
-        buffer = self.read_mem(target, **kwargs)
+    def to_df(self, input_file: Path, **kwargs: Any) -> pl.LazyFrame:
+        buffer = self.read_mem(input_file, **kwargs)
         # XML to Polars bridge
         data = xmltodict.parse(buffer.read())
         return pl.DataFrame(data).lazy()
 
-    def from_df(self, df: pl.LazyFrame | pl.DataFrame, target: str) -> None:
+    def from_df(self, df: pl.LazyFrame | pl.DataFrame, output_file: Path) -> None:
         raise NotImplementedError("Streaming XML write is not supported by Polars.")
 
-    def write_file(self, data: bytes, target: str):
-        with self.fs.open(target, "wb") as f:
+    def write_file(self, data: bytes, output_file: Path):
+        with self.fs.open(output_file, "wb") as f:
             f.write(data)

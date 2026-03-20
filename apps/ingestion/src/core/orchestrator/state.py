@@ -57,7 +57,7 @@ class StateStore:
         """
         job_id = manifest.job_id
         if job_id in self._mirror:
-            self._mirror[job_id]["status"] = manifest.status
+            self._mirror[job_id]["status"] = manifest.job_status
             self._mirror[job_id]["next_scheduled_time"] = manifest.next_scheduled_time
             self._dirty_keys.add(job_id)
 

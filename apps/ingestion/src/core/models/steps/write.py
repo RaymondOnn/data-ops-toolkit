@@ -39,7 +39,7 @@ class WriteStep(JobStep):
             loader = Loader()
 
             # 2. PHASE 1: LOAD TO STAGING
-            staging_results = loader.load(
+            staging_artifact, rows_loaded = loader.load(
                 service=service,
                 source_dir=source_dir,
                 target_table=job_ctx.load.sink_identifier,
@@ -49,10 +49,8 @@ class WriteStep(JobStep):
             payload = WritePayload(
                 sink_identifier=job_ctx.load.sink_identifier,
                 sink_type=job_ctx.load.sink_type,
-                staging_artifact=str(
-                    staging_results.staging_path or staging_results.staging_table
-                ),
-                rows_inserted=staging_results.rows,
+                staging_artifact=staging_artifact,
+                rows_inserted=int(rows_loaded),
                 partition_col=job_ctx.load.partition_col or "",
                 partition_value=job_ctx.load.partition_value or "",
                 start_timestamp_utc=start_ts,

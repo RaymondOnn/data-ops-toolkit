@@ -97,7 +97,6 @@ class CompleteStep(JobStep):
             src_folder = job.folder.resolve() / step
             if src_folder.exists():
                 dest_folder = f"{archive_root}/{step}"
-                # target_archive.mkdir(parents=True, exist_ok=True)
                 object_store.archive_data(
                     source_dir=src_folder, archive_path=dest_folder
                 )

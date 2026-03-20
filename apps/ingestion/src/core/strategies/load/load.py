@@ -31,16 +31,13 @@ class Loader:
     logic for both Staging and Promotion.
     """
 
-    def load(
-        self, service: Sink, source_dir: Path, target_table: str
-    ) -> StagingResult:
+    def load(self, service: Sink, source_dir: Path, target_table: str) -> tuple[str, int]:
         """
         Phase 1: Moves data from Silver (Parquet) to a temporary 'Staging' area.
-        Returns metadata about the staged data (rows, temp_path/temp_table).
+        Returns metadata about the staged data (staging_artifact, rows_loaded).
         """
         LOG.info("staging_started", table=target_table)
-        temp_table = service.stage_data(source_dir, target_table)
-        return StagingResult(staging_table=temp_table)
+        return service.stage_data(source_dir, target_table)
 
     def promote(
         self, service: Sink, staging_identifier: str, write_ctx: WriteContext

@@ -111,10 +111,10 @@ class IngestionEngine:
         # Initialize specialized pools
         workspace = self.exec_ctx.workspace_dir
         self.io_pool: list[ray.actor.ActorHandle] = [
-            Worker.remote(f"io_{i}", workspace) for i in range(15)
+            Worker.remote(f"io_{i}", workspace) for i in range(15)  # type: ignore
         ]
         self.cpu_pool: list[ray.actor.ActorHandle] = [
-            Worker.remote(f"cpu_{i}", workspace) for i in range(4)
+            Worker.remote(f"cpu_{i}", workspace) for i in range(4)  # type: ignore
         ]
 
     def run(self) -> None:
@@ -336,10 +336,14 @@ class IngestionEngine:
 
             # Logic: If the current step is done, move forward.
             # Otherwise, the step crashed mid-way; resume/retry it.
-            if meta.step_status == "COMPLETED":
-                return self._get_next_step_name(meta.current_step)
+            for step in _JOB_ORDER:
+                if hasattr(meta, step):
+                    continue
 
-            return str(meta.current_step)
+                return step
+
+        return "FINISH"
+
 
     def get_latest_manifest(self, job_id: str, run_id: str) -> JobManifest:
         """
