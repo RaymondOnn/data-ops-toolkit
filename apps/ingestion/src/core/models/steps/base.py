@@ -8,11 +8,8 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 import structlog
-
-
-from src.core.models.job import JobStatus
-from src.core.models.job.manifest import AuditPayload, JobManifest, ErrorPayload
-from src.utils.constants import JOB_STEPS_BASE_DIR
+from src.core.models.job.manifest import ErrorPayload
+from src.core.models.states.terminal import FailedState, HoldState, SuccessState
 
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreakerTripped
@@ -30,7 +27,7 @@ class JobBitmask(IntFlag):
 
     NONE = 0
     START = auto()
-    RAW = auto()
+    EXTRACT = auto()
     TRANSFORM = auto()
     WRITE = auto()
     AUDIT = auto()
@@ -55,7 +52,7 @@ class JobBitmask(IntFlag):
 
 class JobSteps(IntEnum):
     START = 0
-    RAW = 1
+    EXTRACT = 1
     TRANSFORM = 2
     WRITE = 3
     AUDIT = 4
@@ -71,7 +68,7 @@ class JobSteps(IntEnum):
         # Map the step to the IntFlag
         mapping = {
             JobSteps.START: JobBitmask.START,
-            JobSteps.RAW: JobBitmask.RAW,
+            JobSteps.EXTRACT: JobBitmask.EXTRACT,
             JobSteps.TRANSFORM: JobBitmask.TRANSFORM,
             JobSteps.WRITE: JobBitmask.WRITE,
             JobSteps.AUDIT: JobBitmask.AUDIT,
@@ -121,8 +118,8 @@ class JobStep(ABC):
         idx = _JOB_ORDER.index(self.name)
         if 0 <= idx + offset < len(_JOB_ORDER):
             return _JOB_ORDER[idx + offset]
-        else:
-            raise ValueError(f"Invalid offset: {offset}")
+
+        raise ValueError(f"Invalid offset: {offset}")
 
     @abstractmethod
     def execute(self, job: "Job") -> str:
@@ -131,7 +128,7 @@ class JobStep(ABC):
         :param engine: The IngestionEngine instance.
         :type engine: IngestionEngine
         :param df: The dataframe to process in this stage.
-        :type df: Optional[Any]
+        :type df: Any
         """
         raise NotImplementedError
 
@@ -148,7 +145,7 @@ class JobStep(ABC):
         Physically moves the metadata folder to HOLD or QUARANTINE.
         category: "HOLD" | "QUARANTINE" | "DONE"
         """
-        base_dir = Path(JOB_STEPS_BASE_DIR)
+        base_dir = Path(job.exec_ctx.workspace_dir)
 
         # Target: base/HOLD/job_id/run_id
         new_path = base_dir / category / f"{job.id}_{job.run_id}"
@@ -201,13 +198,10 @@ class JobStep(ABC):
                 #     JobStatus.DEFERRED if self.name == "CompleteStep"
                 #     else JobStatus.BLOCKED
                 # )
-                from src.core.models.states.terminal import HoldState
 
                 HoldState(job).on_enter(data=error)
                 target_category = "HOLD"
             else:
-                from src.core.models.states.terminal import FailedState
-
                 FailedState(job).on_enter(data=error)
                 target_category = "FAILED"
 
@@ -221,18 +215,20 @@ class JobStep(ABC):
             reached_target = job.context.target_step == self.name
 
             if new_mask.is_fully_complete() or reached_target:
-                from src.core.models.states.terminal import SuccessState
-
                 SuccessState(job).on_enter(
                     data={
                         "bitmask": new_mask,
                         self.name: results or {},
                     }
                 )
-                LOG.info("Job reached target state", job_id=job.id, target=job.target_step)
+                LOG.info(
+                    "Job reached target state", job_id=job.id, target=job.target_step
+                )
             else:
                 # Continue the chain (The Orchestrator will pick this up in the next scan)
-                LOG.info("Job progressing to next step", job_id=job.id, next=next_step.label)
+                LOG.info(
+                    "Job progressing to next step", job_id=job.id, next=next_step.label
+                )
 
         # 4. SYMLINK (Pointer to immutable data)
         if data_folder:
@@ -241,7 +237,9 @@ class JobStep(ABC):
                 active_link.unlink()
 
             # Pointer: active/job_id/run_id/step -> ../../../data/step/folder
-            relative_target = Path("..") / ".." / ".." / "data" / self.name / data_folder.name
+            relative_target = (
+                Path("..") / ".." / ".." / "data" / self.name / data_folder.name
+            )
             active_link.symlink_to(relative_target)
 
         # 5. ATOMIC SWAP
@@ -255,10 +253,10 @@ class JobStep(ABC):
         Iterates through all subclasses of JobStep and checks if the name attribute matches the given name.
         If no match is found, raises a ValueError.
         """
-        for cls in cls.__subclasses__():
+        for step_class in cls.__subclasses__():
             # If you have nested subclasses, you may want a recursive walk here.
-            if getattr(cls, "name", None) == name:
+            if getattr(step_class, "name", None) == name:
                 idx = _JOB_ORDER.index(name)
                 step = JobSteps(idx)
-                return cls(step=step)
+                return step_class(step=step)
         raise ValueError(f"Unknown step name: {name}")

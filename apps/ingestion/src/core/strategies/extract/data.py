@@ -1,13 +1,14 @@
 from abc import abstractmethod
+from collections.abc import Generator
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any
 
 import polars as pl
 import ray
 import structlog
-from src.core.ingest.base import Reader, ReaderContext
-from src.core.strategies.ingest.factory import ReaderFactory
-from src.services.base import DatabaseService, Service
+from src.core.strategies.extract import Reader, ReaderContext, ReaderFactory
+from src.services.base import Service
+from src.services.database import DatabaseService
 
 LOG = structlog.getLogger(__name__)
 
@@ -21,7 +22,7 @@ class DataReader(Reader):
     def fetch(
         self, service: Service, context: ReaderContext, target_folder: Path
     ) -> list[dict[str, Any]]:
-        """Entry point for RawStep."""
+        """Entry point for ExtractStep."""
         df_generator = self._get_ray_generator(service, context)
         return self.to_parquet(df_generator, target_folder)
 
@@ -38,10 +39,9 @@ class DataReader(Reader):
         task_payloads = [
             {
                 "unit": unit,
-                "source_type": context.source_type,
+                "context": context,
                 "config": service.config,  # Connection params
                 "account_id": service.account_id,
-                "schema_items": context.schema_items,
             }
             for unit in work_units
         ]
@@ -55,7 +55,10 @@ class DataReader(Reader):
             from src.services.factory import ServiceFactory
             from src.core.schema import apply_schema_contract
 
-            service = ServiceFactory.get_service(payload["source_type"], **payload["config"])
+            context = payload["context"]
+            service = ServiceFactory.get_service(
+                context.source_type, **payload["config"]
+            )
 
             # 1. Extraction
             # Support both DB query string and File list dict
@@ -66,13 +69,10 @@ class DataReader(Reader):
             result = service.fetch_df(unit)
 
             # Convert LazyFrame to DataFrame for Ray compatibility
-            if isinstance(result, pl.LazyFrame):
-                df = result.collect()
-            else:
-                df = result
+            df = result.collect() if isinstance(result, pl.LazyFrame) else result
 
             # 2. Guarding (Function Call)
-            return apply_schema_contract(df, payload.get("schema_items", []))
+            return apply_schema_contract(df, context)
 
         # 4. Map the task across the cluster
         # .iter_batches() makes this a generator!
@@ -81,8 +81,7 @@ class DataReader(Reader):
         # 5. Yield blocks back to IngestionStream
         # Ray handles backpressure here: it only fetches the next block
         # when IngestionStream is ready for it.
-        for batch in ray_dataset.iter_batches(batch_format="polars"):
-            yield batch
+        yield from ray_dataset.iter_batches(batch_format="polars")
 
     def to_parquet(
         self, generator: Generator[pl.DataFrame, None, None], destination: Path
@@ -103,8 +102,10 @@ class DataReader(Reader):
             # Write with snappy compression for a good balance of speed/size
             df.write_parquet(file_path, compression="snappy")
 
-            # Capture metadata for the RawStep to process
-            metadata_list.append({"path": file_path, "rows": len(df), "schema": df.schema})
+            # Capture metadata for the ExtractStep to process
+            metadata_list.append(
+                {"path": file_path, "rows": len(df), "schema": df.schema}
+            )
 
         return metadata_list
 
@@ -127,11 +128,16 @@ class DBDataReader(DataReader):
     def __init__(self) -> None:
         super().__init__()
 
-    def get_work_units(self, client: DatabaseService, context: ReaderContext) -> list[Any]:
+    def get_work_units(
+        self, client: DatabaseService, context: ReaderContext
+    ) -> list[Any]:
         # Uses ORA_HASH for Oracle or ctid for Postgres
         # to generate N unique queries for the 50M rows
         if not context.target_table:
             raise ValueError("target_table is required for DBDataReader")
 
-        units = client.get_work_units(context.target_table, context.num_partitions)
+        filter_sql = context.options.get("filter_sql")
+        units = client.get_work_units(
+            context.target_table, context.num_partitions, filter_sql
+        )
         return [str(unit) for unit in units]

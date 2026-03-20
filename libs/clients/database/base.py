@@ -1,5 +1,7 @@
+import contextlib
 from abc import ABC, abstractmethod
-from typing import Any, Generator, Sequence
+from collections.abc import Generator, Sequence
+from typing import Any
 
 import polars as pl
 
@@ -29,7 +31,12 @@ class DBClient(ABC):
         raise NotImplementedError("Subclasses must implement this method")
 
     @abstractmethod
-    def get_load_strategy(self, table_name: str, num_partitions: int = 10) -> list[str]:
+    def get_load_strategy(
+        self,
+        table_name: str,
+        num_partitions: int = 10,
+        filter_sql: str | None = None,
+    ) -> list[str]:
         """
         Convert a query into multiple "partition" queries
         """
@@ -46,13 +53,12 @@ class DBClient(ABC):
         resets the session entirely.
         """
         if self._connection:
-            try:
+            with contextlib.suppress(Exception):
                 # Handle different closing methods for different drivers
                 if hasattr(self._connection, "close"):
                     self._connection.close()
                 elif hasattr(self._connection, "disconnect"):
                     self._connection.disconnect()
-            except Exception:
-                pass
+
         self._connection = None
         self.connect()

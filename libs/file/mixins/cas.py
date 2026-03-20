@@ -73,15 +73,20 @@ class CASArchiveMixin:
             self._atomic_vault_upload(local_path, vault_path, vault_dir)
         else:
             LOG.info(
-                "CAS: Content already exists in vault, skipping upload.", extra={"hash": file_hash}
+                "CAS: Content already exists in vault, skipping upload.",
+                extra={"hash": file_hash},
             )
 
         # 3. Idempotent Manifest Write (Logical Tier)
-        manifest_path = self._write_cas_manifest(job_id, file_hash, vault_path, metadata)
+        manifest_path = self._write_cas_manifest(
+            job_id, file_hash, vault_path, metadata
+        )
 
         return vault_path, manifest_path
 
-    def _atomic_vault_upload(self, local_path: str, vault_path: str, vault_dir: str) -> None:
+    def _atomic_vault_upload(
+        self, local_path: str, vault_path: str, vault_dir: str
+    ) -> None:
         """Ensures file integrity by using a temporary upload path."""
         temp_path = f"{vault_path}.tmp"
 
@@ -126,7 +131,9 @@ class CASArchiveMixin:
 
         # Write using JSONHandler
         handler = HandlerFactory.get_handler("json", self.fs, self.opts)
-        handler.write_file(json.dumps(manifest_data, indent=4).encode("utf-8"), manifest_path)
+        handler.write_file(
+            json.dumps(manifest_data, indent=4).encode("utf-8"), manifest_path
+        )
 
         return manifest_path
 
@@ -181,7 +188,9 @@ class CASArchiveMixin:
         # 1. Get all manifest-referenced hashes
         manifest_df = self.crawl_manifests()
         if manifest_df.is_empty():
-            LOG.warning("No manifests found. Aborting GC to prevent total data loss.")
+            LOG.warninging(
+                "No manifests found. Aborting GC to prevent total data loss."
+            )
             return None
 
         active_hashes = set(manifest_df["content_hash"].to_list())
@@ -205,7 +214,7 @@ class CASArchiveMixin:
             if dry_run:
                 LOG.info(f"[DRY RUN] Would delete orphaned file: {path}")
             else:
-                LOG.warning(f"Deleting orphaned file: {path}")
+                LOG.warninging(f"Deleting orphaned file: {path}")
                 self.fs.rm(path)
 
         return len(to_delete)

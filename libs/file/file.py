@@ -77,7 +77,7 @@
 
 #     #     # Limit check: Prevent OOM by flagging files > 5GB for special handling
 #     #     if size > 5 * 1024**3:
-#     #         LOG.warning(
+#     #         LOG.warninging(
 #     #             f"Large file detected ({size} bytes). Switching to streaming mode."
 #     #         )
 
@@ -106,7 +106,7 @@
 #     #             return pl.read_json(repaired_stream)
 
 #     #     except Exception as e:
-#     #         LOG.warning(f"Repair failed for {self.url}. Moving to quarantine.")
+#     #         LOG.warninging(f"Repair failed for {self.url}. Moving to quarantine.")
 #     #         self.quarantine(reason=str(e))
 #     #         raise
 #     #     finally:

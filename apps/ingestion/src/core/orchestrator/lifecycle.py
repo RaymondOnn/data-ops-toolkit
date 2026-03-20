@@ -4,22 +4,27 @@ from pathlib import Path
 
 import msgspec
 import structlog
-from src.core.contexts.job import JobContext
+from src.core.contexts import ExecutionContext, JobContext
 from src.core.models.job import Job, JobStatus
 from src.core.models.states.terminal import HoldState
 from src.core.orchestrator.engine import IngestionEngine
 from src.core.orchestrator.state import StateStore
-from src.utils.constants import JOB_STEPS_BASE_DIR
-from src.utils.dates import is_expired
 from src.utils.common import find_path
+from src.utils.dates import is_expired
 
 LOG = structlog.getLogger(__name__)
 
 
 class LifecycleManager:
-    def __init__(self, state_store: StateStore, engine: IngestionEngine) -> None:
+    def __init__(
+        self,
+        state_store: StateStore,
+        engine: IngestionEngine,
+        exec_ctx: ExecutionContext,
+    ) -> None:
         self.state_store = state_store
         self.engine = engine
+        self.exec_ctx = exec_ctx
 
     def _handle_recovery(self) -> None:
         """
@@ -28,7 +33,7 @@ class LifecycleManager:
         """
         LOG.info("Starting recovery sweep...")
         # We focus on HOLD for auto-resumption
-        hold_base = JOB_STEPS_BASE_DIR / "HOLD"
+        hold_base = self.exec_ctx.hold_path
         if not hold_base.exists():
             return
 
@@ -37,7 +42,7 @@ class LifecycleManager:
             try:
                 # 1. Rehydrate the Job object from the folder metadata
                 # Line 204 fix: Using the new classmethod
-                job = Job.from_folder(manifest_path.parent)
+                job = Job.from_folder(manifest_path.parent, exec_ctx=self.exec_ctx)
                 state = HoldState(job)
 
                 # 2. Logic check: Should this job be resumed?
@@ -50,7 +55,9 @@ class LifecycleManager:
                 # 3. Construct the composite key for the Engine
                 # Line 313 fix: composite_key = "job_id:table"
                 composite_key = f"{job.id}:{job.context.dataset_id}"
-                LOG.info("Recovering job", run_id=job.run_id, step=job.manifest.current_step)
+                LOG.info(
+                    "Recovering job", run_id=job.run_id, step=job.manifest.current_step
+                )
 
                 # 4. Re-queue into the Ingestion Engine
                 # This moves the job back into the active processing queue
@@ -67,8 +74,10 @@ class LifecycleManager:
 
             except StopIteration:
                 LOG.error(f"Recovery failed for {manifest_path}: Missing _config.json")
-            except Exception as e:
-                LOG.error(f"Error recovering job at {manifest_path}: {e}")
+            except (OSError, ValueError) as e:
+                LOG.error(f"Recovery failed for {manifest_path}: {e}")
+            except Exception:
+                LOG.exception(f"Unexpected error recovering job at {manifest_path}")
 
         # Final flush to Postgres to commit all recovered statuses
         self.state_store.flush()
@@ -110,8 +119,17 @@ class LifecycleManager:
                             {"status": JobStatus.EXPIRED, "step": "cleanup"},
                         )
 
-                except Exception as e:
-                    LOG.error("Expiry check failed", run_id=data["run_id"], error=str(e))
+                except (OSError, msgspec.DecodeError) as e:
+                    LOG.error(
+                        "Expiry check failed due to IO or malformed config",
+                        run_id=data.get("run_id"),
+                        error=str(e),
+                    )
+                except Exception:
+                    LOG.exception(
+                        "Unexpected failure during expiry check",
+                        run_id=data.get("run_id"),
+                    )
 
         self.state_store.flush()
 
@@ -120,7 +138,6 @@ class LifecycleManager:
         Helper to load the JobContext from the active workspace.
         Standardized to look for 'config.json' directly.
         """
-        from src.core.contexts.job import JobContext
 
         # In our refactor, we standardized the filename to config.json
         config_path = folder / "config.json"
@@ -129,7 +146,7 @@ class LifecycleManager:
             # Fallback for legacy naming if necessary, otherwise stick to strict
             raise FileNotFoundError(f"Missing config.json in {folder}")
 
-        with open(config_path, "rb") as f:
+        with config_path.open(mode="rb") as f:
             # msgspec handles the mapping to JobContext class automatically
             return msgspec.json.decode(f.read(), type=JobContext)
 
@@ -139,18 +156,18 @@ class LifecycleManager:
         """
         # 1. Remove active links
         # Find the active link for the run_id
-        active_root = JOB_STEPS_BASE_DIR / "active"
+        active_root = self.exec_ctx.active_path
         active_path = find_path(active_root, run_id)
 
         if active_path:
-            composite_key, run_date = active_path.parent.name.split("_")
-            job_id, dataset_id = composite_key.split(":")
+            composite_key, _ = active_path.parent.name.split("_")
+            job_id, _ = composite_key.split(":")
             shutil.rmtree(active_path)
 
         # TODO: This needs updating. Cant remember to data folder structure
-        # 2. Remove physical data vaults (raw, transform, etc)
+        # 2. Remove physical data vaults (extract, transform, etc)
         # Search data/ folders for {job_id}_*
-        data_root = JOB_STEPS_BASE_DIR / "data"
+        data_root = self.exec_ctx.data_path
         for step_dir in data_root.iterdir():
             if step_dir.is_dir():
                 for physical_folder in step_dir.glob(f"{job_id}_*"):

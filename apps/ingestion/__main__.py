@@ -32,7 +32,9 @@ def run(
         ..., formats=["%Y-%m-%d"], help="The target date for processing (YYYY-MM-DD)"
     ),
     # Required/Common Options
-    job_id: str = typer.Option(..., "--job-id", "-j", help="The unique UUID for this run"),
+    job_id: str = typer.Option(
+        ..., "--job-id", "-j", help="The unique UUID for this run"
+    ),
     dataset: str = typer.Option(
         ..., "--dataset", "-d", help="Dataset identifier (e.g., 'sales_data')"
     ),
@@ -78,16 +80,24 @@ def test(
         ..., formats=["%Y-%m-%d"], help="The target date for processing (YYYY-MM-DD)"
     ),
     # Required/Common Options
-    job_id: str = typer.Option(..., "--job-id", "-j", help="The unique UUID for this run"),
+    job_id: str = typer.Option(
+        ..., "--job-id", "-j", help="The unique UUID for this run"
+    ),
     dataset: str = typer.Option(
         ..., "--dataset", "-d", help="Dataset identifier (e.g., 'sales_data')"
     ),
-    from_step: Optional[JobSteps] = typer.Option(None, "--from", help="Force start from this step"),
-    to_step: Optional[JobSteps] = typer.Option(None, "--to", help="Stop execution after this step"),
+    from_step: Optional[JobSteps] = typer.Option(
+        None, "--from", help="Force start from this step"
+    ),
+    to_step: Optional[JobSteps] = typer.Option(
+        None, "--to", help="Stop execution after this step"
+    ),
     force: bool = typer.Option(True, "--force", help="Defaults to True for testing"),
 ) -> None:
     """Developer test mode. Allows slicing the pipeline."""
-    _execute_pipeline(run_date, job_id, dataset, from_step=from_step, to_step=to_step, force=force)
+    _execute_pipeline(
+        run_date, job_id, dataset, from_step=from_step, to_step=to_step, force=force
+    )
 
 
 @app.command()

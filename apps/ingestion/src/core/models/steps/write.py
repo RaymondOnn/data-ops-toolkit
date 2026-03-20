@@ -1,31 +1,29 @@
-import time
-import traceback
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
-import structlog  # type: ignore
-
+import msgspec
+import structlog
+from src.core.models.job.manifest import WritePayload
+from src.core.models.steps import JobStep
 from src.core.strategies.load.load import Loader
-from src.core.models.job import Job
-from src.core.models.steps import JobBitmask, JobStep
-from src.core.models.job.manifest import ErrorPayload, WritePayload
 from src.services.factory import ServiceFactory
-from src.utils.constants import JOB_STEPS_BASE_DIR
+
+if TYPE_CHECKING:
+    from src.core.models.job import Job
+
 
 LOG = structlog.getLogger(__name__)
 
 
-class WriteStep(JobStep):  # type: ignore
+class WriteStep(JobStep):
     manifest: WritePayload
-
-    @property
-    def bitmask(self) -> str:
-        return str(JobBitmask.WRITE)
 
     @property
     def name(self) -> str:
         return "write"
 
     def execute(self, job: "Job") -> str:
-        start_time = time.perf_counter()
+        start_ts = datetime.now(UTC).isoformat()
         job_ctx = job.context
 
         try:
@@ -33,7 +31,9 @@ class WriteStep(JobStep):  # type: ignore
             source_dir = (job.folder / "transform").resolve()
 
             # 1. Get the Service (Securely initialized on Ray worker via ServiceFactory)
-            service = ServiceFactory.get_service(job_ctx.sink_type, **job_ctx.sink_config)
+            service = ServiceFactory.get_service(
+                job_ctx.load.sink_type, **job_ctx.load.sink_config
+            )
 
             # 2. Get the behavioral Strategy
             loader = Loader()
@@ -42,32 +42,25 @@ class WriteStep(JobStep):  # type: ignore
             staging_results = loader.load(
                 service=service,
                 source_dir=source_dir,
-                target_table=job_ctx.target_destination,
+                target_table=job_ctx.load.sink_identifier,
             )
 
             # 3. Finalize Manifest
             payload = WritePayload(
-                step_outcome="COMPLETED",
-                target_identifier=job_ctx.target_destination,
-                sink_type=job_ctx.destination_type,
-                staging_artifact=(staging_results.staging_path or staging_results.staging_table,),
+                sink_identifier=job_ctx.load.sink_identifier,
+                sink_type=job_ctx.load.sink_type,
+                staging_artifact=str(
+                    staging_results.staging_path or staging_results.staging_table
+                ),
                 rows_inserted=staging_results.rows,
-                partition_col=job_ctx.partition_col,
-                partition_value=job_ctx.partition_value,
-                db_connection_id=service.connection_id,
-                duration_secs=int((time.perf_counter() - start_time) * 1000),
+                partition_col=job_ctx.load.partition_col or "",
+                partition_value=job_ctx.load.partition_value or "",
+                start_timestamp_utc=start_ts,
             )
 
-            self.finalize(job, results=payload)
+            self.finalize(job, results=msgspec.to_builtins(payload))
             return str(self._transit(job))
 
         except Exception as exc:
-            payload = ErrorPayload(
-                step_name=self.name,
-                error_type=type(exc).__name__,
-                message=str(exc),
-                stack_trace=traceback.format_exc(),
-                is_transient=isinstance(exc, (requests.RequestException, ConnectionError)),
-            )
-            self.finalize(job, exception=payload)
+            self.finalize(job, exception=exc)
             raise

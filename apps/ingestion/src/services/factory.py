@@ -1,7 +1,10 @@
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any, ClassVar
 
 import structlog
 
+from libs.auth.factory import AuthFactory
+from libs.auth.models import Secret
 
 LOG = structlog.getLogger(__name__)
 
@@ -12,9 +15,9 @@ class ServiceNotFound(Exception):
 
 class ServiceFactory:
     # Registry of Classes (Populated by @register)
-    _SERVICES: dict[str, type] = {}
+    _SERVICES: ClassVar[dict[str, type]] = {}
     # Registry of Singleton Instances (Populated at Runtime)
-    _INSTANCES: dict[str, Any] = {}
+    _INSTANCES: ClassVar[dict[str, Any]] = {}
 
     @classmethod
     def register(cls, name: str) -> Callable[[type], type]:
@@ -27,7 +30,7 @@ class ServiceFactory:
         return wrapper
 
     @classmethod
-    def get_service(cls, type: str, **config: Any) -> Any:
+    def get_service(cls, service_type: str, **config: Any) -> Any:
         """
         Acts as the Singleton Manager.
         Returns a service instance based on account_id.
@@ -36,7 +39,7 @@ class ServiceFactory:
         instance_key = f"{type}:{account_id}"
 
         if instance_key not in cls._INSTANCES:
-            service_cls = cls._SERVICES.get(type.casefold())
+            service_cls = cls._SERVICES.get(service_type.casefold())
             if not service_cls:
                 raise ServiceNotFound(f"No service found for {type}")
 
@@ -44,9 +47,6 @@ class ServiceFactory:
             # If 'secret_key' (the ID) is present, wrap it in a Secret object.
             # This 'Secret' object is what gets sent to Ray workers.
             if "secret_key" in config:
-                from libs.auth.factory import AuthFactory
-                from libs.auth.models import Secret
-
                 provider = AuthFactory.get_provider()
                 config["password"] = Secret(config["secret_key"], provider)
 

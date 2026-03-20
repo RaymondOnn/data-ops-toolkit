@@ -1,7 +1,8 @@
 from pathlib import Path
-
+import zoneinfo as tz
 
 ALWAYS_ON_MODE = False
-JOB_STEPS_BASE_DIR = Path("~/.ingestion_engine/data/").expanduser()
 DISKCACHE_FILE_PATH = ".cache/cache.db"
-APP_CURRENT_ENV = "production"
+APP_CURRENT_ENV = "production"  # local / dev / test / production
+APP_TIMEZONE_LC = tz.ZoneInfo("Asia/Singapore")
+APP_TIMEZONE_UTC = tz.ZoneInfo("UTC")

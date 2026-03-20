@@ -60,7 +60,12 @@ class FormatHandler(ABC):
 class HandlerFactory:
     @staticmethod
     def get_handler(ext: str, fs, opts: dict) -> FormatHandler:
-        from libs.file.formats import JSONHandler, CSVHandler, ParquetHandler, XMLHandler
+        from libs.file.formats import (
+            JSONHandler,
+            CSVHandler,
+            ParquetHandler,
+            XMLHandler,
+        )
 
         mapping = {
             "json": JSONHandler,

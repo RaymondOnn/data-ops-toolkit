@@ -37,17 +37,21 @@ class JSONHandler(FormatHandler):
                     if chunk and chunk[0:1] == b"{":
                         is_ndjson = True
             except Exception:
-                LOG.debug(f"Peeking failed for {target}, defaulting to standard JSON path.")
+                LOG.debug(
+                    f"Peeking failed for {target}, defaulting to standard JSON path."
+                )
 
         if is_ndjson:
             return pl.scan_ndjson(
-                target, storage_options=self.opts, ignore_errors=kwargs.get("ignore_errors", True)
+                target,
+                storage_options=self.opts,
+                ignore_errors=kwargs.get("ignore_errors", True),
             )
 
         # Standard JSON requires full load into memory for repair
         size = self.fs.size(target)
         if size > 1.5 * 1024**3:  # 1.5GB warning
-            LOG.warning(f"Standard JSON {target} is very large. Risk of OOM.")
+            LOG.warninging(f"Standard JSON {target} is very large. Risk of OOM.")
 
         buffer = self.read_mem(target, **kwargs)
         return pl.read_json(buffer).lazy()

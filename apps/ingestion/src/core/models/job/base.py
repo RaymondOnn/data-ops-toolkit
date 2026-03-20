@@ -1,54 +1,17 @@
 import os
 import shutil
 import time
-from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any
 
-import msgspec  # type: ignore
-import structlog  # type: ignore
-from src.core.contexts.job import JobContext
+import msgspec
+import structlog
+from src.core.contexts import ExecutionContext, JobContext
 from src.core.models.job.manifest import JobManifest
-from src.core.models.steps import JobStep
-from src.utils.constants import JOB_STEPS_BASE_DIR
+from src.core.models.job.status import JobStatus
+from src.core.models.steps import JobStep, JobSteps
 
 LOG = structlog.getLogger(__name__)
-if TYPE_CHECKING:
-    from src.core.models.steps import JobSteps
-
-
-class JobStatus(StrEnum):
-    """
-    Shows the current health of the job.
-
-    Independent of Job Step for easier maintenance
-    """
-
-    # Initial State
-    PENDING = "PENDING"  # Created, waiting for schedule
-    QUEUED = "QUEUED"  # Picked up by Orchestrator, waiting for Worker
-
-    # Active States
-    PROVISIONING = "PROVISIONING"  # Worker initialized, manifest created
-    RUNNING = "RUNNING"  # Actively processing a step
-
-    # Terminal States (End of the road)
-    SUCCESS = "SUCCESS"  # Fully finished (Complete step passed)
-    FAILED = "FAILED"  # Hard stop, requires manual intervention
-    CANCELLED = "CANCELLED"  # Manual kill
-    EXPIRED = "EXPIRED"  # TTL reached, data purged, no recovery needed
-
-    # Wait States (The "Breadcrumb" triggers)
-    DEFERRED = "DEFERRED"  # Transient error, Orchestrator will retry later
-    BLOCKED = "BLOCKED"  # Manual HOLD or dependency missing
-
-    @classmethod
-    def active_statuses(cls) -> set["JobStatus"]:
-        return {cls.QUEUED, cls.PENDING, cls.RUNNING, cls.PROVISIONING}
-
-    @classmethod
-    def terminal_statuses(cls) -> set["JobStatus"]:
-        return {cls.SUCCESS, cls.FAILED, cls.CANCELLED}
 
 
 # TODO: Rename folders to include worker id?
@@ -63,16 +26,23 @@ class Job:
         composite_key: str,
         run_date: str,
         worker_id: str,
+        exec_ctx: ExecutionContext,
         target_step: str = JobSteps.START.name,
     ) -> None:
         self.id, self.dataset_id = composite_key.split(":", 1)
         self.run_id = run_id
         self.run_date = run_date
         self.worker_id = worker_id
+        self.exec_ctx = exec_ctx
         self.target_step = target_step
 
     @classmethod
-    def from_folder(cls, folder_path: Path, target_step: Optional[JobSteps] = None) -> "Job":
+    def from_folder(
+        cls,
+        folder_path: Path,
+        exec_ctx: ExecutionContext,
+        target_step: JobSteps | None = None,
+    ) -> "Job":
         """
         Factory to rehydrate a Job. If a target_step is provided,
         it performs an immediate check-in.
@@ -86,6 +56,7 @@ class Job:
             run_id=run_id,
             run_date=run_date,
             worker_id="recovery",
+            exec_ctx=exec_ctx,
             target_step=target_step.label if target_step else JobSteps.START.label,
         )
         if target_step:
@@ -102,7 +73,7 @@ class Job:
             # 1. Setup the Active Directory
             # Path: storage/active/{job_id}
             folder = (
-                JOB_STEPS_BASE_DIR
+                self.exec_ctx.workspace_dir
                 / "active"
                 / f"{self.id}:{self.dataset_id}_{self.run_date}"
                 / self.run_id
@@ -127,8 +98,8 @@ class Job:
             self.update_manifest(data)
 
             # Move file into job folder
-            job_cfg_file = f"{self.id}:{self.context.table}_{self.run_id}_config.json"
-            source_path = JOB_STEPS_BASE_DIR / "active" / job_cfg_file
+            job_cfg_file = f"{self.id}:{self.dataset_id}_{self.run_id}_config.json"
+            source_path = self.exec_ctx.workspace_dir / "active" / job_cfg_file
             dest_path = folder / job_cfg_file
             shutil.move(str(source_path), str(dest_path))
 
@@ -145,9 +116,16 @@ class Job:
         """
         if not self._manifest_path.exists():
             # Return a default manifest if file is missing/corrupt
-            return JobManifest(job_id=self.id, run_id=self.run_id, status="UNKNOWN")
+            return JobManifest(
+                job_id=self.id,
+                run_id=self.run_id,
+                dataset_name=self.dataset_id,
+                current_step=self.step.name,
+                bitmask=0,
+                job_status=JobStatus.UNKNOWN,
+            )
 
-        with open(self._manifest_path, "rb") as f:
+        with self._manifest_path.open(mode="rb") as f:
             return msgspec.json.decode(f.read(), type=JobManifest)
 
     @property
@@ -159,13 +137,17 @@ class Job:
         try:
             # Look for the first file ending in _config.json
             config_path = next(self.folder.glob("*_config.json"))
-            with open(config_path, "rb") as f:
+            with config_path.open(mode="rb") as f:
                 # msgspec decodes directly into your JobContext class
                 return msgspec.json.decode(f.read(), type=JobContext)
         except (StopIteration, FileNotFoundError):
-            LOG.error("JobContext configuration missing on disk", folder=str(self.folder))
+            LOG.error(
+                "JobContext configuration missing on disk", folder=str(self.folder)
+            )
             # Return an empty/default context if appropriate for your logic
-            raise FileNotFoundError(f"Config for job {self.id} not found in {self.folder}")
+            raise FileNotFoundError(
+                f"Config for job {self.id} not found in {self.folder}"
+            ) from None
 
     @property
     def step(self) -> JobStep:
@@ -198,7 +180,7 @@ class Job:
 
         # 3. Atomic Write to avoid corruption during crashes (Write to .tmp then replace)
         tmp_path = self._manifest_path.with_suffix(".tmp")
-        with open(tmp_path, "wb") as f:
+        with tmp_path.open(mode="wb") as f:
             f.write(msgspec.json.encode(data))
             f.flush()
             os.fsync(f.fileno())  # Ensure bits are physically on the platter
@@ -221,11 +203,13 @@ class Job:
         Because data is in /data/ vault via symlinks, this move is instant.
         """
         # Target: e.g., /opt/app/steps/HOLD/123/run_abc
-        new_path = Path(JOB_STEPS_BASE_DIR) / step / self.id / self.run_id
+        new_path = Path(self.exec_ctx.workspace_dir) / step / self.id / self.run_id
         new_path.parent.mkdir(parents=True, exist_ok=True)
 
         if self.folder.exists():
-            LOG.info("Relocating metadata folder", src=str(self.folder), dst=str(new_path))
+            LOG.info(
+                "Relocating metadata folder", src=str(self.folder), dst=str(new_path)
+            )
 
             # Atomic move across the filesystem
             shutil.move(str(self.folder), str(new_path))
@@ -238,11 +222,9 @@ class Job:
         """
         Drops a signal file to notify the Orchestrator of a state change.
         """
-        from src.utils.constants import JOB_STEPS_BASE_DIR
-
         # 2. Define the signal path
         # Path: /data/signals/{run_id}.step_name.bitmask.sync
-        signal_dir = JOB_STEPS_BASE_DIR / "signals"
+        signal_dir = self.exec_ctx.workspace_dir / "signals"
         signal_dir.mkdir(parents=True, exist_ok=True)
 
         # 2. Drop the Breadcrumb

@@ -4,8 +4,8 @@ from typing import Any
 
 import msgspec
 import structlog
-
-from src.core.models.job.manifest import JobManifest
+from src.core.contexts.execution import ExecutionContext
+from src.core.models.job import JobManifest, JobStatus
 from src.services.database import DatabaseService
 
 LOG = structlog.getLogger(__name__)
@@ -14,8 +14,9 @@ CURRENT_EXECUTION_TBL = "CURRENT_EXECUTION"
 
 # TODO: Logging to Error Log? Workflow for refresh current_execution for the day
 class StateStore:
-    def __init__(self, db_service: DatabaseService) -> None:
+    def __init__(self, db_service: DatabaseService, exec_ctx: ExecutionContext) -> None:
         self.service = db_service  # Database-specific logic here
+        self.exec_ctx = exec_ctx
         self._mirror: dict[str, dict[str, Any]] = {}  # {job_id: {record_data}}
         self._dirty_keys: set[str] = set()  # Track what needs saving
         self.last_sync = 0
@@ -25,8 +26,6 @@ class StateStore:
         Polls Postgres for active job definitions.
         Uses JobStatus enum to filter for non-terminal states.
         """
-        from src.core.models.job import JobStatus
-
         # We only care about jobs that are not SUCCESS, FAILED, or EXPIRED
         active_statuses = [f"'{s.value}'" for s in JobStatus.active_statuses()]
         status_filter = ", ".join(active_statuses)
@@ -43,7 +42,9 @@ class StateStore:
             # On subsequent ticks, only update if the DB has newer info
             if run_id not in self._mirror:
                 self._mirror[run_id] = r
-                LOG.debug("Loaded active run from DB", run_id=run_id, status=r["job_status"])
+                LOG.debug(
+                    "Loaded active run from DB", run_id=run_id, status=r["job_status"]
+                )
 
     def get_active_definitions(self) -> list[dict[str, Any]]:
         """Returns the current list of jobs for the Orchestrator to evaluate."""
@@ -81,7 +82,7 @@ class StateStore:
         manifest_file = folder_path / "manifest.json"
 
         if not manifest_file.exists():
-            LOG.warning(f"No manifest found at {manifest_file}. Sync skipped.")
+            LOG.warninging(f"No manifest found at {manifest_file}. Sync skipped.")
             return
 
         try:
@@ -101,10 +102,12 @@ class StateStore:
                 self._mirror[run_id].update(
                     {
                         "metadata": {
-                            "total_rows_in": getattr(m_data.raw, "total_rows", 0),
+                            "total_rows_in": getattr(m_data.extract, "total_rows", 0),
                             "total_rows_out": getattr(m_data.write, "rows_written", 0),
                             "total_duration": m_data.total_duration,
-                            "logic_version": getattr(m_data.transform, "logic_version", "1.0"),
+                            "logic_version": getattr(
+                                m_data.transform, "logic_version", "1.0"
+                            ),
                         }
                     }
                 )
@@ -130,13 +133,17 @@ class StateStore:
             self._dirty_keys.add(run_id)
             LOG.debug(f"Synced {run_id} from disk: Status={manifest.status}")
 
-        except Exception as e:
-            LOG.error(f"Failed to sync manifest from {folder_path}: {e}")
+        except (msgspec.DecodeError, msgspec.ValidationError) as e:
+            LOG.error(f"Malformed manifest at {folder_path}: {e}")
+        except OSError as e:
+            LOG.error(f"FileSystem error syncing manifest from {folder_path}: {e}")
+        except Exception:
+            LOG.exception(f"Unexpected error syncing manifest from {folder_path}")
 
     def _calculate_bitmask(self, job_path: Path) -> int:
         """Simple logic to check which active links exist."""
         mask = 0
-        if (job_path / "raw").exists():
+        if (job_path / "extract").exists():
             mask |= 1
         if (job_path / "transform").exists():
             mask |= 2
@@ -162,9 +169,9 @@ class StateStore:
                 {
                     "run_id": data["run_id"],
                     "job_id": data["job_id"],
-                    "status": str(data["status"]),  # e.g., 'RUNNING'
-                    "step": data["step"],  # e.g., 'TRANSFORM'
-                    "bitmask": data.get("bitmask", 0),
+                    "status": str(data["job_status"]),  # e.g., 'RUNNING'
+                    "step": data["current_step"],  # e.g., 'TRANSFORM'
+                    "bitmask": data.get("job_bitmask", 0),
                     "folder_path": data["folder_path"],
                 }
             )
@@ -190,5 +197,5 @@ class StateStore:
             self.service.execute_batch(sql, batch_data)
             self._dirty_keys.clear()
             LOG.debug(f"Flushed {len(batch_data)} updates to Postgres.")
-        except Exception as e:
-            LOG.error(f"Postgres batch update failed: {e}")
+        except Exception:
+            LOG.exception("Postgres batch update failed")

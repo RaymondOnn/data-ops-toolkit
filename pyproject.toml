@@ -21,7 +21,7 @@ target-version = "py311"
 
 
 [tool.ruff]
-line-length = 100
+line-length = 88
 indent-width = 4
 output-format = "grouped"
 respect-gitignore = true
@@ -69,7 +69,16 @@ extend-select = [
     "UP",       # Warn if certain things can changed due to newer Python versions
     "W",        # PyCodeStyle warnings
 ]
-ignore = ["SIM112", "G004", "PLR2004", "W293", "W291", "PLR0913", "COM812"]
+ignore = [
+    "SIM112", 
+    "G004", 
+    "PLR2004", 
+    "W293", 
+    "W291", 
+    "PLR0913", 
+    "COM812",
+    "N818", # error-suffix-on-exception-name
+]
 
 [tool.ruff.lint.pydocstyle]
 # https://github.com/google/styleguide/blob/gh-pages/pyguide.md#38-comments-and-docstrings

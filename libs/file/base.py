@@ -42,7 +42,9 @@ class FileSystemClient(BaseIOClient, ABC):
         if "://" in path and self.fs:
             stripped = self.fs._strip_protocol(path)
             # Normalize slashes and remove internal '.' or '..'
-            normalized = "/".join([p for p in stripped.split("/") if p not in (".", "")])
+            normalized = "/".join(
+                [p for p in stripped.split("/") if p not in (".", "")]
+            )
             return str(self.fs.unstrip_protocol(normalized))
         return str(Path(path).resolve())
 
@@ -78,7 +80,9 @@ class FileSystemSkills(Enum):
 
 
 def create_fs_client(
-    url: str, capabilities: list[FileSystemSkills], storage_options: Optional[dict[str, Any]] = None
+    url: str,
+    capabilities: list[FileSystemSkills],
+    storage_options: Optional[dict[str, Any]] = None,
 ) -> FileSystemClient:
     """
     Assembles a Managed Client with dynamic capabilities (Ingestion, Archive, etc.).

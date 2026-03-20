@@ -61,7 +61,9 @@ def get_registry() -> BaseRegistry:
         try:
             return RemoteRayRegistry()
         except Exception as e:
-            logging.warning(f"Failed to connect to Ray Actor, falling back to disk: {e}")
+            logging.warning(
+                f"Failed to connect to Ray Actor, falling back to disk: {e}"
+            )
             return LocalDiskRegistry()
     else:
         # This handles cases where you're running a unit test

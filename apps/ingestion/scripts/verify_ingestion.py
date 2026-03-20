@@ -72,8 +72,12 @@ def main():
     print(f"Data staged in temporary table: {staging_result.staging_table}")
 
     # Debug: Check staging table
-    staging_rows = service.client.sql(f"SELECT count() FROM {staging_result.staging_table}")
-    print(f"Rows in staging table '{staging_result.staging_table}': {staging_rows[0][0]}")
+    staging_rows = service.client.sql(
+        f"SELECT count() FROM {staging_result.staging_table}"
+    )
+    print(
+        f"Rows in staging table '{staging_result.staging_table}': {staging_rows[0][0]}"
+    )
 
     staging_parts = service.client.sql(
         f"SELECT partition FROM system.parts WHERE table = '{staging_result.staging_table}' AND database = 'default'"

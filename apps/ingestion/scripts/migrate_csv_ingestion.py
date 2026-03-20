@@ -1,36 +1,46 @@
 import os
 import sys
+from pathlib import Path
+
 import msgspec
 import polars as pl
 
 # Ensure we can import from src
-sys.path.append(os.path.join(os.getcwd(), "apps/ingestion"))
+project_root = Path(__file__).parent.parent.parent
+sys.path.append(str(project_root / "apps" / "ingestion"))
 
 from src.core.models.job import Job
 from src.core.models.steps import JobStep
+from src.core.contexts import JobContextBuilder, ExecutionMode
 from src.core.contexts.job import (
     JobContext,
-    ExecutionMode,
     ExtractConfig,
     TransformConfig,
     LoadConfig,
     ArchiveConfig,
 )
-from src.utils.constants import JOB_STEPS_BASE_DIR
+from src.services.factory import ServiceFactory
 
 
-def setup_workspace(job_id: str, dataset_id: str, run_date: str, run_id: str):
-    """Sets up the initial workspace for a job run."""
-    active_root = JOB_STEPS_BASE_DIR / "active"
-    active_root.mkdir(parents=True, exist_ok=True)
+def main():
+    job_id = "csv_ingestion"
+    dataset_id = "orders"
+    run_date = "2023-10-27"
+    run_id = "migration_test_001"
 
-    # Create the job context manually for this migration test
+    # 1. Initialize Execution Context using the Builder
+    # This resolves the workspace_dir and environment settings.
+    builder = JobContextBuilder()
+    exec_ctx = builder.get_execution_context(mode=ExecutionMode.NORMAL)
+
+    # 2. Setup Manual JobContext (Bypassing the full YAML-to-Context for this test)
     ctx = JobContext(
         job_id=job_id,
         dataset_id=dataset_id,
         run_date=run_date,
-        execution_mode=ExecutionMode.NORMAL,
-        output_path=str(active_root),
+        output_path=str(
+            exec_ctx.active_path / f"{job_id}:{dataset_id}_{run_date}_{run_id}"
+        ),
         extract=ExtractConfig(
             source_type="flat_file",
             source_identifier="samples/sample_orders.csv",
@@ -49,7 +59,7 @@ def setup_workspace(job_id: str, dataset_id: str, run_date: str, run_id: str):
                 "account_id": "local_clickhouse",
                 "host": "localhost",
                 "port": 8123,
-                "username": "default",
+                "user": "default",
                 "password": "password",
                 "database": "default",
             },
@@ -57,61 +67,58 @@ def setup_workspace(job_id: str, dataset_id: str, run_date: str, run_id: str):
         archive=ArchiveConfig(enabled=False),
     )
 
-    prefix = f"{job_id}:{dataset_id}_{run_date}_{run_id}"
-    config_path = active_root / f"{prefix}_config.json"
+    # 3. Initialize Job
+    # The Job class manages its own manifest and state transitions.
+    composite_key = f"{job_id}:{dataset_id}"
+    job = Job(
+        run_id=run_id,
+        composite_key=composite_key,
+        run_date=run_date,
+        worker_id="migration_worker",
+        exec_ctx=exec_ctx,
+        target_step="start",
+    )
 
-    with open(config_path, "wb") as f:
+    # 4. Persistence: Manually write the config file into the workspace so the Job can find it
+    # Normally the Orchestrator does this.
+    active_root = exec_ctx.active_path
+    active_root.mkdir(parents=True, exist_ok=True)
+    prefix = f"{job_id}:{dataset_id}_{run_date}_{run_id}"
+    config_path = exec_ctx.active_path / f"{prefix}_config.json"
+
+    with config_path.open("wb") as f:
         f.write(msgspec.json.encode(ctx))
 
-    print(f"Workspace setup complete. Config at: {config_path}")
-    return ctx, config_path
-
-
-def main():
-    job_id = "csv_ingestion"
-    dataset_id = "orders"
-    run_date = "2023-10-27"
-    run_id = "migration_test_001"
-
-    # 0. Setup
-    ctx, config_path = setup_workspace(job_id, dataset_id, run_date, run_id)
-
-    # Rehydrate Job
-    composite_key = f"{job_id}:{dataset_id}"
-    job = Job(run_id, composite_key, run_date, "migration_worker", target_step="start")
-
-    # Triggers folder creation and manifest init
+    # Trigger folder creation and manifest init
     _ = job.folder
-
     print(f"Job initialized in folder: {job.folder}")
 
-    # Phase 1: RawStep
-    print("\n--- Phase 1: RawStep ---")
-    raw_step = JobStep.get_step_class_by_name("raw")
-    job.set_step(raw_step)
-    raw_step.execute(job)
-    print("RawStep completed.")
+    # 5. Run the 6-Step Pipeline
+    # Steps: start -> extract -> transform -> write -> publish -> complete
+    # (Audit is skipped as per user request)
 
-    # Phase 2: TransformStep (Passthrough)
-    print("\n--- Phase 2: TransformStep ---")
-    transform_step = JobStep.get_step_class_by_name("transform")
-    job.set_step(transform_step)
-    transform_step.execute(job)
-    print("TransformStep completed.")
+    steps_to_run = ["start", "extract", "transform", "write", "publish", "complete"]
 
-    # Phase 3: WriteStep
-    print("\n--- Phase 3: WriteStep ---")
-    write_step = JobStep.get_step_class_by_name("write")
-    job.set_step(write_step)
-    write_step.execute(job)
-    print("WriteStep completed.")
+    for step_name in steps_to_run:
+        print(f"\n--- Phase: {step_name.upper()} ---")
+        step_instance = JobStep.get_step_class_by_name(step_name)
+        job.set_step(step_instance)
+        job.execute()
+        print(f"{step_name.capitalize()} completed.")
 
-    # Verify final data in ClickHouse
-    from src.services.factory import ServiceFactory
-
+    # 6. Verification
+    print("\n--- Verification ---")
     ch_service = ServiceFactory.get_service("clickhouse", **ctx.load.sink_config)
-    result = ch_service.sql("SELECT count(*) FROM orders")
-    print(f"\nFinal row count in ClickHouse: {result[0][0]}")
+    result = ch_service.sql(f"SELECT count(*) FROM {ctx.load.sink_identifier}")
+    print(f"Final row count in ClickHouse ({ctx.load.sink_identifier}): {result[0][0]}")
+
+    # 7. Cleanup Check
+    # Note: 'complete' step purges extract/transform folders.
+    run_parent = job.folder.parent
+    if not (run_parent / "extract").exists():
+        print("Success: Temporary extract files purged.")
+    if not (run_parent / "transform").exists():
+        print("Success: Temporary transform files purged.")
 
 
 if __name__ == "__main__":

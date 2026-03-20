@@ -1,12 +1,15 @@
-from typing import Any, Generator, Sequence
+from collections.abc import Generator, Sequence
+from typing import Any
 
-from clickhouse_connect.driver.client import Client
 import polars as pl
+from clickhouse_connect.driver.client import Client
+
 from libs.clients.database.base import DBClient
 
 
 class ClickhouseClient(DBClient):
     def connect(self) -> Client:
+        # Import inside so that Ray workers can import
         import clickhouse_connect
         from libs.clients.base import ClientCantConnect
 
@@ -22,16 +25,26 @@ class ClickhouseClient(DBClient):
             )
             self._ping(self._connection)
         except Exception as e:
-            raise ClientCantConnect(str(e))
+            raise ClientCantConnect("Failed to connect to ClickHouse") from e
         else:
             return self._connection
 
     def _ping(self, conn: Client) -> None:
         conn.ping()
 
-    def get_load_strategy(self, table_name: str, num_partitions: int = 5) -> list[str]:
+    def get_load_strategy(
+        self,
+        table_name: str,
+        num_partitions: int = 5,
+        filter_sql: str | None = None,
+    ) -> list[str]:
+        filter_sql = filter_sql.replace("WHERE", "") if filter_sql else ""
         return [
-            f"SELECT * FROM {table_name} WHERE cityHash64(*) % {num_partitions} = {i}"
+            f"""
+            SELECT * FROM {table_name} 
+            WHERE {filter_sql} 
+            AND cityHash64(*) % {num_partitions} = {i}
+            """
             for i in range(num_partitions)
         ]
 
@@ -42,7 +55,9 @@ class ClickhouseClient(DBClient):
 
     def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
         # clickhouse-connect supports native DataFrame streaming
-        result = self.connect().query_df_stream(query, settings={"max_block_size": 100_000})
+        result = self.connect().query_df_stream(
+            query, settings={"max_block_size": 100_000}
+        )
         with result:
             for pandas_df in result:
                 yield pl.from_pandas(pandas_df)

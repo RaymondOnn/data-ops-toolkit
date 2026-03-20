@@ -53,7 +53,9 @@ class DefaultTransformer:
         # 3. NULL CONVERSION: Convert empty strings ('') to NULL
         # Critical for DB integrity so that whitespace-only values don't become blank entries
         lf = lf.with_columns(
-            pl.col(pl.Utf8).map_elements(lambda s: None if s == "" else s, return_dtype=pl.Utf8)
+            pl.col(pl.Utf8).map_elements(
+                lambda s: None if s == "" else s, return_dtype=pl.Utf8
+            )
         )
 
         # 4. DEDUPLICATE: Global uniqueness via metadata hash
@@ -66,7 +68,8 @@ class DefaultTransformer:
     def _standardize_column_names(self, lf: pl.LazyFrame) -> pl.LazyFrame:
         """Forces snake_case and removes special characters."""
         mapping = {
-            col: col.lower().strip().replace(" ", "_").replace("-", "_") for col in lf.columns
+            col: col.lower().strip().replace(" ", "_").replace("-", "_")
+            for col in lf.columns
         }
         return lf.rename(mapping)
 
@@ -77,7 +80,8 @@ class DefaultTransformer:
         """
         return lf.with_columns(
             pl.col(pl.Utf8).map_elements(
-                lambda s: None if s is not None and s.strip() == "" else s, return_dtype=pl.Utf8
+                lambda s: None if s is not None and s.strip() == "" else s,
+                return_dtype=pl.Utf8,
             )
         )
 
@@ -103,7 +107,9 @@ class BitmaskTransformer:
         256: "DIGITS_ONLY",
     }
 
-    def apply(self, lf: pl.LazyFrame, column_masks: list[tuple[str, int]]) -> pl.LazyFrame:
+    def apply(
+        self, lf: pl.LazyFrame, column_masks: list[tuple[str, int]]
+    ) -> pl.LazyFrame:
         # STAGE 1 & 2: Decipher and Reorganize into Per-Operation Buckets
         buckets: dict[str, list[str]] = {}
         for col_name, mask in column_masks:

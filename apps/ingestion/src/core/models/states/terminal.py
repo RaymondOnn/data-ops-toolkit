@@ -1,12 +1,10 @@
 import shutil
-import time
 from abc import ABC, abstractmethod
-from typing import Any, TYPE_CHECKING
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
-import structlog  # type: ignore
-
-
-from src.core.models.job.base import JobStatus
+import structlog
+from src.core.models.job.status import JobStatus
 from src.services.registry import ServiceRegistry
 
 if TYPE_CHECKING:
@@ -18,7 +16,7 @@ LOG = structlog.getLogger(__name__)
 class LifecycleState(ABC):
     folder_name: str  # e.g., "HOLD", "FAILED", "DONE"
 
-    def __init__(self, job: Job):
+    def __init__(self, job: "Job"):
         self.job = job
 
     @abstractmethod
@@ -42,11 +40,11 @@ class HoldState(LifecycleState):
             {
                 "job_status": JobStatus.BLOCKED,
                 "error": data,
-                "retry_count": self.job.manifest.get("retry_count", 0) + 1,
+                "retry_count": self.job.manifest.retry_count + 1,
             }
         )
         # Note: The move_to_folder call happens in the finalize() or manager
-        LOG.warn("Job entered HOLD", job_id=self.job.id, reason=str(data))
+        LOG.warning("Job entered HOLD", job_id=self.job.id, reason=str(data))
 
     # TODO: Need to straighten out the logic
     def can_recover(self) -> bool:
@@ -56,8 +54,14 @@ class HoldState(LifecycleState):
         2. Has it been in HOLD too long? (Avoid infinite loops)
         """
         # Check TTL
-        hold_duration = time.time() - self.job.manifest.get("blocked_at", 0)
-        if hold_duration > (self.MAX_HOLD_TIME_HOURS * 3600):
+        if not self.job.manifest.error or not self.job.manifest.error.timestamp_utc:
+            return False
+
+        dt_error = datetime.fromisoformat(self.job.manifest.error.timestamp_utc)
+        if dt_error.tzinfo is None:
+            dt_error = dt_error.replace(tzinfo=UTC)
+        hold_duration = datetime.now(UTC) - dt_error
+        if hold_duration.total_seconds() > (self.MAX_HOLD_TIME_HOURS * 3600):
             LOG.error("Job expired in HOLD, moving to FAILED", job_id=self.job.id)
             self.job.update_manifest({"job_status": JobStatus.EXPIRED})
             self.job.move_to_folder("FAILED")  # Self-escalation
@@ -66,7 +70,7 @@ class HoldState(LifecycleState):
 
         # Check Service Registry (Autonomous Pattern)
         # We assume the config tells us which service this job depends on
-        target_service = self.job.context.target_service
+        target_service = self.job.context.extract.source_identifier
         return bool(ServiceRegistry.get_status(target_service) != "OPEN")
 
 
@@ -115,7 +119,8 @@ class SuccessState(LifecycleState):
                     item.unlink()
 
             # 2. Finalize the manifest status for logs/history before deletion
-            # (If you want to keep a record, move the manifest to an archive folder here)
+            # (If you want to keep a record, move the manifest to an
+            # archive folder here)
             self.job.update_manifest(
                 {
                     "job_status": JobStatus.SUCCESS.value,

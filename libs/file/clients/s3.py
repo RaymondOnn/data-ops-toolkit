@@ -23,7 +23,9 @@ class S3Client(FileSystemClient):
         - default_fill_cache (bool): Set to False to prevent 2GB RAM spikes.
     """
 
-    def __init__(self, url: str, storage_options: Optional[dict[str, Any]] = None) -> None:
+    def __init__(
+        self, url: str, storage_options: Optional[dict[str, Any]] = None
+    ) -> None:
         super().__init__(url, storage_options)
         self.fs = self.connect()
 
@@ -57,7 +59,9 @@ class S3Client(FileSystemClient):
         """
         bucket = self.fs.Bucket(self.bucket_name)
         # Find all objects in the partition/folder
-        objects_to_delete = [{"Key": obj.key} for obj in bucket.objects.filter(Prefix=path)]
+        objects_to_delete = [
+            {"Key": obj.key} for obj in bucket.objects.filter(Prefix=path)
+        ]
 
         # S3 limits delete batches to 1000 items
         for i in range(0, len(objects_to_delete), 1000):

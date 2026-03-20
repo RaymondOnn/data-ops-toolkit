@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import msgspec
 from src.services.base import Service
@@ -13,11 +13,13 @@ class ReaderContext(msgspec.Struct):
     """
 
     source_type: str
-    target_table: Optional[str] = None  # Used by DatabaseIngest
-    source_path: Optional[str] = None  # Used by FileIngest
+    source_identifier: str | None = None  # Used by FileIngest
     num_partitions: int = 10
+    run_id: str | None = None
+    run_date: str | None = None
+    job_id: str | None = None
     # For any source-specific extras (e.g., API keys, custom filters)
-    options: Dict[str, Any] = {}
+    options: dict[str, Any] = {}
     schema_items: list[dict[str, Any]] = []
 
     # mode: Literal["single_shot", "partitioned"]
@@ -29,11 +31,5 @@ class Reader(ABC):
     @abstractmethod
     def fetch(
         self, service: Service, context: ReaderContext, target_folder: Path
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         raise NotImplementedError("Subclasses must implement this method")
-
-
-class FileIngest(Reader):
-    def get_units(self, service: Service, context: ReaderContext) -> list[str]:
-        # context.source_path provides the directory or bucket to scan
-        return service.list_files(context.source_path)

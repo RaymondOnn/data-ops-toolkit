@@ -1,10 +1,11 @@
-from typing import Callable
+from collections.abc import Callable
+from typing import ClassVar
 
-from src.core.ingest.base import Reader
+from src.core.strategies.extract import Reader
 
 
 class ReaderFactory:
-    _STRATEGIES: dict[str, type[Reader]] = {}
+    _STRATEGIES: ClassVar[dict[str, type[Reader]]] = {}
 
     @classmethod
     def register(cls, source_type: str) -> Callable[[type[Reader]], type[Reader]]:

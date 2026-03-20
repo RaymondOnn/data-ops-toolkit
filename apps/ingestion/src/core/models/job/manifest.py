@@ -1,107 +1,116 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import msgspec
 import structlog
 from msgspec import field, json
-
-
-from src.core.models.job import JobStatus
+from src.core.models.job.status import JobStatus
 
 LOG = structlog.getLogger(__name__)
 
 
-class ErrorPayload(msgspec.Struct):  # type: ignore
+class ErrorPayload(msgspec.Struct):
     step: str
     error_type: str
     message: str
-    traceback: Optional[str] = None
-    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    traceback: str | None = None
+    timestamp_utc: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
-class BasePayload(msgspec.Struct):  # type: ignore
-    step_outcome: str
+class BasePayload(msgspec.Struct, kw_only=True):
     commit_hash: str = ""
     source_params: dict[str, Any] = {}
     worker_id: str = ""
-    start_timestamp: str = ""
+    start_timestamp_utc: str = field(
+        default_factory=lambda: datetime.now(UTC).isoformat()
+    )
 
     def save(self, folder_path: Path) -> None:
         """Saves the current state to the standardized manifest file."""
         path = folder_path / "manifest.json"
-        with open(path, "wb") as f:
+        with path.open("wb") as f:
             f.write(json.encode(self))
 
     @classmethod
     def load(cls, folder_path: Path, stage_type: type) -> Any:
         """Loads the manifest and decodes it into a specific Stage type."""
         path = folder_path / "manifest.json"
-        with open(path, "rb") as f:
+        with path.open("rb") as f:
             return json.decode(f.read(), type=stage_type)
 
 
 # TODO: Zero Byte Check
-class RawPayload(BasePayload):
-    step_outcome: str
+class ExtractPayload(BasePayload, kw_only=True):
     file_count: int  # Number of files detected
     files: list[str] = []  # List of file paths, include checksum per file
     artifact_folder: Path
-    raw_row_count: int  # Number of rows detected
+    source_row_count: int  # Number of rows detected
     schema_signature: dict[str, str] = {}  # Column names and types
+    end_timestamp_utc: str = field(
+        default_factory=lambda: datetime.now(UTC).isoformat()
+    )
 
 
-class TransformPayload(BasePayload):
-    step_outcome: str
+class TransformPayload(BasePayload, kw_only=True):
     logic_version: str
+    transform_type: str
     output_row_count: int  # Number of rows detected
     schema_validation_pass: bool = False  # True if schema matches the expected schema
     refined_schema: dict[str, str] = {}  # Column names and types
     artifact_folder: Path | str
-    processing_duration_secs: int
+    start_timestamp_utc: str
+    end_timestamp_utc: str = field(
+        default_factory=lambda: datetime.now(UTC).isoformat()
+    )
 
 
-class WritePayload(BasePayload):
-    step_outcome: str
-    target_identifier: str
+class WritePayload(BasePayload, kw_only=True):
     staging_artifact: str
     sink_type: str
-    rows_staged: int
+    rows_inserted: int
     partition_col: str
     partition_value: str
-    sink_connection_id: int
-    load_duration_secs: float
+    sink_identifier: str
+    start_timestamp_utc: str
+    end_timestamp_utc: str = field(
+        default_factory=lambda: datetime.now(UTC).isoformat()
+    )
 
 
-class AuditPayload(BasePayload):
-    step_outcome: str
+class AuditPayload(BasePayload, kw_only=True):
     validation_passed: bool
     total_checks_run: int
     failed_checks: dict[str, Any] = {}
     external_app_status: str
-    audit_duration_ms: int
+    start_timestamp_utc: str
+    end_timestamp_utc: str = field(
+        default_factory=lambda: datetime.now(UTC).isoformat()
+    )
 
 
-class PublishPayload(BasePayload):
-    step_outcome: str
+class PublishPayload(BasePayload, kw_only=True):
     final_destination: str
     final_count: int
-    published_at_utc: str  # When it was published. ISO format
     is_idempotent_cleanup_run: bool = False
+    start_timestamp_utc: str
+    end_timestamp_utc: str = field(
+        default_factory=lambda: datetime.now(UTC).isoformat()
+    )
 
 
-class CompletePayload(BasePayload):
-    final_status: str
-    end_timestamp: str  # Final ISO-8601 timestamp
-    total_duration_secs: float  # Wall-clock time from Raw to Complete
-
+class CompletePayload(BasePayload, kw_only=True):
     # Governance & Privacy
     cleanup_verified: bool  # Confirmation that staging/temp data is purged
     archival_path: str | None  # Path to backup, or None if privacy-restricted
     retention_expiry: str | None  # Date when this log/archive can be deleted
+    start_timestamp_utc: str
+    end_timestamp_utc: str = field(
+        default_factory=lambda: datetime.now(UTC).isoformat()
+    )
 
 
-class JobManifest(msgspec.Struct):  # type: ignore
+class JobManifest(msgspec.Struct, kw_only=True):
     # Top-level Metadata (The "Header")
     job_id: str
     run_id: str
@@ -109,23 +118,24 @@ class JobManifest(msgspec.Struct):  # type: ignore
     job_status: JobStatus = JobStatus.PENDING
     current_step: str
     bitmask: int
+    retry_count: int = 0
 
     # Step-Specific Data (The "Body")
-    start: Optional[BasePayload] = None
-    raw: Optional[RawPayload] = None
-    transform: Optional[TransformPayload] = None
-    write: Optional[WritePayload] = None
-    audit: Optional[AuditPayload] = None
-    publish: Optional[PublishPayload] = None
-    complete: Optional[CompletePayload] = None
+    start: BasePayload | None = None
+    extract: ExtractPayload | None = None
+    transform: TransformPayload | None = None
+    write: WritePayload | None = None
+    audit: AuditPayload | None = None
+    publish: PublishPayload | None = None
+    complete: CompletePayload | None = None
 
     # The "Black Box" Recorder
-    error: Optional[ErrorPayload] = None
+    error: ErrorPayload | None = None
 
 
 __sll__ = [
     # BasePayload,
-    RawPayload,
+    ExtractPayload,
     TransformPayload,
     WritePayload,
     AuditPayload,

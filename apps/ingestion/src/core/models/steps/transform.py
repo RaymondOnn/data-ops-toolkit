@@ -1,23 +1,24 @@
-import time
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
-import polars as pl  # type: ignore
-import structlog  # type: ignore
-from src.core.models.job import Job
+import polars as pl
+import structlog
+import msgspec
 from src.core.models.job.manifest import TransformPayload
-from src.core.models.steps import JobBitmask, JobStep
-from src.utils.constants import JOB_STEPS_BASE_DIR
+from src.core.models.steps import JobStep
+from src.core.strategies.transform.transform import TransformFactory
 
 from libs.file.formats.parquet import ParquetHandler
+
+if TYPE_CHECKING:
+    from src.core.models.job import Job
+
 
 LOG = structlog.getLogger(__name__)
 
 
-class TransformStep(JobStep):  # type: ignore
+class TransformStep(JobStep):
     manifest: TransformPayload
-
-    @property
-    def bitmask(self) -> str:
-        return str(JobBitmask.TRANSFORM)
 
     @property
     def name(self) -> str:
@@ -26,21 +27,18 @@ class TransformStep(JobStep):  # type: ignore
     def execute(self, job: "Job") -> str:
         """
         Decision: Use LazyFrame Streaming for 50M rows.
-        By reading from the 'active/raw' symlink, we ensure we are
+        By reading from the 'active/extract' symlink, we ensure we are
         always processing the latest sanitized data without needing
         to know the specific physical timestamped folder.
         """
-        from src.core.strategies.transform.transform import TransformFactory
-
-        start_time = time.perf_counter()
-
+        start_ts = datetime.now(UTC).isoformat()
         try:
             with ParquetHandler() as handler:
                 # 1. Initialize the LazyFrame (Logical Plan)
                 # Decision: Use the 'active' symlink path.
                 # Polars scans the metadata of all part_*.parquet files instantly.
-                raw_path = (job.folder / "raw" / "part_*.parquet").resolve()
-                lf = handler.to_df(raw_path)
+                extract_path = (job.folder / "extract" / "part_*.parquet").resolve()
+                lf = handler.to_df(extract_path)
 
                 # 2. Apply Business Logic (Transformers)
                 # These add to the 'Plan' but do not execute yet.
@@ -52,7 +50,10 @@ class TransformStep(JobStep):  # type: ignore
                 # Decision: Use sink_parquet via our handler's execution-aware logic.
                 # This triggers the Polars Rust engine to stream chunks through the plan.
                 data_store = (
-                    JOB_STEPS_BASE_DIR / "data" / self.name / f"{job.id}_{int(time.time())}"
+                    job.exec_ctx.workspace_dir
+                    / "data"
+                    / self.name
+                    / f"{job.id}_{int(time.time())}"
                 )
                 data_store.mkdir(parents=True, exist_ok=True)
 
@@ -68,28 +69,25 @@ class TransformStep(JobStep):  # type: ignore
                 pl.scan_parquet(str(data_store / "*.parquet"))
                 .select(
                     count=pl.len(),
-                    schema=pl.map_batches(lambda _: str(getattr(tr_lf, "schema"))),
+                    schema=pl.map_batches(lambda _: str(tr_lf.schema)),
                 )
                 .collect()  # This is safe because it's only 1 row of metadata
             )
 
-            # 6. Build the RefinedMetadata
-            duration_ms = int((time.perf_counter() - start_time) * 1000)
-
             payload = TransformPayload(
-                step_outcome="COMPLETED",
                 logic_version=getattr(transformer, "version", "1.0.0"),
+                transform_type=job.context.transform.transform_type,
                 artifact_folder=str(data_store),
-                output_record_count=stats["count"][0],
-                schema_validation_passed=True,  # Strategy could add validation logic
-                refined_schema=stats["schema"][0],
-                processing_duration_secs=duration_ms,
+                output_row_count=int(stats["count"][0]),
+                schema_validation_pass=True,
+                refined_schema={k: str(v) for k, v in tr_lf.schema.items()},
+                start_timestamp_utc=start_ts,
             )
 
             # 4. Finalize & Flip the Link
             # Decision: Create active/{job_id}/transform -> ../../data/transform/{dir}
             # This makes the transformed data available for the WriteStep.
-            self.finalize(job=job, data_folder=data_store, results=payload)
+            self.finalize(job, results=msgspec.to_builtins(payload))
             return str(self._transit(job))
 
         except Exception as e:

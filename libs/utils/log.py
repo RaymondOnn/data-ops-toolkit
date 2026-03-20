@@ -23,13 +23,17 @@ def setup_logging(log_dir="logs", is_prod=False):
             structlog.processors.TimeStamper(fmt="iso"),
             # In Dev, ConsoleRenderer makes the Console pretty,
             # while JSON goes to the file if configured.
-            structlog.dev.ConsoleRenderer() if not is_prod else structlog.processors.JSONRenderer(),
+            structlog.dev.ConsoleRenderer()
+            if not is_prod
+            else structlog.processors.JSONRenderer(),
         ],
         logger_factory=structlog.stdlib.LoggerFactory(),
         wrapper_class=structlog.stdlib.BoundLogger,
     )
 
     root = logging.getLogger()
-    root.setLevel(logging.DEBUG)  # Root must be DEBUG to allow file_handler to see everything
+    root.setLevel(
+        logging.DEBUG
+    )  # Root must be DEBUG to allow file_handler to see everything
     root.addHandler(file_handler)
     root.addHandler(console_handler)

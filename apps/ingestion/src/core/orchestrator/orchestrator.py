@@ -6,12 +6,23 @@ from typing import Any
 
 import msgspec
 import structlog
+from nanoid import generate
+from src.core.contexts import JobContextBuilder
 from src.core.models.job import Job, JobStatus
 from src.core.models.steps import JobSteps
-from src.services.database import DatabaseService
-from src.utils.constants import ALWAYS_ON_MODE, JOB_STEPS_BASE_DIR
+from src.core.orchestrator.engine import IngestionEngine
+from src.core.orchestrator.lifecycle import LifecycleManager
+from src.core.orchestrator.signals import SignalProcessor
+from src.core.orchestrator.state import StateStore
+from src.core.orchestrator.trigger import (
+    FileTriggerEvent,
+    TimeTriggerEvent,
+    TriggerEvent,
+)
+from src.services.factory import ServiceFactory
+from src.utils.common import find_path
+from src.utils.constants import ALWAYS_ON_MODE
 
-from src.core.contexts.builder import JobContextBuilder
 from libs.resilience.heartbeat import Heartbeat
 
 LOG = structlog.getLogger(__name__)
@@ -21,15 +32,13 @@ MISFIRE_GRACE_PERIOD_SECS = 3600
 
 def generate_run_id() -> str:
     """Generates a unique run ID for a job."""
-    from nanoid import generate
-
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     short_hash = generate(alphabet="0123456789abcdef", size=6)
     return f"{timestamp}-{short_hash}"
 
 
 # TODO: Check Disk Space
-# - 85%+: Mark system DEGRADED, disable Raw stage
+# - 85%+: Mark system DEGRADED, disable Extract stage
 # - 90%+: Mark system CRITICAL, alert on-call
 # - Load stage continues to clear backlog)
 
@@ -40,19 +49,21 @@ def generate_run_id() -> str:
 
 
 class Orchestrator:
-    def __init__(self, db_service: DatabaseService, builder: Any):
-        from src.core.orchestrator.engine import IngestionEngine
-        from src.core.orchestrator.lifecycle import LifecycleManager
-        from src.core.orchestrator.signals import SignalProcessor
-        from src.core.orchestrator.state import StateStore
-
-        self.builder: JobContextBuilder = builder
+    def __init__(self, builder: JobContextBuilder):
+        self.builder = builder
+        self.exec_ctx = builder.get_execution_context()
 
         self.heartbeat = Heartbeat()
-        self.engine = IngestionEngine()
+        self.engine = IngestionEngine(self.exec_ctx)
 
         if ALWAYS_ON_MODE:
-            self.state_store = StateStore(db_service)
+            # Service Discovery: Use the resolved app settings from the builder
+            service_name = "clickhouse_db"
+            db_config = self.builder.app_settings.get("services", {}).get(
+                service_name, {}
+            )
+            self.db_service = ServiceFactory.get_service(service_name, **db_config)
+            self.state_store = StateStore(self.db_service, self.exec_ctx)
             # State timers
             self.timers = {
                 "heartbeat": float(0),
@@ -64,13 +75,21 @@ class Orchestrator:
             }
 
             # Component Injection
-            self.signals = SignalProcessor(self.state_store, self.engine)
-            self.lifecycle = LifecycleManager(self.state_store, self.engine)
+            self.signals = SignalProcessor(self.state_store, self.engine, self.exec_ctx)
+            self.lifecycle = LifecycleManager(
+                self.state_store, self.engine, self.exec_ctx
+            )
 
             # 2. Wire the Signals to the Handlers (The Refactor Fix)
-            self.signals.register_command("RECOVER_ALL.cmd", self.lifecycle.handle_recovery)
-            self.signals.register_command("PURGE_EXPIRED.cmd", self.lifecycle.handle_expiry)
-            self.signals.register_command("RELOAD_CONFIG.cmd", self._reload_internal_config)
+            self.signals.register_command(
+                "RECOVER_ALL.cmd", self.lifecycle.handle_recovery
+            )
+            self.signals.register_command(
+                "PURGE_EXPIRED.cmd", self.lifecycle.handle_expiry
+            )
+            self.signals.register_command(
+                "RELOAD_CONFIG.cmd", self._reload_internal_config
+            )
 
         LOG.info("Orchestrator initialized", mode=self.mode)
 
@@ -191,13 +210,12 @@ class Orchestrator:
         A job is finished if no associated runs are in an 'Active' state.
         """
         # 1. Physical Workspace Check (The primary breadcrumb)
-        active_path = JOB_STEPS_BASE_DIR / "active"
-
-        if active_path.exists():
-            return False
+        active_path = self.exec_ctx.active_path
+        return bool(find_path(active_path, job_id))
 
         # 2. Logical State Check via StateStore Mirror
-        # We look for any run associated with this job_id that is still in an 'Active' state
+        # We look for any run associated with this job_id that is still in
+        # an 'Active' state
         active_runs = [
             run
             for run in self.state_store._mirror.values()
@@ -221,11 +239,6 @@ class Orchestrator:
         """
 
         def provision_run(record: dict[str, Any]) -> None:
-            from src.core.orchestrator.trigger import (
-                FileTriggerEvent,
-                TimeTriggerEvent,
-                TriggerEvent,
-            )
 
             # Map of trigger types to their logic classes
             trigger_map: dict[str, TriggerEvent] = {
@@ -263,24 +276,30 @@ class Orchestrator:
                 # A: If grace_sec is -1, it's a "Manual Resume" or "Force Run"
                 # Policy -1 means 'run no matter how late we are'
                 if MISFIRE_GRACE_PERIOD_SECS == -1:
-                    LOG.info(f"[FORCE_RUN]: Job {record['job_id']} is {delay}s late. Policy: -1")
+                    LOG.info(
+                        f"[FORCE_RUN]: Job {record['job_id']} is {delay}s late. "
+                        f"Policy: -1"
+                    )
                     provision_run(record)
                     continue
 
                 # B: If delay is within the grace period (delay < grace_sec)
                 if delay <= MISFIRE_GRACE_PERIOD_SECS:
                     LOG.info(
-                        f"[CATCH_UP]]: Job {record['job_id']} within grace ({delay}s < {grace_sec}s)"
+                        f"[CATCH_UP]]: Job {record['job_id']} within "
+                        f"grace ({delay}s < {grace_sec}s)"
                     )
                     provision_run(record)
                     continue
 
                 # C: If delay is beyond the grace period
                 if delay > MISFIRE_GRACE_PERIOD_SECS:
-                    LOG.warning(
-                        f"[EXPIRED]: Job {record['job_id']} delayed by {delay}s. Policy: {grace_sec}s"
+                    LOG.warninging(
+                        f"[EXPIRED]: Job {record['job_id']} delayed by {delay}s. "
+                        f"Policy: {grace_sec}s"
                     )
-                    # We tell the StateStore to update the next run time without executing
+                    # We tell the StateStore to update the next run time
+                    # without executing
                     self.state_store.skip_misfired_run(record["job_id"])
                     continue
 
@@ -341,18 +360,19 @@ class Orchestrator:
 
             # C. Create the Folder Structure (Composite Key + Run ID)
             # Path: storage/active/
-            active_root = Path(JOB_STEPS_BASE_DIR) / "active"
+            active_root = self.exec_ctx.active_path
             active_root.mkdir(parents=True, exist_ok=True)
 
             # D. Write the Overlay File (The persistent audit trail)
             if active_dataset_overrides:
                 # We save this as overrides.json inside the specific run folder
-                with open(active_root / f"{prefix}_overrides.json", "wb") as f:
+                overrides_path = active_root / f"{prefix}_overrides.json"
+                with overrides_path.open("wb") as f:
                     f.write(msgspec.json.encode(active_dataset_overrides))
 
             # E. Freeze the Job Context (The instructions for the workers)
             config_path = active_root / f"{prefix}_config.json"
-            with open(config_path, "wb") as f:
+            with config_path.open("wb") as f:
                 f.write(msgspec.json.encode(job_ctx))
 
             # 4. Queue to Engine (Immediate move to DiskCache)
@@ -366,7 +386,9 @@ class Orchestrator:
             self.state_store.update_status(job_id, JobStatus.QUEUED)
             self.timers["job_trigger"] = time.time()
 
-    def _terminate_job(self, job: Job, status: JobStatus, reason: str | None = None) -> None:
+    def _terminate_job(
+        self, job: Job, status: JobStatus, reason: str | None = None
+    ) -> None:
         """
         Controlled Crash Handler.
         Uses the Job's internal status updater to ensure consistency.
@@ -391,7 +413,7 @@ class Orchestrator:
 
         # 3. Cleanup logic (Optional: move to failed or delete)
         if status == JobStatus.EXPIRED:
-            self.lifecycle._cleanup_workspace(job.id)
+            self.lifecycle._cleanup_workspace(job.run_id)
 
 
 def create_orchestrator(app_cfg_path: str | None = None) -> Orchestrator:
@@ -399,14 +421,8 @@ def create_orchestrator(app_cfg_path: str | None = None) -> Orchestrator:
     Bootstrap helper to initialize the Orchestrator with its dependencies.
     Resolves configuration first to properly initialize services.
     """
-    from src.services.factory import ServiceFactory
-
     # 1. Initialize Builder (loads global app.yaml)
     builder = JobContextBuilder(app_cfg_path=app_cfg_path)
 
-    # 2. Initialize Database Service using resolved config
-    db_config = builder.app_settings.get("services", {}).get("database", {})
-    db_service = ServiceFactory.get_service("db", **db_config)
-
-    # 3. Return fully wired Orchestrator
-    return Orchestrator(db_service=db_service, builder=builder)
+    # 2. Return fully wired Orchestrator (It will resolve its own services)
+    return Orchestrator(builder=builder)

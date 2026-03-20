@@ -1,4 +1,3 @@
-from enum import StrEnum
 from typing import Any, Literal
 
 import msgspec
@@ -6,13 +5,6 @@ import structlog
 from src.core.models.steps import JobSteps
 
 LOG = structlog.getLogger(__name__)
-
-
-class ExecutionMode(StrEnum):
-    NORMAL = "normal"
-    DEBUG = "debug"
-    TEST = "test"
-    DRYRUN = "dry_run"
 
 
 class ExtractConfig(msgspec.Struct):
@@ -40,10 +32,10 @@ class LoadConfig(msgspec.Struct):
 
     sink_type: str  # e.g. "clickhouse", "snowflake"
     sink_identifier: str  # target table name or path
+    partition_col: str
+    partition_value: str
     sink_config: dict[str, Any] = {}
     load_params: dict[str, Any] = {}
-    partition_col: str | None = None
-    partition_value: str | None = None
 
 
 class ArchiveConfig(msgspec.Struct):
@@ -72,7 +64,7 @@ class JobContext(msgspec.Struct):
     output_path: str
 
     # Runtime Details
-    execution_mode: ExecutionMode
+
     from_step: str = JobSteps.first_step().label
     to_step: str = JobSteps.last_step().label
 
@@ -82,12 +74,3 @@ class JobContext(msgspec.Struct):
     expires_at: float | None = None
     custom_overrides: dict[str, Any] = {}
     extras: dict[str, Any] = {}
-
-    def is_debug(self) -> bool:
-        return self.execution_mode == ExecutionMode.DEBUG
-
-    def is_test(self) -> bool:
-        return self.execution_mode == ExecutionMode.TEST
-
-    def is_normal(self) -> bool:
-        return self.execution_mode == ExecutionMode.NORMAL

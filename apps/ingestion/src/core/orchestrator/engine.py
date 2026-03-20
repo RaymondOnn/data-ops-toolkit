@@ -7,13 +7,13 @@ import msgspec
 import ray
 import structlog
 from filelock import FileLock
-
+from src.core.contexts import ExecutionContext
 from src.core.models.job import Job, JobManifest
 from src.core.models.steps import _JOB_ORDER
 from src.services.registry import ServiceRegistry
-from src.utils.constants import JOB_STEPS_BASE_DIR, DISKCACHE_FILE_PATH
 from src.utils.common import find_path
-
+from src.utils.constants import DISKCACHE_FILE_PATH
+from src.utils.dates import epoch_to_iso, get_end_of_day_ts
 
 LOG = structlog.getLogger(__name__)
 LOCK_FILE = "/tmp/orchestrator.lock"
@@ -22,8 +22,9 @@ CACHE_DIR = ".cache/ingestion"
 
 @ray.remote
 class Worker:
-    def __init__(self, worker_id: str):
+    def __init__(self, worker_id: str, exec_ctx: ExecutionContext):
         self.worker_id = worker_id
+        self.exec_ctx = exec_ctx
         self.cache = diskcache.Cache(
             DISKCACHE_FILE_PATH,
             timeout=10,  # Increase timeout for slow PV file locks (NFS/EFS)
@@ -46,6 +47,7 @@ class Worker:
             run_id=meta["run_id"],
             run_date=meta["run_date"],
             worker_id=self.worker_id,
+            exec_ctx=self.exec_ctx,
             target_step=current_step,
         )
         self.is_busy = True
@@ -85,7 +87,8 @@ class Worker:
 
 
 class IngestionEngine:
-    def __init__(self, cache_dir: str = ".cache/ingestion"):
+    def __init__(self, exec_ctx: ExecutionContext, cache_dir: str = ".cache/ingestion"):
+        self.exec_ctx = exec_ctx
         # 2. Initialize the Global Registry (Diskcache)
         # This ensures the shared cache path exists for all Ray workers
         self.registry = ServiceRegistry()
@@ -99,15 +102,20 @@ class IngestionEngine:
         # Configuration for stage limits
         self.stage_limits: dict[str, dict[str, Any]] = {
             "start": {"limit": 5, "pool": "io"},
-            "raw": {"limit": 10, "pool": "io"},
+            "extract": {"limit": 10, "pool": "io"},
             "transform": {"limit": 4, "pool": "cpu"},  # CPU-Heavy
             "audit": {"limit": 4, "pool": "io"},
             "load": {"limit": 1, "pool": "io"},  # Sequential
         }
 
         # Initialize specialized pools
-        self.io_pool: list[ray.actor.ActorHandle] = [Worker.remote(f"io_{i}") for i in range(15)]
-        self.cpu_pool: list[ray.actor.ActorHandle] = [Worker.remote(f"cpu_{i}") for i in range(4)]
+        workspace = self.exec_ctx.workspace_dir
+        self.io_pool: list[ray.actor.ActorHandle] = [
+            Worker.remote(f"io_{i}", workspace) for i in range(15)
+        ]
+        self.cpu_pool: list[ray.actor.ActorHandle] = [
+            Worker.remote(f"cpu_{i}", workspace) for i in range(4)
+        ]
 
     def run(self) -> None:
         """Main loop managing multiple jobs."""
@@ -125,14 +133,13 @@ class IngestionEngine:
         current_step: str | None = None,
     ) -> None:
         """Checks config, creates jobs if not in cache, and submits them."""
-        from src.utils.dates import epoch_to_iso, get_end_of_day_ts
-
         # Always start in the 'start' queue
         current_step = current_step or "start"
         queue_key = f"{current_step}:{composite_key}"
         job_id, table = composite_key.split(":", 1)
 
-        # Logic to determine if this is a snapshot (e.g., based on job naming convention)
+        # Logic to determine if this is a snapshot (e.g., based on
+        # job naming convention)
         is_snapshot = "snapshot" in job_id.lower()
         expires_at = get_end_of_day_ts() if is_snapshot else None
 
@@ -167,7 +174,7 @@ class IngestionEngine:
             for key in self.cache.iterkeys():
                 if ":" not in key:
                     continue
-                step, composite_key = key.split(":", 1)
+                step, _ = key.split(":", 1)
                 job_meta = self.cache[key]
 
                 if job_meta["status"] == "PENDING":
@@ -178,7 +185,11 @@ class IngestionEngine:
 
                     # 2. Select the correct Worker Pool
                     # 3. Find a free Ray worker
-                    pool = self.cpu_pool if limits["pool"] == "cpu" else self.io_pool
+                    pool = (
+                        self.cpu_pool
+                        if self.stage_limits[step]["pool"] == "cpu"
+                        else self.io_pool
+                    )
                     if worker := self._get_idle_worker_from_pool(pool):
                         job_meta["status"] = "SUBMITTED"
                         job_meta["last_hb"] = time.time()
@@ -192,15 +203,17 @@ class IngestionEngine:
 
     def _get_current_occupancy(self) -> dict[str, int]:
         """Counts how many workers are active in each stage."""
-        counts = {k: 0 for k in self.stage_limits.keys()}
+        counts = dict.fromkeys(self.stage_limits, 0)
         for key in self.cache.iterkeys():
             if ":" in key:
                 step = key.split(":")[0]
                 if self.cache[key]["status"] == "RUNNING":
-                    counts[step] = counts.get(step, 0) + 1
+                    counts[step] += 1
         return counts
 
-    def _get_idle_worker_from_pool(self, pool: list[ray.actor.ActorHandle]) -> Any | None:
+    def _get_idle_worker_from_pool(
+        self, pool: list[ray.actor.ActorHandle]
+    ) -> Any | None:
         for w in pool:
             if ray.get(w.is_idle.remote()):
                 return w
@@ -217,11 +230,13 @@ class IngestionEngine:
                 step, composite_key = key.split(":", 1)
                 meta = self.cache[key]
 
-                if meta.get("status") == "RUNNING":
-                    # Check if heartbeat is older than 5 minutes
-                    if time.time() - meta.get("last_hb", 0) > 300:
-                        LOG.warn("Zombie job detected", key=key)
-                        self._recover_job(step, composite_key)
+                # Check if heartbeat is older than 5 minutes
+                if (
+                    meta.get("status") == "RUNNING"
+                    and time.time() - meta.get("last_hb", 0) > 300
+                ):
+                    LOG.warning("Zombie job detected", key=key)
+                    self._recover_job(step, composite_key)
 
     def _recover_job(self, step_name: str, composite_key: str) -> None:
         """
@@ -264,15 +279,16 @@ class IngestionEngine:
             job_meta["last_hb"] = time.time()
             self.cache[key] = job_meta
 
-    def _check_step_completion_on_disk(self, job_id: str, run_id: str, step_name: str) -> bool:
+    def _check_step_completion_on_disk(
+        self, job_id: str, run_id: str, step_name: str
+    ) -> bool:
         """
         Checks if the 'active' symlink for this step exists.
         This is the definitive proof of success in our new structure.
         """
         # Find active path
         # Logic: active/{job_id}:{dataset_id}_{run_date}/run_id/step_name
-        # Example: active/job_123:dataset_456_2022-01-01/run_12345/transform
-        active_root = JOB_STEPS_BASE_DIR / "active"
+        active_root = self.exec_ctx.active_path
 
         active_path = find_path(active_root, run_id)
         active_path = active_path / step_name
@@ -305,9 +321,8 @@ class IngestionEngine:
         Instead of searching 5+ folders, we read the one 'active' manifest.
         This is O(1) instead of O(N).
         """
-        from src.utils.common import find_path
 
-        active_root = JOB_STEPS_BASE_DIR / "active"
+        active_root = self.exec_ctx.active_path
         active_path = find_path(active_root, run_id)
         manifest_path = active_path / "manifest.json"
 
@@ -315,7 +330,7 @@ class IngestionEngine:
             LOG.info("No active manifest found, starting fresh.", job_id=job_id)
             return str(_JOB_ORDER[0])  # Usually 'start'
 
-        with open(manifest_path, "rb") as f:
+        with manifest_path.open("rb") as f:
             # msgspec is fast enough to do this in the main recovery loop
             meta = msgspec.json.decode(f.read(), type=JobManifest)
 
@@ -329,9 +344,8 @@ class IngestionEngine:
     def get_latest_manifest(self, job_id: str, run_id: str) -> JobManifest:
         """
         Decision: Direct Access.
-        Finds the evolving manifest for the job in its active workspace.
         """
-        active_root = JOB_STEPS_BASE_DIR / "active"
+        active_root = self.exec_ctx.active_path
         active_path = find_path(active_root, run_id)
         manifest_path = active_path / "manifest.json"
 
@@ -339,6 +353,6 @@ class IngestionEngine:
             # During recovery, if a job exists in DB but not on disk, it's a 'Ghost'
             raise FileNotFoundError(f"Active workspace missing for {job_id}")
 
-        with open(manifest_path, "rb") as f:
+        with manifest_path.open("rb") as f:
             # Structural validation included via msgspec
             return msgspec.json.decode(f.read(), type=JobManifest)

@@ -20,7 +20,9 @@ class AzureClient(FileSystemClient):
         - connection_string (str): Full Azure connection string
     """
 
-    def __init__(self, url: str, storage_options: Optional[dict[str, Any]] = None) -> None:
+    def __init__(
+        self, url: str, storage_options: Optional[dict[str, Any]] = None
+    ) -> None:
         super().__init__(url, storage_options)
         self.fs = self.connect()
 

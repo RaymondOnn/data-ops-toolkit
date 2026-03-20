@@ -1,23 +1,28 @@
+import hashlib
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import msgspec
 import polars as pl
 import structlog
-from src.core.models.job import Job
-from src.core.models.job.manifest import RawPayload
-from src.core.models.steps import JobBitmask, JobStep
+from src.core.models.job.manifest import ExtractPayload
+from src.core.models.steps import JobStep
+from src.core.strategies.extract import Reader, ReaderContext, ReaderFactory
 from src.services.factory import ServiceFactory
-from src.utils.constants import JOB_STEPS_BASE_DIR
 from src.utils.exceptions import JobBlocked
 
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreakerTripped
 
+if TYPE_CHECKING:
+    from src.core.models.job import Job
+
+
 LOG = structlog.getLogger(__name__)
 
 
-class FileInfo(msgspec.Struct):  # type: ignore
+class FileInfo(msgspec.Struct):
     """
     Metadata for an individual physical file artifact.
     """
@@ -28,43 +33,58 @@ class FileInfo(msgspec.Struct):  # type: ignore
     size_bytes: int  # Physical file size on disk
 
 
-class RawStep(JobStep):  # type: ignore
-    manifest: RawPayload
-
-    @property
-    def bitmask(self) -> str:
-        return str(JobBitmask.RAW)
+class ExtractStep(JobStep):
+    manifest: ExtractPayload
 
     @property
     def name(self) -> str:
-        return "raw"
+        return "extract"
 
     def execute(self, job: "Job") -> str:
-        from src.core.strategies.ingest.factory import ReaderFactory
-        from src.core.strategies.ingest.ingest import Reader, ReaderContext
 
         job_ctx = job.context
 
         try:
             # 1. Prepare Reader Context
             # This object is serialized and sent to Ray workers.
-            # We include the schema_items from the manifest so workers are 'Contract-Aware'
+            # We include the schema_items from the manifest so workers
+            # are 'Contract-Aware'
+
+            # Resolve partition_date in filter_sql
+            options = job_ctx.extract.source_params.copy()
+            if "filter_sql" in options:
+                # Suggestion: {partition_date} replaces {run_date}
+                options["filter_sql"] = options["filter_sql"].replace(
+                    "{partition_date}", job_ctx.run_date
+                )
+
             ctx = ReaderContext(
-                source_type=job_ctx.source_type,
-                target_table=job_ctx.target_table,
-                num_partitions=job_ctx.num_partitions or 10,
-                schema_items=job_ctx.schema_items,
+                source_type=job_ctx.extract.source_type,
+                source_identifier=job_ctx.extract.source_identifier,
+                num_partitions=job_ctx.extract.num_partitions or 10,
+                schema_items=job_ctx.extract.schema_items,
+                run_id=job.run_id,
+                run_date=job_ctx.run_date,
+                job_id=job.id,
+                options=options,
             )
 
             # 2. Extract & Guard (The Ray Orchestration)
             # Decision: DataReader.fetch uses the functional apply_schema_contract
             # inside the Ray workers to prevent double-handling.
-            service = ServiceFactory.get_service(job_ctx.source_type, **job_ctx.source_config)
+            service = ServiceFactory.get_service(
+                job_ctx.extract.source_identifier, **job_ctx.extract.source_config
+            )
             reader: Reader = ReaderFactory.get_reader(ctx.source_type)
-            LOG.info(f"Executing raw ingestion using strategy: {ctx.source_type}")
+            LOG.info(f"Executing ingestion using strategy: {ctx.source_type}")
 
             # 3. We create a temporary physical folder in 'data'
-            data_store = JOB_STEPS_BASE_DIR / "data" / self.name / f"{job.id}_{int(time.time())}"
+            data_store = (
+                job.exec_ctx.workspace_dir
+                / "data"
+                / self.name
+                / f"{job.id}_{int(time.time())}"
+            )
             data_store.mkdir(parents=True, exist_ok=True)
 
             # 4. Execute the Ingestion
@@ -111,18 +131,18 @@ class RawStep(JobStep):  # type: ignore
             final_schema_dict = self._merge_schemas(all_schemas)
 
             # 6. Create Payload and Finalize
-            # We map the strategy output to our RawPayload schema
-            payload = RawPayload(
-                step_outcome="COMPLETED",
+            # We map the strategy output to our ExtractPayload schema
+            payload = ExtractPayload(
                 artifact_folder=data_store,  # ?: Point to virtual or physical folder
                 file_count=len(file_infos),
                 files=file_infos,
-                raw_row_count=total_rows,
+                source_row_count=total_rows,
                 # Grab schema from the last file processed
                 schema_signature={k: str(v) for k, v in final_schema_dict.items()},
             )
 
             self.finalize(job, results=msgspec.to_builtins(payload))
+            LOG.info("Reader completed", file_count=len(file_infos))
 
             # 4. State Transition
             return str(self._transit(job))
@@ -133,7 +153,7 @@ class RawStep(JobStep):  # type: ignore
             LOG.error("Halt by circuit breaker.", error=str(cb))
             raise
         except Exception as e:
-            LOG.error(f"Raw ingestion failed: {e}")
+            LOG.error(f"Extract Step failed: {e}")
             self.finalize(job, exception=e)
             raise
 
@@ -142,17 +162,15 @@ class RawStep(JobStep):  # type: ignore
         Calculate the MD5 checksum of a file.
         Important to ensure data integrity and can be used for deduplication
         """
-        import hashlib
-
         hash_md5 = hashlib.md5()
-        with open(path, "rb") as f:
+        with path.open("rb") as f:
             for chunk in iter(lambda: f.read(4096), b""):
                 hash_md5.update(chunk)
         return hash_md5.hexdigest()
 
     def _merge_schemas(self, schemas: list[dict[str, str]]) -> dict[str, str]:
         """
-        Unions all schemas found in the raw files to create a
+        Unions all schemas found in the source files to create a
         master schema for the Transform step.
         """
         merged = {}

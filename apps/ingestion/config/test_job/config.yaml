@@ -1,21 +1,25 @@
+job:
+  name: "test_job"
+  raw:
+    num_partitions: 1
+  archive:
+    enable_archival: true
+    service_ref: "standard_archive"
+
 datasets:
   orders:
-    source_type: "local"
-    source_params:
-      account_id: "local_storage"
-      url: "file:///Users/main/Documents/Code/Github/data-ops-toolkit/apps/ingestion"
-    source_path: "samples/sample_orders.csv"
-    load_mode: "snapshot"
-    target_destination: "orders"
     num_partitions: 1
-    sink_type: "clickhouse"
-    sink_config:
-      account_id: "local_clickhouse"
-      host: "localhost"
-      port: 8123
-      username: "default"
-      password: "password"
-      database: "default"
-    destination_type: "clickhouse"
-    partition_col: "updated_at"
+    extract:
+      load_mode: "snapshot"
+      service_ref: "flat_file"
+      source_identifier: "samples/sample_orders.csv"
+      source_params:
+        url: "file:///Users/main/Documents/Code/Github/data-ops-toolkit/apps/ingestion"
+    load:
+      service_ref: "clickhouse_db"
+      sink_identifier: "orders"
     partition_value: "2023-10-27"
+    archive:
+    enable_archival: true
+
+# issue: we assign partition_value for snapshot but filter based on partition value for delta

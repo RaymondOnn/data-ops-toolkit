@@ -1,5 +1,6 @@
 import time
-from datetime import datetime, time as dt_time, timedelta
+from datetime import datetime, timedelta
+from datetime import time as dt_time
 
 
 def get_end_of_day_ts() -> float:
@@ -7,7 +8,7 @@ def get_end_of_day_ts() -> float:
     Returns the Unix timestamp for 23:59:59 of the current day.
     Used to set the 'expires_at' value for snapshot jobs.
     """
-    now = datetime.now()
+    now = datetime.now().astimezone()
     # Combine today's date with the last possible second of the day
     eod = datetime.combine(now.date(), dt_time(23, 59, 59))
     return eod.timestamp()

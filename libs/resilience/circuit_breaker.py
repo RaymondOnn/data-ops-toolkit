@@ -70,7 +70,10 @@ class CircuitBreaker:
         self.failures += 1
 
         # In HALF_OPEN, a single failure trips it immediately
-        if self.state == CircuitBreakerState.HALF_OPEN or self.failures >= self.failure_threshold:
+        if (
+            self.state == CircuitBreakerState.HALF_OPEN
+            or self.failures >= self.failure_threshold
+        ):
             self.state = CircuitBreakerState.OPEN
             self.last_failure_time = time.time()
             # print(f"Circuit Breaker TRIPPED due to: {exception}")

@@ -1,9 +1,10 @@
-from typing import TYPE_CHECKING, Any, Generator, Sequence
+from collections.abc import Generator, Sequence
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
-from libs.clients.database.base import DBClient
 from libs.clients.base import ClientCantConnect
+from libs.clients.database.base import DBClient
 
 if TYPE_CHECKING:
     from adbc_driver_postgresql.dbapi import Connection
@@ -25,7 +26,7 @@ class PostgresClient(DBClient):
                 self._connection = adbc_pg.connect(self.uri)
                 self._ping(self._connection)
             except Exception as e:
-                raise ClientCantConnect(str(e))
+                raise ClientCantConnect("Failed to connect to Postgres") from e
         return self._connection
 
     def _ping(self, conn: "Connection") -> None:
@@ -33,12 +34,19 @@ class PostgresClient(DBClient):
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
 
-    def get_load_strategy(self, table_name: str, num_partitions: int = 10) -> list[str]:
+    def get_load_strategy(
+        self,
+        table_name: str,
+        num_partitions: int = 10,
+        filter_sql: str | None = None,
+    ) -> list[str]:
         # Physical partitioning using Postgres hidden ctid column
+        filter_sql = filter_sql.replace("WHERE", "") if filter_sql else ""
         return [
             f"""
             SELECT * FROM {table_name} 
-            WHERE abs(hashint4(ctid::text::hashint4)) % {num_partitions} = {i}
+            WHERE {filter_sql} 
+            AND abs(hashint4(ctid::text::hashint4)) % {num_partitions} = {i}
             """
             for i in range(num_partitions)
         ]

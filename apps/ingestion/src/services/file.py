@@ -1,15 +1,17 @@
 import time
-from typing import Any
-
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from src.services.base import Service
 from src.services.factory import ServiceFactory
 from src.services.registry import protect_service
 
-from libs.auth.models import Secret
+from libs.clients.base import ClientCantConnect
 from libs.file import FileSystemClient, FileSystemSkills
 from libs.resilience.circuit_breaker import CircuitBreaker
-from libs.clients.base import ClientCantConnect
+
+if TYPE_CHECKING:
+    from libs.auth.models import Secret
 
 breaker = CircuitBreaker(
     failure_threshold=3,
@@ -68,7 +70,7 @@ class StorageService(Service):
         return [{"files": files[i::num_partitions]} for i in range(num_partitions)]
 
     @protect_service(breaker)
-    def stage_data(self, source_dir: str, target_table: str) -> str:
+    def stage_data(self, source_dir: Path, target_table: str) -> str:
         """
         Phase 1: Organize Parquet files into a staging directory.
         Returns the path to the staged folder.
@@ -82,9 +84,13 @@ class StorageService(Service):
 
         return staging_path
 
-    @protect_service(breaker)  # type: ignore
+    @protect_service(breaker)
     def promote_data(
-        self, staging_table: str, target_table: str, partition_col: str, partition_val: str
+        self,
+        staging_table: str,
+        target_table: str,
+        partition_col: str,
+        partition_val: str,
     ) -> None:
         """
         Phase 2: Idempotent swap for File Systems.
@@ -105,7 +111,7 @@ class StorageService(Service):
 # --- Role 1: Reading Flat Files (Landing Zone) ---
 @ServiceFactory.register("flat_file")
 class FlatFileService(StorageService):
-    """Specifically for reading raw data from landing zones."""
+    """Specifically for reading source data from landing zones."""
 
     def __init__(self, name: str, **config: Any) -> None:
         super().__init__(
@@ -143,7 +149,9 @@ class CASArchive(StorageService):
             name=name,
             url=config.get("url", "s3://cas-vault"),
             capabilities=[FileSystemSkills.CAS],
-            storage_options=config.get("storage_options", {"s3_storage_class": "GLACIER"}),
+            storage_options=config.get(
+                "storage_options", {"s3_storage_class": "GLACIER"}
+            ),
             account_id=account_id,
             **config,
         )

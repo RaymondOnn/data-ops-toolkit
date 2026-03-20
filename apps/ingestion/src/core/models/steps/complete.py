@@ -1,23 +1,19 @@
 import shutil
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
+import msgspec
 import structlog
-
 from src.core.models.job import Job
 from src.core.models.job.manifest import CompletePayload
-from src.core.models.steps import JobBitmask, JobStep
+from src.core.models.steps import JobStep
 from src.services.factory import ServiceFactory
 from src.services.file import StorageService
 
 LOG = structlog.getLogger(__name__)
 
 
-class CompleteStep(JobStep):  # type: ignore
+class CompleteStep(JobStep):
     manifest: CompletePayload
-
-    @property
-    def bitmask(self) -> str:
-        return str(JobBitmask.COMPLETE)
 
     @property
     def name(self) -> str:
@@ -29,53 +25,48 @@ class CompleteStep(JobStep):  # type: ignore
         We preserve the audit trail and the output data in long-term storage
         while reclaiming high-speed local disk space.
         """
-        from src.services.factory import ServiceFactory
-        from src.services.file import StorageService
 
         job_ctx = job.context
+        start_ts = datetime.now(UTC).isoformat()
 
         # 1. Initialize Storage Service for Archival
         # We retrieve the 'archive' service defined in the job configuration
         object_store: StorageService = ServiceFactory.get_service(
-            type=job_ctx.archive_type,  # e.g., "s3" or "local"
-            **job_ctx.archive_config,
+            type=job_ctx.archive.type,  # e.g., "s3" or "local"
+            **job_ctx.archive.config,
         )
 
         try:
             # 2. OPTIONAL ARCHIVAL
             # Subject to privacy requirements defined in job_config
             final_archive_path = None
-            if job_ctx.enable_archival:
+            if job_ctx.archive.enabled:
                 # 1. Archive Parquet Files
                 # We move data from the high-speed 'data/' vault to the 'archive/' vault.
-                # This includes both the Raw (Sanitized) and Transform results.
+                # This includes both the Extract (Sanitized) and Transform results.
                 self._archive_parquet_data(object_store, job)
 
             # 3. CLEANUP VERIFICATION
-            # Force removal of all intermediate data (Raw & Transform folders)
+            # Force removal of all intermediate data (Extract & Transform folders)
             local_run_root = job.folder.parent
-            for folder in ["raw", "transform"]:
+            for folder in ["extract", "transform"]:
                 target = local_run_root / folder
                 if target.exists():
                     shutil.rmtree(target)
 
             # 4. Calculate Timestamps and Duration
-            end_ts = datetime.now()
-            if job.manifest.start and job.manifest.start.timestamp:
-                start_ts = datetime.fromisoformat(job.manifest.start.timestamp)
-                duration_secs = (end_ts - start_ts).total_seconds()
+            end_ts = datetime.now(UTC)
 
             # 5. FINALIZE CANONICAL PAYLOAD
             payload = CompletePayload(
-                execution_outcome="SUCCESS",
-                end_timestamp=end_ts.isoformat(),
-                total_duration_secs=round(duration_secs, 2),
+                start_timestamp_utc=start_ts,
+                end_timestamp_utc=end_ts.isoformat(),
                 cleanup_verified=True,
-                archival_path=final_archive_path,
+                archival_path=str(final_archive_path) if final_archive_path else None,
                 retention_expiry=self._calculate_expiry(job, end_ts),
             )
-
-            self.finalize(job, results=payload)
+            results = msgspec.to_builtins(payload)
+            self.finalize(job, results=results)
 
             # 2. Store Manifest in Database (Current Execution Table)
             # Decision: By moving manifest data to SQL, we allow the BI team to
@@ -98,16 +89,18 @@ class CompleteStep(JobStep):  # type: ignore
         Decision: Move files to the Archive location defined in the Context.
         Standardizing on: archive/{job_id}/{run_id}/{step}/
         """
-        archive_root = f"{job.context.archive_base_path}/{job.id}/{job.run_id}"
+        archive_root = f"{job.context.archive.base_path}/{job.id}/{job.run_id}"
 
         # We loop through the steps we want to keep
-        for step in ["raw", "transform"]:
+        for step in ["extract", "transform"]:
             # Follow the active symlink to find the physical data
             src_folder = job.folder.resolve() / step
             if src_folder.exists():
                 dest_folder = f"{archive_root}/{step}"
                 # target_archive.mkdir(parents=True, exist_ok=True)
-                object_store.archive_data(source_dir=src_folder, archive_path=dest_folder)
+                object_store.archive_data(
+                    source_dir=src_folder, archive_path=dest_folder
+                )
 
     def _calculate_expiry(self, job: "Job", end_timestamp: datetime) -> str:
         # e.g., standard 7-year retention or 30-day GDPR limit

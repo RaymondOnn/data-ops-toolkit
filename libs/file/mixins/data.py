@@ -28,7 +28,7 @@ class FlatFileMixin:
             return False
 
         if size > 5 * 1024**3:
-            LOG.warning(f"Very large file (>5GB): {target}. Forcing streaming mode.")
+            LOG.warninging(f"Very large file (>5GB): {target}. Forcing streaming mode.")
 
         return True
 
@@ -66,7 +66,9 @@ class FlatFileMixin:
 
             # 4. Delegate to Handler (Handles Streaming vs Repair internally)
             # Note: 50M row safety happens inside handler.to_df()
-            lf = handler.to_df(target, encoding=encoding, force_repair=force_repair, **kwargs)
+            lf = handler.to_df(
+                target, encoding=encoding, force_repair=force_repair, **kwargs
+            )
             lfs.append(lf)
 
         # 5. Final Consolidation
@@ -97,7 +99,13 @@ class FlatFileMixin:
         import fnmatch
 
         full_path = self.resolve_path(path)
-        archive_map = {".zip": "zip", ".tar": "tar", ".tar.gz": "tar", ".tgz": "tar", ".gz": "gzip"}
+        archive_map = {
+            ".zip": "zip",
+            ".tar": "tar",
+            ".tar.gz": "tar",
+            ".tgz": "tar",
+            ".gz": "gzip",
+        }
         ext = next((e for e in archive_map if full_path.lower().endswith(e)), None)
 
         if ext:
@@ -162,7 +170,9 @@ class FlatFileMixin:
             full_content = sample + raw_stream.read()
             return io.BytesIO(full_content), encoding
 
-    def get_load_strategy(self, path: str, file_pattern: str | None = None) -> list[list[str]]:
+    def get_load_strategy(
+        self, path: str, file_pattern: str | None = None
+    ) -> list[list[str]]:
         """
         Splits a folder/archive into 1GB chunks so each Ray worker/batch
         stays safely under the 2GB limit.

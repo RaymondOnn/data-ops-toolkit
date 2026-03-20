@@ -1,16 +1,16 @@
 import functools
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any, ClassVar
 
 import diskcache
 import structlog
-
-
 from src.utils.constants import DISKCACHE_FILE_PATH
+
 from libs.resilience.circuit_breaker import (
     CircuitBreaker,
-    CircuitBreakerTripped,
     CircuitBreakerState,
+    CircuitBreakerTripped,
 )
 
 LOG = structlog.getLogger(__name__)
@@ -20,11 +20,8 @@ class ServiceRegistry:
     _cache: diskcache.Cache = diskcache.Cache(
         DISKCACHE_FILE_PATH,
         timeout=10,  # Increase timeout for slow PV file locks (NFS/EFS)
-        settings={
-            "sqlite_journal_mode": "wal"
-        },  # Ensure WAL mode is active for concurrent reads/writes
     )
-    _local_failures: dict[str, int] = {}  # In-memory buffer for THIS Pod
+    _local_failures: ClassVar[dict[str, int]] = {}  # In-memory buffer for THIS Pod
 
     @classmethod
     def get_status(cls, name: str) -> str:
@@ -90,7 +87,9 @@ class ServiceRegistry:
             cls._cache.set(f"status:{name}", "CLOSED")
 
 
-def protect_service(breaker: CircuitBreaker) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+def protect_service(
+    breaker: CircuitBreaker,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """
     Enhanced decorator that uses the CircuitBreaker logic
     backed by the global ServiceRegistry.
@@ -136,7 +135,9 @@ def protect_service(breaker: CircuitBreaker) -> Callable[[Callable[..., Any]], C
             except CircuitBreakerTripped:
                 # If your class updated to HALF_OPEN, sync it back to registry
                 if breaker.state == CircuitBreakerState.HALF_OPEN:
-                    ServiceRegistry.update_status(service_name, CircuitBreakerState.HALF_OPEN)
+                    ServiceRegistry.update_status(
+                        service_name, CircuitBreakerState.HALF_OPEN
+                    )
                 raise
 
             try:

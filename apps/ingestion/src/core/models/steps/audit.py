@@ -1,3 +1,9 @@
+import time
+from typing import TYPE_CHECKING
+
+
+
+
 class AuditStep(JobStep):
     manifest: AuditPayload
 
@@ -5,7 +11,9 @@ class AuditStep(JobStep):
         start_time = time.perf_counter()
 
         try:
-            write_meta: AuditPayload = manifest.write  # Access staging info from WriteStep
+            write_meta: AuditPayload = (
+                manifest.write
+            )  # Access staging info from WriteStep
 
             # 1. Internal Heuristic Checks (The 'Stand-in' Logic)
             # While the external app is missing, we check basic things:
@@ -39,7 +47,6 @@ class AuditStep(JobStep):
             duration_ms = int((time.perf_counter() - start_time) * 1000)
 
             payload = AuditPayload(
-                step_outcome="COMPLETED",
                 validation_passed=internal_results["passed"],
                 total_checks_run=len(internal_results["checks"]),
                 failed_checks=internal_results["failures"],
@@ -51,7 +58,9 @@ class AuditStep(JobStep):
 
             # If validation fails, we stop the pipeline here!
             if not payload.validation_passed:
-                raise ValueError(f"Audit failed for Job {job.id}. See manifest for details.")
+                raise ValueError(
+                    f"Audit failed for Job {job.id}. See manifest for details."
+                )
 
             return self._transit(job)
 
@@ -59,7 +68,9 @@ class AuditStep(JobStep):
             self.finalize(job, exception=e)
             raise
 
-    def _run_internal_checks(self, job: "Job", write_meta: AuditPayload) -> dict[str, Any]:
+    def _run_internal_checks(
+        self, job: "Job", write_meta: AuditPayload
+    ) -> dict[str, Any]:
         """Simple baseline checks while the real app is under construction."""
         # Example: Check if rows_affected is 0
         checks = []

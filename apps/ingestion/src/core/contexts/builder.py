@@ -2,11 +2,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import structlog
 import msgspec
+import structlog
 from dynaconf import Dynaconf
-
-from src.core.contexts.job import JobContext, ExecutionMode
+from src.core.contexts.execution import ExecutionContext, ExecutionMode
+from src.core.contexts.job import JobContext
 from src.utils.constants import APP_CURRENT_ENV
 
 LOG = structlog.get_logger()
@@ -19,7 +19,8 @@ def parse_set_options(settings: list[str] | None) -> dict[str, Any]:
 
     The parser supports two levels of specificity:
     1. Global Overrides: Applied to all datasets (e.g., '--set batch_size=5000')
-    2. Scoped Overrides: Applied ONLY to a specific dataset (e.g., '--set sales:batch_size=1000')
+    2. Scoped Overrides: Applied ONLY to a specific dataset
+        (e.g., '--set sales:batch_size=1000')
 
     Syntax:
         - Global: [key]=[value]
@@ -98,6 +99,16 @@ class JobContextBuilder:
         fmt = date_val.strftime(spec.get("format", "%Y-%m-%d"))
         return f"'{fmt}'" if spec.get("wrap_quotes") else fmt
 
+    def get_execution_context(
+        self, mode: ExecutionMode = ExecutionMode.NORMAL
+    ) -> ExecutionContext:
+        """Resolves the global app settings into a typed context."""
+        workspace = Path(
+            self.app_settings.get("workspace_dir", "~/.ingestion/data/")
+        ).expanduser()
+
+        return ExecutionContext(workspace_dir=workspace, execution_mode=mode)
+
     def build_job_contexts(
         self,
         job_id: str,
@@ -167,7 +178,9 @@ class JobContextBuilder:
                 "load": {
                     "sink_type": ds_cfg.get("sink_type", settings.get("sink.type")),
                     "sink_identifier": ds_cfg.get("target_destination"),
-                    "sink_config": ds_cfg.get("sink_config", settings.get("sink.config", {})),
+                    "sink_config": ds_cfg.get(
+                        "sink_config", settings.get("sink.config", {})
+                    ),
                     "partition_col": ds_cfg.get("partition_col"),
                     "partition_value": ds_cfg.get("partition_value") or actual_val,
                 },
@@ -175,7 +188,9 @@ class JobContextBuilder:
                     "enabled": archive_conf.get("enable_archival", True),
                     "type": service_details.get("type", "standard_archive"),
                     "config": service_details,
-                    "base_path": archive_conf.get("base_path", "/mnt/archive/ingestion"),
+                    "base_path": archive_conf.get(
+                        "base_path", "/mnt/archive/ingestion"
+                    ),
                 },
             }
 

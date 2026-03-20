@@ -1,22 +1,22 @@
 import os
 import socket
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import msgspec
 import structlog
-from src.core.models.job import Job
 from src.core.models.job.manifest import BasePayload
-from src.core.models.steps import JobBitmask, JobStep
+from src.core.models.steps import JobStep
+
+if TYPE_CHECKING:
+    from src.core.models.job import Job
+
 
 LOG = structlog.getLogger(__name__)
 
 
-class StartStep(JobStep):  # type: ignore
+class StartStep(JobStep):
     manifest: BasePayload
-
-    @property
-    def bitmask(self) -> str:
-        return str(JobBitmask.START.value)
 
     @property
     def name(self) -> str:
@@ -24,19 +24,18 @@ class StartStep(JobStep):  # type: ignore
 
     def execute(self, job: "Job") -> str:
         # persist job-start metadata using engine helper
+        start_timestamp = datetime.now(UTC).isoformat()
         try:
             # 3. Gather System Metadata
-            start_timestamp = datetime.now().isoformat()
             commit_hash = self._get_commit_hash()  # Use the helper above
             worker_id = f"{socket.gethostname()}-{os.getpid()}"
 
             # 4. Create Payload
             payload = BasePayload(
-                step_outcome="COMPLETED",
                 commit_hash=commit_hash,
                 source_params={},
                 worker_id=job.worker_id,
-                start_timestamp=start_timestamp,
+                start_timestamp_utc=start_timestamp,
             )
             ctx = msgspec.structs.asdict(payload)
 

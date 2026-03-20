@@ -30,7 +30,9 @@ class CSVHandler(FormatHandler):
         # Performance: Use scan_csv for files > 2GB to avoid OOM
         if size > 2 * 1024**3 and not kwargs.get("force_repair"):
             return pl.scan_csv(
-                target, storage_options=self.opts, encoding=kwargs.get("encoding", "utf-8")
+                target,
+                storage_options=self.opts,
+                encoding=kwargs.get("encoding", "utf-8"),
             )
 
         buffer = self.read_mem(target, **kwargs)

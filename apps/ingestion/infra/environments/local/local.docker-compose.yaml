@@ -1,0 +1,41 @@
+version: '3'
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: clickhouse-dev
+    environment:
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=password
+    volumes:
+      - ./tmp:/var/lib/clickhouse/user_files/tmp
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # S3 replacement
+  # garage:
+  #   image: dxflrs/garage:v1.1.0 # Use a specific version for stability
+  #   container_name: garage
+  #   restart: unless-stopped
+  #   ports:
+  #     - "3900:3900" # S3 API
+  #     - "3901:3901" # RPC (for cluster communication)
+  #     - "3902:3902" # S3 Web (optional)
+  #     - "3903:3903" # Admin API
+  #   volumes:
+  #     - ./garage.toml:/etc/garage.toml:ro
+  #     - ./garage-meta:/var/lib/garage/meta
+  #     - ./garage-data:/var/lib/garage/data
+  #   environment:
+  #     - RUST_LOG=garage=info

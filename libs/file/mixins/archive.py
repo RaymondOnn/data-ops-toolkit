@@ -49,16 +49,24 @@ class StandardArchiveMixin:
             return dest_path
 
     def restore_from_archive(
-        self, job_id: str, dataset_name: str, logical_date: datetime, category: str = "source"
+        self,
+        job_id: str,
+        dataset_name: str,
+        logical_date: datetime,
+        category: str = "source",
     ) -> str:
         """
         Retrieves the specific table's archived file for re-processing.
         """
         date_path = logical_date.strftime("%Y/%m/%d")
-        search_dir = f"{self.url}/archive/{job_id}/{dataset_name}/{date_path}/{category}"
+        search_dir = (
+            f"{self.url}/archive/{job_id}/{dataset_name}/{date_path}/{category}"
+        )
 
         if not self.fs.exists(search_dir):
-            raise FileNotFoundError(f"No archive: {job_id}/{dataset_name} on {date_path}")
+            raise FileNotFoundError(
+                f"No archive: {job_id}/{dataset_name} on {date_path}"
+            )
 
         files = self.fs.ls(search_dir)
         if not files:

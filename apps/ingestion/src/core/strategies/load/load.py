@@ -1,24 +1,21 @@
-from typing import TYPE_CHECKING, TypeAlias
 from pathlib import Path
+from typing import TypeAlias
 
-from msgspec import Struct  # type: ignore
-import structlog  # type: ignore
-
+import structlog
+from msgspec import Struct
 from src.services.database import DatabaseService
 from src.services.file import StorageService
 
 LOG = structlog.getLogger(__name__)
 
-if TYPE_CHECKING:
-    from src.services.database import Service
 
 Sink: TypeAlias = DatabaseService | StorageService
 
 
 class WriteContext(Struct):
-    target_destination: str  # Table name or S3 Prefix
-    partition_col: str | None = None
-    partition_value: str | None = None
+    sink_identifier: str  # Table name or S3 Prefix
+    partition_col: str
+    partition_value: str
 
 
 class StagingResult(Struct):
@@ -34,7 +31,9 @@ class Loader:
     logic for both Staging and Promotion.
     """
 
-    def load(self, service: Sink, source_dir: Path | str, target_table: str) -> StagingResult:
+    def load(
+        self, service: Sink, source_dir: Path, target_table: str
+    ) -> StagingResult:
         """
         Phase 1: Moves data from Silver (Parquet) to a temporary 'Staging' area.
         Returns metadata about the staged data (rows, temp_path/temp_table).
@@ -43,19 +42,21 @@ class Loader:
         temp_table = service.stage_data(source_dir, target_table)
         return StagingResult(staging_table=temp_table)
 
-    def promote(self, service: Sink, staging_info: StagingResult, write_ctx: WriteContext) -> None:
+    def promote(
+        self, service: Sink, staging_identifier: str, write_ctx: WriteContext
+    ) -> None:
         """
         Phase 2: Moves data from 'Staging' to the 'Production' destination.
         This is where 'Atomic Swaps' or 'Merges' happen.
         """
-        staging_table = staging_info.staging_table or staging_info.staging_path
-
         LOG.info(
-            "promotion_started", from_table=staging_table, to_table=write_ctx.target_destination
+            "promotion_started",
+            from_table=staging_identifier,
+            to_table=write_ctx.sink_identifier,
         )
         service.promote_data(
-            staging_table=staging_table,
-            target_table=write_ctx.target_destination,
+            staging_table=staging_identifier,
+            target_table=write_ctx.sink_identifier,
             partition_col=write_ctx.partition_col,
             partition_val=write_ctx.partition_value,
         )
