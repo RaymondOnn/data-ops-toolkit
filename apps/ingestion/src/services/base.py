@@ -13,7 +13,34 @@ class Service(ABC):
         self.name = name
         self.config = config
 
+
+class SourceMixin(ABC):
     @abstractmethod
-    def get_work_units(self, target: str, num_partitions: int) -> list[str]:
+    def get_work_units(self, target: str, num_partitions: int) -> list[Any]:
         """How this service splits 50M rows into chunks."""
+        pass
+
+
+class SinkMixin(ABC):
+    @abstractmethod
+    def stage_data(self, source_dir: Any, target_table: str) -> tuple[str, int]:
+        """Phase 1: Returns the name of the temporary staging table/folder and rows loaded."""
+        pass
+
+    @abstractmethod
+    def promote_data(
+        self,
+        staging_table: str,
+        target_table: str,
+        partition_col: str,
+        partition_val: str,
+    ) -> None:
+        """Phase 2: Moves data to production (Swap/Merge/Append)."""
+        pass
+
+
+class ArchiveMixin(ABC):
+    @abstractmethod
+    def archive_data(self, source_dir: Any, archive_path: str) -> None:
+        """Archive data to a persistent destination."""
         pass

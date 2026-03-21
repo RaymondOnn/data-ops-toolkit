@@ -10,7 +10,7 @@ from src.core.contexts.job import JobContext
 from src.utils.constants import APP_CURRENT_ENV
 
 LOG = structlog.get_logger()
-APP_DEFAULT_CONFIG = "apps/ingestion/config/app.yaml"
+APP_DEFAULT_CONFIG = "./config/example/app.yaml"
 
 
 def parse_set_options(settings: list[str] | None) -> dict[str, Any]:
@@ -109,6 +109,16 @@ class JobContextBuilder:
 
         return ExecutionContext(workspace_dir=workspace, execution_mode=mode)
 
+    def _resolve_service(self, settings: Dynaconf, ref_key: str) -> dict:
+        """
+        Resolves a service_ref string to its full config dict from services.*.
+        Falls back to the inline config block if no ref is given.
+        """
+        ref = settings.get(f"{ref_key}.service_ref")
+        if ref:
+            return dict(settings.get(f"services.{ref}", {}))
+        return dict(settings.get(f"{ref_key}.config", {}))
+    
     def build_job_contexts(
         self,
         job_id: str,
@@ -160,34 +170,33 @@ class JobContextBuilder:
                 "run_date": actual_val,
                 "execution_mode": ExecutionMode.NORMAL,
                 "output_path": f"storage/active/{job_id}",
-                "extraction": {
+                "extract": {
                     "source_type": settings.get("source.type"),
                     "source_identifier": ds_cfg.get("source_path"),
                     "num_partitions": ds_cfg.get(
                         "num_partitions", settings.get("num_partitions", 10)
                     ),
                     "load_mode": ds_cfg.get("load_mode", "snapshot"),
-                    "source_config": settings.get("source.config", {}),
+                    "source_config": self._resolve_service(settings, "source"),
                     "source_params": {"filter_sql": resolved_sql},
                     "schema_items": ds_cfg.get("schema_items", []),
                 },
                 "transform": {
-                    "script": ds_cfg.get("transform_script"),
-                    "params": ds_cfg.get("transform_params", {}),
+                    "transform_type": ds_cfg.get("transform_type"),
+                    "transform_params": ds_cfg.get("transform_params", {}),
                 },
                 "load": {
                     "sink_type": ds_cfg.get("sink_type", settings.get("sink.type")),
                     "sink_identifier": ds_cfg.get("target_destination"),
-                    "sink_config": ds_cfg.get(
-                        "sink_config", settings.get("sink.config", {})
-                    ),
+                    "sink_config": self._resolve_service(settings, "sink"),
                     "partition_col": ds_cfg.get("partition_col"),
                     "partition_value": ds_cfg.get("partition_value") or actual_val,
+                    "load_params": ds_cfg.get("load_params", {}),
                 },
                 "archival": {
                     "enabled": archive_conf.get("enable_archival", True),
-                    "type": service_details.get("type", "standard_archive"),
-                    "config": service_details,
+                    "archive_type": service_details.get("type", "standard_archive"),
+                    "archive_config": self._resolve_service(settings, "archive"),
                     "base_path": archive_conf.get(
                         "base_path", "/mnt/archive/ingestion"
                     ),

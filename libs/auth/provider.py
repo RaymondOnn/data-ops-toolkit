@@ -1,6 +1,7 @@
 import os
 from abc import ABC, abstractmethod
 
+import boto3
 from cryptography.fernet import Fernet
 
 
@@ -21,7 +22,6 @@ class AWSSecretProvider(SecretProvider):
     """For Production: Fetches from AWS Secrets Manager."""
 
     def __init__(self, region: str = "us-east-1") -> None:
-        import boto3
 
         self.client = boto3.client("secretsmanager", region_name=region)
 

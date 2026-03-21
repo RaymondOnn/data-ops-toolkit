@@ -31,7 +31,7 @@ class WriteStep(JobStep):
             source_dir = (job.folder / "transform").resolve()
 
             # 1. Get the Service (Securely initialized on Ray worker via ServiceFactory)
-            service = ServiceFactory.get_service(
+            service = ServiceFactory.get_sink(
                 job_ctx.load.sink_type, **job_ctx.load.sink_config
             )
 

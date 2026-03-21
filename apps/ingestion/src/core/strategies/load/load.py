@@ -1,15 +1,10 @@
 from pathlib import Path
-from typing import TypeAlias
 
 import structlog
 from msgspec import Struct
-from src.services.database import DatabaseService
-from src.services.file import StorageService
+from src.services.base import SinkMixin
 
 LOG = structlog.getLogger(__name__)
-
-
-Sink: TypeAlias = DatabaseService | StorageService
 
 
 class WriteContext(Struct):
@@ -31,7 +26,9 @@ class Loader:
     logic for both Staging and Promotion.
     """
 
-    def load(self, service: Sink, source_dir: Path, target_table: str) -> tuple[str, int]:
+    def load(
+        self, service: SinkMixin, source_dir: Path, target_table: str
+    ) -> tuple[str, int]:
         """
         Phase 1: Moves data from Silver (Parquet) to a temporary 'Staging' area.
         Returns metadata about the staged data (staging_artifact, rows_loaded).
@@ -40,7 +37,7 @@ class Loader:
         return service.stage_data(source_dir, target_table)
 
     def promote(
-        self, service: Sink, staging_identifier: str, write_ctx: WriteContext
+        self, service: SinkMixin, staging_identifier: str, write_ctx: WriteContext
     ) -> None:
         """
         Phase 2: Moves data from 'Staging' to the 'Production' destination.

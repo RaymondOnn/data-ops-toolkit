@@ -222,14 +222,12 @@ class JobStep(ABC):
                 LOG.info(
                     "Job reached target state", job_id=job.id, target=job.target_step
                 )
-            
+
             # Continue the chain (The Orchestrator will pick this up in the next scan)
             if next_step:
                 LOG.info(
-                    "Job progressing to next step", 
-                    job_id=job.id, 
-                    next=next_step.label
-                    )
+                    "Job progressing to next step", job_id=job.id, next=next_step.label
+                )
 
         # 4. SYMLINK (Pointer to immutable data)
         if data_folder:
@@ -251,7 +249,7 @@ class JobStep(ABC):
         """
         Given a step name, returns the corresponding JobStep class.
 
-        Iterates through all subclasses of JobStep and checks if the name 
+        Iterates through all subclasses of JobStep and checks if the name
         attribute matches the given name.
         If no match is found, raises a ValueError.
         """

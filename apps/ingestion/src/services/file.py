@@ -2,7 +2,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from src.services.base import Service
+from src.services.base import ArchiveMixin, Service, SinkMixin, SourceMixin
 from src.services.factory import ServiceFactory
 from src.services.registry import protect_service
 
@@ -20,7 +20,7 @@ breaker = CircuitBreaker(
 )
 
 
-class StorageService(Service):
+class BaseStorageService(Service):
     """
     Registry-aware Service that manages any Filesystem.
     """
@@ -56,6 +56,8 @@ class StorageService(Service):
             url=self.url, capabilities=self.capabilities, storage_options=merged_opts
         )
 
+
+class StorageSource(BaseStorageService, SourceMixin):
     @protect_service(breaker)
     def get_work_units(self, target: str, num_partitions: int) -> list[dict[str, Any]]:
         """
@@ -69,6 +71,8 @@ class StorageService(Service):
         files = self.client.fs.glob(f"{path}/**/*")
         return [{"files": files[i::num_partitions]} for i in range(num_partitions)]
 
+
+class StorageSink(BaseStorageService, SinkMixin):
     @protect_service(breaker)
     def stage_data(self, source_dir: Path, target_table: str) -> tuple[str, int]:
         """
@@ -110,6 +114,8 @@ class StorageService(Service):
         # On S3, this is a metadata-only rename or a fast copy/delete
         self.client.move_dir(staging_table, final_path)
 
+
+class StorageArchive(BaseStorageService, ArchiveMixin):
     @protect_service(breaker)
     def archive_data(self, source_dir: Path, archive_path: str) -> None:
         """
@@ -120,7 +126,7 @@ class StorageService(Service):
 
 # --- Role 1: Reading Flat Files (Landing Zone) ---
 @ServiceFactory.register("flat_file")
-class FlatFileService(StorageService):
+class FlatFileService(StorageSource):
     """Specifically for reading source data from landing zones."""
 
     def __init__(self, name: str, **config: Any) -> None:
@@ -135,7 +141,7 @@ class FlatFileService(StorageService):
 
 # --- Role 2: Standard Archival (Moving artifacts) ---
 @ServiceFactory.register("standard_archive")
-class StandardArchiveService(StorageService):
+class StandardArchiveService(StorageArchive):
     """Standard archival for job artifacts and logs."""
 
     def __init__(self, name: str, **config: Any) -> None:
@@ -150,7 +156,7 @@ class StandardArchiveService(StorageService):
 
 # --- Role 3: CAS Archival (Immutable/Hashed storage) ---
 @ServiceFactory.register("cas_archive")
-class CASArchive(StorageService):
+class CASArchive(StorageArchive):
     """Content Addressable Storage for immutable records."""
 
     def __init__(self, name: str, account_id: str, **config: Any) -> None:
@@ -163,5 +169,20 @@ class CASArchive(StorageService):
                 "storage_options", {"s3_storage_class": "GLACIER"}
             ),
             account_id=account_id,
+            **config,
+        )
+
+
+# --- Role 4: Data Lake (Source and Sink) ---
+@ServiceFactory.register("data_lake")
+class DataLakeService(StorageSource, StorageSink):
+    """General purpose S3/Azure Blob for reading and writing."""
+
+    def __init__(self, name: str, **config: Any) -> None:
+        super().__init__(
+            name=name,
+            url=config.get("url", "s3://data-lake"),
+            capabilities=[FileSystemSkills.FILE],
+            storage_options=config.get("storage_options", {}),
             **config,
         )

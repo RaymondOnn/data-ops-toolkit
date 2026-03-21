@@ -6,7 +6,7 @@ import msgspec
 import structlog
 from src.core.contexts.execution import ExecutionContext
 from src.core.models.job import JobManifest, JobStatus
-from src.services.database import DatabaseService
+from src.services.database import BaseDatabaseService
 
 LOG = structlog.getLogger(__name__)
 CURRENT_EXECUTION_TBL = "CURRENT_EXECUTION"
@@ -14,7 +14,9 @@ CURRENT_EXECUTION_TBL = "CURRENT_EXECUTION"
 
 # TODO: Logging to Error Log? Workflow for refresh current_execution for the day
 class StateStore:
-    def __init__(self, db_service: DatabaseService, exec_ctx: ExecutionContext) -> None:
+    def __init__(
+        self, db_service: BaseDatabaseService, exec_ctx: ExecutionContext
+    ) -> None:
         self.service = db_service  # Database-specific logic here
         self.exec_ctx = exec_ctx
         self._mirror: dict[str, dict[str, Any]] = {}  # {job_id: {record_data}}

@@ -72,7 +72,7 @@ class ExtractStep(JobStep):
             # 2. Extract & Guard (The Ray Orchestration)
             # Decision: DataReader.fetch uses the functional apply_schema_contract
             # inside the Ray workers to prevent double-handling.
-            service = ServiceFactory.get_service(
+            service = ServiceFactory.get_source(
                 job_ctx.extract.source_identifier, **job_ctx.extract.source_config
             )
             reader: Reader = ReaderFactory.get_reader(ctx.source_type)

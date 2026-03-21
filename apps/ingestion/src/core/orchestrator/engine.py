@@ -26,12 +26,15 @@ class Worker:
         self.worker_id = worker_id
         self.exec_ctx = exec_ctx
         self.cache = diskcache.Cache(
-            DISKCACHE_FILE_PATH,
+            (self.exec_ctx.workspace_dir / DISKCACHE_FILE_PATH).resolve(),
             timeout=10,  # Increase timeout for slow PV file locks (NFS/EFS)
             settings={
                 "sqlite_journal_mode": "wal"
             },  # Ensure WAL mode is active for concurrent reads/writes
         )
+        # Share the same cache path with ServiceRegistry so that circuit-breaker
+        # state (written by workers) is visible to the Orchestrator's registry.
+        ServiceRegistry.configure(self.exec_ctx.workspace_dir)
         self.lock = FileLock(LOCK_FILE)
         self._busy = False
 
@@ -111,10 +114,12 @@ class IngestionEngine:
         # Initialize specialized pools
         workspace = self.exec_ctx.workspace_dir
         self.io_pool: list[ray.actor.ActorHandle] = [
-            Worker.remote(f"io_{i}", workspace) for i in range(15)  # type: ignore
+            Worker.remote(f"io_{i}", workspace) # type: ignore
+            for i in range(15)
         ]
         self.cpu_pool: list[ray.actor.ActorHandle] = [
-            Worker.remote(f"cpu_{i}", workspace) for i in range(4)  # type: ignore
+            Worker.remote(f"cpu_{i}", workspace) # type: ignore
+            for i in range(4)  
         ]
 
     def run(self) -> None:
@@ -343,7 +348,6 @@ class IngestionEngine:
                 return step
 
         return "FINISH"
-
 
     def get_latest_manifest(self, job_id: str, run_id: str) -> JobManifest:
         """

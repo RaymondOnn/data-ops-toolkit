@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import structlog
-from src.services.base import Service
+from src.services.base import Service, SinkMixin, SourceMixin
 from src.services.factory import ServiceFactory
 from src.services.registry import protect_service
 
@@ -31,7 +31,7 @@ breaker = CircuitBreaker(
 )
 
 
-class DatabaseService(Service):
+class BaseDatabaseService(Service):
     """
     Intermediate layer for all SQL-based sources.
     """
@@ -45,25 +45,49 @@ class DatabaseService(Service):
         """Subclasses must initialize their specific DB client."""
         pass
 
-    def get_work_units(
-        self, target: str, num_partitions: int, filter_sql: str | None = None
-    ) -> list[str]:
-        # All DBs use the client's load strategy (e.g., ORA_HASH, ctid)
-        return self.client.get_load_strategy(target, num_partitions, filter_sql)
-
     @protect_service(breaker)
     def sql(self, query: str) -> list[Sequence[Any]]:
         """
-        Executes a standard SQL query and returns a Polars DataFrame.
-        Used for smaller metadata queries or status checks.
+        Executes a standard SQL query and returns a list of rows.
         """
         return self.client.sql(query)
+
+    @protect_service(breaker)
+    def fetch(self, query: str) -> list[dict[str, Any]]:
+        """
+        Executes a query and expects dict-like rows.
+        """
+        if hasattr(self.client, "fetch"):
+            return self.client.fetch(query)  # type: ignore
+        return self.client.sql(query)  # type: ignore
+
+    @protect_service(breaker)
+    def execute_batch(self, query: str, data: list[dict[str, Any]]) -> None:
+        """
+        Executes a parameterized query with a batch of data.
+        """
+        if hasattr(self.client, "execute_batch"):
+            self.client.execute_batch(query, data)  # type: ignore
+        else:
+            raise NotImplementedError(
+                "Database client does not support batch execution."
+            )
 
     @protect_service(breaker)
     def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
         # Centralized protected fetch for all DB types
         return self.client.fetch_df(query)
 
+
+class DatabaseSource(BaseDatabaseService, SourceMixin):
+    def get_work_units(
+        self, target: str, num_partitions: int, filter_sql: str | None = None
+    ) -> list[str]:
+        # All DBs use the client's load strategy (e.g., ORA_HASH, ctid)
+        return self.client.get_load_strategy(target, num_partitions, filter_sql)
+
+
+class DatabaseSink(BaseDatabaseService, SinkMixin):
     @abstractmethod
     def stage_data(self, source_dir: Path, target_table: str) -> tuple[str, int]:
         """Phase 1: Returns the name of the temporary staging table and rows loaded."""
@@ -82,7 +106,7 @@ class DatabaseService(Service):
 
 
 @ServiceFactory.register("postgres_db")
-class PostgresService(DatabaseService):
+class PostgresService(DatabaseSource, DatabaseSink):
     def __init__(self, name: str, **config: Any) -> None:
         super().__init__(name, **config)
         self.client = self._init_client(**config)
@@ -120,7 +144,7 @@ class PostgresService(DatabaseService):
                     df = lf.collect()
                     if not isinstance(df, pl.DataFrame):
                         raise TypeError(f"Expected polars.DataFrame, got {type(df)}")
-                    
+
                     rows_staged = df.height
 
                     for batch_df in df.iter_slices(n_rows=100_000):
@@ -158,7 +182,7 @@ class PostgresService(DatabaseService):
 ServiceFactory.register("oracle_db")
 
 
-class OracleService(DatabaseService):
+class OracleService(DatabaseSource, DatabaseSink):
     def _init_client(self, **config: Any) -> Any:
         secret: Secret = config["password"]
         return OracleClient(
@@ -205,7 +229,8 @@ class OracleService(DatabaseService):
             DELETE FROM {target_table}
             WHERE {partition_col} = '{partition_val};
             
-            -- Performance: Use APPEND hint for direct-path insert (bypasses buffer cache)
+            -- Performance: Use APPEND hint for direct-path insert 
+            -- (bypasses buffer cache)
             INSERT /*+ APPEND */ INTO {target_table} 
             SELECT * FROM {staging_table};
             
@@ -220,7 +245,7 @@ class OracleService(DatabaseService):
 
 
 @ServiceFactory.register("clickhouse_db")
-class ClickHouseService(DatabaseService):
+class ClickHouseService(DatabaseSource, DatabaseSink):
     def _init_client(self, **config: Any) -> ClickhouseClient:
         secret: Secret = config["password"]
         return ClickhouseClient(
@@ -237,7 +262,10 @@ class ClickHouseService(DatabaseService):
 
             # ClickHouse pulls the folder directly - no Python RAM used
             path_pattern = source_dir / "*.parquet"
-            sql = f"INSERT INTO {staging_table} SELECT * FROM file('{path_pattern}', 'Parquet')"
+            sql = f"""
+                INSERT INTO {staging_table} 
+                SELECT * FROM file('{path_pattern}', 'Parquet')
+            """
 
             self.client.sql(sql)
             res = self.client.sql(f"SELECT COUNT(*) FROM {staging_table}")

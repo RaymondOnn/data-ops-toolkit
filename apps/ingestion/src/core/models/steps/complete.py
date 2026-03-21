@@ -6,8 +6,8 @@ import structlog
 from src.core.models.job import Job
 from src.core.models.job.manifest import CompletePayload
 from src.core.models.steps import JobStep
+from src.services.base import ArchiveMixin
 from src.services.factory import ServiceFactory
-from src.services.file import StorageService
 
 LOG = structlog.getLogger(__name__)
 
@@ -31,7 +31,7 @@ class CompleteStep(JobStep):
 
         # 1. Initialize Storage Service for Archival
         # We retrieve the 'archive' service defined in the job configuration
-        object_store: StorageService = ServiceFactory.get_service(
+        object_store: ArchiveMixin = ServiceFactory.get_archive(
             type=job_ctx.archive.type,  # e.g., "s3" or "local"
             **job_ctx.archive.config,
         )
@@ -84,7 +84,7 @@ class CompleteStep(JobStep):
             self.finalize(job, exception=e)
             raise
 
-    def _archive_parquet_data(self, object_store: StorageService, job: Job) -> None:
+    def _archive_parquet_data(self, object_store: ArchiveMixin, job: Job) -> None:
         """
         Decision: Move files to the Archive location defined in the Context.
         Standardizing on: archive/{job_id}/{run_id}/{step}/

@@ -1,34 +1,53 @@
-job:
-  name: "test_job"
-  raw:
-    num_partitions: 1
+# apps/ingestion/config/test_job/config.yaml
+
+# ── Job-level defaults (apply to all datasets in this job) ──────────────────
+default:
+  source:
+    type: "flat_file"
+    config:
+      url: "file:///Users/main/Documents/Code/Github/data-ops-toolkit/apps/ingestion"
+
+  sink:
+    type: "clickhouse_db"
+
+  num_partitions: 1
+
   archive:
     enable_archival: true
     service_ref: "standard_archive"
 
-datasets:
-  orders:
-    num_partitions: 1
-    extract:
-      load_mode: "snapshot"
-      service_ref: "flat_file"
-      source_identifier: "samples/sample_orders.csv"
-      source_params:
-        url: "file:///Users/main/Documents/Code/Github/data-ops-toolkit/apps/ingestion"
-    transform:
-      type: "BitmaskTransformer"
-      options:
-        column_bitmasks:
-          - "order_id": 1
-          - "customer_id": 2
-          - "order_date": 4
-          - "total_amount": 8
-          - "status": 16
-    load:
-      service_ref: "clickhouse_db"
-      sink_identifier: "orders"
-    partition_value: "2023-10-27"
-    archive:
-    enable_archival: true
+  # ── Datasets (each key = dataset_id, values override job defaults) ─────────
+  datasets:
+    orders:
+      num_partitions: 1          # overrides job-level num_partitions if different
+      extract:
+        load_mode: "snapshot"
+        source_identifier: "samples/sample_orders.csv"
+        source_params:
+          filter_sql: ""         # e.g. "WHERE order_date = {{run_date}}"
+          bind_params: {}
+      transform:
+        type: bitmask
+        options:
+          column_bitmasks:
+            order_id: 1
+            customer_id: 2
+            order_date: 4
+            total_amount: 8
+            status: 16
+      load:
+        sink_identifier: "orders"
+      partition_value: "2023-10-27"
+      archive:
+        enable_archival: true    # per-dataset archival override
 
-# issue: we assign partition_value for snapshot but filter based on partition value for delta
+# ── Local env overrides ──────────────────────────────────────────────────────
+local:
+  source:
+    config:
+      url: "file:///Users/main/Documents/Code/Github/data-ops-toolkit/apps/ingestion"
+
+# production:
+#   source:
+#     config:
+#       url: "s3://my-bucket/ingestion"

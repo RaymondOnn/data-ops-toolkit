@@ -17,37 +17,57 @@ LOG = structlog.getLogger(__name__)
 
 
 class ServiceRegistry:
-    _cache: diskcache.Cache = diskcache.Cache(
-        DISKCACHE_FILE_PATH,
-        timeout=10,  # Increase timeout for slow PV file locks (NFS/EFS)
-    )
+    _cache: ClassVar[diskcache.Cache | None] = None
     _local_failures: ClassVar[dict[str, int]] = {}  # In-memory buffer for THIS Pod
 
     @classmethod
+    def configure(cls, workspace_dir: Any) -> None:
+        """
+        Must be called once at startup (e.g., in Worker.__init__) before any
+        service calls are made. Points the shared diskcache at the correct path.
+        """
+        if cls._cache is None:
+            cache_path = (workspace_dir / DISKCACHE_FILE_PATH).resolve()
+            cls._cache = diskcache.Cache(
+                cache_path,
+                timeout=10,
+                settings={"sqlite_journal_mode": "wal"},
+            )
+
+    @classmethod
+    def _get_cache(cls) -> diskcache.Cache:
+        if cls._cache is None:
+            raise RuntimeError(
+                "ServiceRegistry has not been configured. "
+                "Call ServiceRegistry.configure(workspace_dir) before using services."
+            )
+        return cls._cache
+
+    @classmethod
     def get_status(cls, name: str) -> str:
-        return str(cls._cache.get(f"status:{name}", "CLOSED"))
+        return str(cls._get_cache().get(f"status:{name}", "CLOSED"))
 
     @classmethod
     def update_status(cls, name: str, status: str) -> None:
-        cls._cache.set(f"status:{name}", status, expire=3600)
+        cls._get_cache().set(f"status:{name}", status, expire=3600)
 
     @classmethod
     def get_last_failure_time(cls, name: str) -> float:
-        return float(cls._cache.get(f"last_fail:{name}", 0.0))
+        return float(cls._get_cache().get(f"last_fail:{name}", 0.0))
 
     @classmethod
     def set_last_failure_time(cls, name: str, timestamp: float) -> None:
-        cls._cache.set(f"last_fail:{name}", timestamp)
+        cls._get_cache().set(f"last_fail:{name}", timestamp)
 
     @classmethod
     def get_retry_attempts(cls, name: str) -> int:
         """Tracks consecutive recovery failures for exponential backoff."""
-        return int(cls._cache.get(f"retries:{name}", 0))
+        return int(cls._get_cache().get(f"retries:{name}", 0))
 
     @classmethod
     def get_failure_count(cls, name: str) -> int:
         """Retrieves the current consecutive failure count for a service."""
-        return int(cls._cache.get(f"fails:{name}", 0))
+        return int(cls._get_cache().get(f"fails:{name}", 0))
 
     @classmethod
     def increment_failure(cls, name: str, window_seconds: int = 5) -> int:
@@ -57,10 +77,11 @@ class ServiceRegistry:
         the window count as one to avoid swarming updates at the same time.
         """
         now = time.time()
+        cache = cls._get_cache()
 
-        with cls._cache.transact():
-            last_fail_time = float(cls._cache.get(f"last_reported:{name}", 0))
-            current_fails = int(cls._cache.get(f"fails:{name}", 0))
+        with cache.transact():
+            last_fail_time = float(cache.get(f"last_reported:{name}", 0))
+            current_fails = int(cache.get(f"fails:{name}", 0))
 
             # If we are within the window, ignore the increment but keep current count
             if now - last_fail_time < window_seconds:
@@ -68,23 +89,25 @@ class ServiceRegistry:
 
             # Outside window: increment and update timestamp
             new_total = current_fails + 1
-            cls._cache.set(f"fails:{name}", new_total, expire=3600)
-            cls._cache.set(f"last_reported:{name}", now, expire=3600)
+            cache.set(f"fails:{name}", new_total, expire=3600)
+            cache.set(f"last_reported:{name}", now, expire=3600)
 
             # Perform Autonomous Logic: Trip the circuit if threshold reached
             if new_total >= 3:  # Example threshold
-                cls._cache.set(f"status:{name}", "OPEN", expire=300)
+                cache.set(f"status:{name}", "OPEN", expire=300)
 
             return new_total
 
     @classmethod
     def reset(cls, name: str) -> None:
         """Clears all failure metrics upon a successful call."""
-        with cls._cache.transact():
-            cls._cache.delete(f"fails:{name}")
-            cls._cache.delete(f"last_fail:{name}")
-            cls._cache.delete(f"retries:{name}")
-            cls._cache.set(f"status:{name}", "CLOSED")
+        cache = cls._get_cache()
+        with cache.transact():
+            cache.delete(f"fails:{name}")
+            cache.delete(f"last_fail:{name}")
+            cache.delete(f"retries:{name}")
+            cache.set(f"status:{name}", "CLOSED")
+
 
 
 def protect_service(
