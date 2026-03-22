@@ -3,12 +3,13 @@ from typing import ClassVar
 import polars as pl
 import structlog
 from src.core.strategies.transform.base import TransformContext, Transformer
+from src.core.strategies.transform.factory import TransformFactory
 
 from libs.file.formats.base import HandlerFactory
 
 LOG = structlog.getLogger(__name__)
 
-
+@TransformFactory.register("skip")
 class NoOpTransformer(Transformer):
     def apply(self, lf: pl.LazyFrame, ctx: TransformContext) -> pl.LazyFrame:
         ctx.destination_dir.mkdir(parents=True, exist_ok=True)
@@ -37,7 +38,7 @@ class NoOpTransformer(Transformer):
         # }
         return lf
 
-
+@TransformFactory.register("default")
 class DefaultTransformer(Transformer):
     """
     Standard normalization layer for all datasets.
@@ -97,6 +98,7 @@ class DefaultTransformer(Transformer):
         return lf
 
 
+@TransformFactory.register("bitmask")
 class BitmaskTransformer(Transformer):
     # Stage 1: The Decipher Map
     _OPS: ClassVar[dict[int, str]] = {

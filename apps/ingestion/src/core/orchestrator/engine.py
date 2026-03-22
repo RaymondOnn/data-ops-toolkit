@@ -114,12 +114,12 @@ class IngestionEngine:
         # Initialize specialized pools
         workspace = self.exec_ctx.workspace_dir
         self.io_pool: list[ray.actor.ActorHandle] = [
-            Worker.remote(f"io_{i}", workspace) # type: ignore
+            Worker.remote(f"io_{i}", workspace)  # type: ignore
             for i in range(15)
         ]
         self.cpu_pool: list[ray.actor.ActorHandle] = [
-            Worker.remote(f"cpu_{i}", workspace) # type: ignore
-            for i in range(4)  
+            Worker.remote(f"cpu_{i}", workspace)  # type: ignore
+            for i in range(4)
         ]
 
     def run(self) -> None:

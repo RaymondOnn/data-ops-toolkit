@@ -24,7 +24,10 @@ class SourceMixin(ABC):
 class SinkMixin(ABC):
     @abstractmethod
     def stage_data(self, source_dir: Any, target_table: str) -> tuple[str, int]:
-        """Phase 1: Returns the name of the temporary staging table/folder and rows loaded."""
+        """
+        Phase 1: Returns the name of the temporary staging table/folder
+        and rows loaded.
+        """
         pass
 
     @abstractmethod
@@ -36,6 +39,20 @@ class SinkMixin(ABC):
         partition_val: str,
     ) -> None:
         """Phase 2: Moves data to production (Swap/Merge/Append)."""
+        pass
+
+    @abstractmethod
+    def is_equal(
+        self,
+        reference: Any,
+        other: Any,
+        exclude_columns: list[str] | None = None,
+    ) -> bool:
+        pass
+
+    @abstractmethod
+    def clone_table(self, reference: str, other: str) -> None:
+        """Clone a table to a new table."""
         pass
 
 

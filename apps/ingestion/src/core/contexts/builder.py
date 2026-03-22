@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -94,7 +94,7 @@ class JobContextBuilder:
             date_val = datetime.strptime(run_date_str, "%Y-%m-%d")
         else:
             offset = spec.get("offset_days", 0)
-            date_val = datetime.now() + timedelta(days=offset)
+            date_val = datetime.now(UTC) + timedelta(days=offset)
 
         fmt = date_val.strftime(spec.get("format", "%Y-%m-%d"))
         return f"'{fmt}'" if spec.get("wrap_quotes") else fmt
@@ -118,7 +118,7 @@ class JobContextBuilder:
         if ref:
             return dict(settings.get(f"services.{ref}", {}))
         return dict(settings.get(f"{ref_key}.config", {}))
-    
+
     def build_job_contexts(
         self,
         job_id: str,
@@ -129,8 +129,7 @@ class JobContextBuilder:
 
         job_cfg_path = Path("apps/ingestion/config") / job_id / "config.yaml"
 
-        # We create a new Dynaconf instance for this specific job run,
-        # using the pre-loaded app_settings as the base.
+        # 1. Initialize Dynaconf with job-specific overrides
         settings_files = [self.app_cfg_path, job_cfg_path]
         if overrides_json:
             settings_files.append(overrides_json)
@@ -144,41 +143,59 @@ class JobContextBuilder:
             load_dotenv=True,
         )
 
+        # 2. Establish run_date
+        # Priority: run_date_str > CLI --set run_date > today
+        run_date = (
+            run_date_str
+            or settings.get("run_date")
+            or datetime.now(UTC).strftime("%Y-%m-%d")
+        )
+
         contexts = []
         datasets = settings.get("datasets", {})
         for ds_name, ds_cfg in datasets.items():
-            # Resolve Filter SQL Tokens (e.g., {{start_date}})
-            source_params = ds_cfg.get("source_params", {})
+            # Resolve Filter SQL Tokens (e.g., {{run_date}})
+            source_params = ds_cfg.get("extract", {}).get("source_params", {})
             bind_params = source_params.get("bind_params", {})
             resolved_sql = source_params.get("filter_sql", "")
 
+            actual_date = run_date
             for key, val in bind_params.items():
                 if isinstance(val, dict) and val.get("type") == "relative_date":
-                    actual_val = self._resolve_relative_date(val, run_date_str)
-                    resolved_sql = resolved_sql.replace(f"{{{{{key}}}}}", actual_val)
+                    actual_date = self._resolve_relative_date(val, run_date)
+                    resolved_sql = resolved_sql.replace(f"{{{{{key}}}}}", actual_date)
 
-            # Resolve Account/Service Reference
-            # Fetches credentials from accounts based on account_ref
+            # Resolve Archival Config
             archive_conf = ds_cfg.get("archive", settings.get("archive", {}))
-            service_ref = archive_conf.get("service_ref")
-            service_details = settings.get(f"services.{service_ref}", {})
+            archive_service_details = self._resolve_service(settings, "archive")
+
+            # Resolve Transform Type
+            # In config.yaml it might be nested under transform.type
+            transform_cfg = ds_cfg.get("transform", {})
+            transform_type = transform_cfg.get("type", "default")
+            transform_params = transform_cfg.get("options", {})
 
             # Instantiate JobContext via msgspec
             ctx_data = {
                 "job_id": job_id,
                 "dataset_id": ds_name,
-                "run_date": actual_val,
-                "execution_mode": ExecutionMode.NORMAL,
-                "output_path": f"storage/active/{job_id}",
+                "run_date": run_date,
+                "output_path": f"storage/active/{job_id}/{ds_name}",
                 "extract": {
-                    "source_type": settings.get("source.type"),
-                    "source_identifier": ds_cfg.get("source_path"),
+                    "source_type": (
+                        ds_cfg.get("extract", {}).get("source_type")
+                        or settings.get("source.type")
+                    ),
+                    "source_identifier": (
+                        ds_cfg.get("extract", {}).get("source_identifier")
+                        or ds_cfg.get("source_path")
+                    ),
                     "num_partitions": ds_cfg.get(
                         "num_partitions", settings.get("num_partitions", 10)
                     ),
-                    "load_mode": ds_cfg.get("load_mode", "snapshot"),
+                    "load_mode": ds_cfg.get("extract", {}).get("load_mode", "snapshot"),
                     "source_config": self._resolve_service(settings, "source"),
-                    "source_params": {"filter_sql": resolved_sql},
+                    "source_params": {**source_params, "filter_sql": resolved_sql},
                     "schema_items": ds_cfg.get("schema_items", []),
                 },
                 "transform": {
@@ -186,23 +203,37 @@ class JobContextBuilder:
                     "transform_params": ds_cfg.get("transform_params", {}),
                 },
                 "load": {
-                    "sink_type": ds_cfg.get("sink_type", settings.get("sink.type")),
-                    "sink_identifier": ds_cfg.get("target_destination"),
-                    "sink_config": self._resolve_service(settings, "sink"),
-                    "partition_col": ds_cfg.get("partition_col"),
-                    "partition_value": ds_cfg.get("partition_value") or actual_val,
-                    "load_params": ds_cfg.get("load_params", {}),
-                },
-                "archival": {
-                    "enabled": archive_conf.get("enable_archival", True),
-                    "archive_type": service_details.get("type", "standard_archive"),
-                    "archive_config": self._resolve_service(settings, "archive"),
-                    "base_path": archive_conf.get(
-                        "base_path", "/mnt/archive/ingestion"
+                    "sink_type": (
+                        ds_cfg.get("load", {}).get("sink_type")
+                        or settings.get("sink.type")
                     ),
+                    "sink_identifier": (
+                        ds_cfg.get("load", {}).get("sink_identifier")
+                        or ds_cfg.get("target_destination")
+                    ),
+                    "sink_config": self._resolve_service(settings, "sink"),
+                    "partition_col": (
+                        ds_cfg.get("partition_col")
+                        or settings.get("partition_col", "run_date")
+                    ),
+                    "partition_value": ds_cfg.get("partition_value") or actual_date,
+                    "load_params": ds_cfg.get("load", {}).get("load_params", {}),
+                },
+                "archive": {
+                    "enabled": archive_conf.get("enable_archival", True),
+                    "retention_days": archive_conf.get(
+                        "retention_days", settings.get("retention_days", 2555)
+                    ),
+                    "base_path": archive_conf.get(
+                        "base_path",
+                        settings.get("archive_base_path", "/mnt/archive/ingestion"),
+                    ),
+                    "type": archive_service_details.get("type", "s3"),
+                    "config": archive_service_details,
                 },
             }
 
             ctx = msgspec.json.decode(msgspec.json.encode(ctx_data), type=JobContext)
             contexts.append(ctx)
+
         return contexts

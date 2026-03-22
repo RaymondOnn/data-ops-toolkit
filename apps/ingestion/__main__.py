@@ -1,13 +1,17 @@
 from datetime import datetime
 from typing import Optional
 
-import typer
 import structlog
-
+import typer
 from src.core.models.steps import JobSteps
 
+from src.core.contexts import parse_set_options
+from src.core.orchestrator import create_orchestrator
 
 app = typer.Typer(help="50M Row Ingest Pipeline")
+app.add_typer(test_app, name="test")
+
+
 state = {"dry_run": False, "debug": False}
 
 
@@ -38,15 +42,13 @@ def run(
     dataset: str = typer.Option(
         ..., "--dataset", "-d", help="Dataset identifier (e.g., 'sales_data')"
     ),
-    settings: Optional[list[str]] = typer.Option(
+    settings: list[str] | None = typer.Option(
         None, "--set", "-s", help="Override config: key=value (e.g. -s batch_size=5000)"
     ),
 ) -> None:
     """
     Execute the ingestion pipeline for a specific date and dataset.
     """
-    from src.core.contexts import parse_set_options
-    from src.core.orchestrator import create_orchestrator
 
     typer.echo(f"🚀 Initializing {dataset} for {run_date.date()} (ID: {job_id})")
 
@@ -73,7 +75,7 @@ def run(
         raise typer.Exit(code=1)
 
 
-@app.command()
+@test_app.command(name="run")
 def test(
     # Main Argument
     run_date: datetime = typer.Argument(

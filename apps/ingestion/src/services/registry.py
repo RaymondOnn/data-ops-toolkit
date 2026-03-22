@@ -109,7 +109,6 @@ class ServiceRegistry:
             cache.set(f"status:{name}", "CLOSED")
 
 
-
 def protect_service(
     breaker: CircuitBreaker,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:

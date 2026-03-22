@@ -1,5 +1,5 @@
-import pkgutil
 import importlib
+import pkgutil
 from pathlib import Path
 
 # Get the absolute path of the current directory

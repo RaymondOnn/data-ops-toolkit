@@ -2,6 +2,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import structlog
 from src.services.base import ArchiveMixin, Service, SinkMixin, SourceMixin
 from src.services.factory import ServiceFactory
 from src.services.registry import protect_service
@@ -12,6 +13,8 @@ from libs.resilience.circuit_breaker import CircuitBreaker
 
 if TYPE_CHECKING:
     from libs.auth.models import Secret
+
+LOG = structlog.get_logger(__name__)
 
 breaker = CircuitBreaker(
     failure_threshold=3,
@@ -113,6 +116,50 @@ class StorageSink(BaseStorageService, SinkMixin):
         # 2. Atomic Move: Move the staged folder to the production path
         # On S3, this is a metadata-only rename or a fast copy/delete
         self.client.move_dir(staging_table, final_path)
+
+    @protect_service(breaker)
+    def is_equal(
+        self,
+        reference: Path,
+        other: Path,
+        exclude_columns: list[str] | None = None,
+    ) -> None:
+        # Check if the number of files is the same
+
+        def get_meta(path):
+            # Ensure trailing slash for accurate relative path slicing
+            root = path.rstrip("/") + "/"
+            # find() handles recursion automatically
+            data = self.client.fs.find(root, detail=True)
+            # Store {relative_path: (size, ETag)}
+            return {k[len(root) :]: (v["size"], v.get("ETag")) for k, v in data.items()}
+
+        meta_reference = get_meta(reference)
+        meta_other = get_meta(other)
+
+        # 1. Check for missing files
+        only_in_reference = set(meta_reference) - set(meta_other)
+        only_in_other = set(meta_other) - set(meta_reference)
+
+        # 2. Check for content differences in common files
+        common_keys = set(meta_reference) & set(meta_other)
+        mismatched = [k for k in common_keys if meta_reference[k] != meta_other[k]]
+
+        # Reporting
+        if not only_in_reference and not only_in_other and not mismatched:
+            LOG.info("✅ Folders are identical.")
+            return
+
+        if only_in_reference:
+            LOG.error(f"❌ Missing in {other}: {list(only_in_reference)}")
+        if only_in_other:
+            LOG.error(f"❌ Extra in {other}: {list(only_in_other)}")
+        if mismatched:
+            LOG.error(f"⚠️ Content mismatch (Size/ETag): {mismatched}")
+
+    @protect_service(breaker)
+    def clone(self, reference: str, other: str) -> None:
+        self.client.copy_dir(reference, other)
 
 
 class StorageArchive(BaseStorageService, ArchiveMixin):

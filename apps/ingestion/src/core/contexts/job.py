@@ -24,6 +24,7 @@ class TransformConfig(msgspec.Struct):
     """Configuration for data transformation."""
 
     transform_type: str  # e.g. "default", "bitmask", "custom"
+    source_dir: str | None = None # directory to be used for regression testing
     transform_params: dict[str, Any] = {}
 
 
