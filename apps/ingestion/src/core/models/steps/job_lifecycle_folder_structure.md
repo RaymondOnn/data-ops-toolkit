@@ -46,19 +46,37 @@ During each step execution:
 ```mermaid
 sequenceDiagram
     participant O as Orchestrator / Worker
-    participant A as Active Metadata (active/)
+    participant AR as Active Root (active/)
+    participant AJ as Job Folder (active/{job_id...}/)
     participant S as Signals (signals/)
     participant D as Data Vault (data/)
 
-    O->>A: Provision active/{job_id}:{dataset}_{date}/{run_id}
-    O->>A: Create / Seed manifest.json & config.json
+    Note over O,AR: Phase 1: Provisioning
+    O->>AR: Seed {job_id}_{run_id}_config.json
+    
+    Note over O,AJ: Phase 2: Job Initialization (Lazy Folder Creation)
+    O->>AJ: Create Folder active/{job_id}:{dataset}_{date}/{run_id}
+    O->>AJ: Create / Seed manifest.json (status=RUNNING)
+    O->>AR: Move config.json -> AJ: {job_id}_{run_id}_config.json
     
     loop For Every Step (Extract, Transform, Load...)
-        O->>A: Update manifest.json (status=RUNNING, current_step)
-        O->>D: Write actual data payload to data/step_dir/
-        O->>A: On Success: Create directory marker (e.g., /extract)
+        Note over O,AJ: Step Check-in
+        O->>AJ: Update manifest.json (current_step=NAME, status=RUNNING)
+        
+        Note over O,D: Processing Stage Logic...
+        O->>D: Write payload to data/step_dir/
+        
+        Note over O,AJ: Step Sign-off (Atomic Write)
+        O->>AJ: Write directory marker (e.g., /extract)
+        O->>AJ: Update manifest.json (metrics, status=SUCCESS)
+        
+        Note over O,S: External Notification
         O->>S: Touch signals/{run_id}.sync
     end
+
+    Note over O,AJ: Phase 3: Finalization
+    O->>AJ: Finalize manifest (status=COMPLETED)
+    O->>AJ: Relocate Folder (active/ -> COMPLETED/ or FAILED/)
 ```
 
 ---
@@ -119,23 +137,43 @@ workspace_dir/
 
 ```mermaid
 graph TD
-    Trigger((Job Triggered)) --> Provision[Create active/ folder & manifests]
+    Trigger((Job Triggered)) --> Queue[Diskcache: PENDING]
     
-    subgraph Execution Loop
-        Provision --> CheckIn[Check-in manifest.json]
-        CheckIn --> Process[Process Payload into data/]
-        Process --> SuccessMark[Create Step Success Marker]
-        SuccessMark --> Process
+    subgraph "Execution (active/)"
+        Queue --> Worker[Worker Picks Up: PROVISIONING]
+        Worker --> Init[Job.from_folder: Rehydrate]
+        Init --> Process[Job.execute: RUNNING]
+        Process --> Mark[Marker + Update Manifest: SUCCESS]
     end
+
+    %% State Transitions
+    Process -- "Circuit Breaker / Resource Limit: BLOCKED / DEFERRED" --> HOLD_PROC[Move to HOLD/]
+    Process -- "Fatal Exception / Retries Exhausted: FAILED" --> FAIL_PROC[Move to FAILED/]
+    Mark -- "Final Step Done" --> COMP_PROC[Move to COMPLETED/]
+
+    subgraph "Terminal & Intermediate States"
+        HOLD_PROC --> H[HOLD Folder]
+        FAIL_PROC --> F[FAILED Folder]
+        COMP_PROC --> C[COMPLETED Folder]
+    end
+
+    subgraph "The Zombie Zone"
+        Process -- "Silent Death / SIGKILL" --> Zombie[Zombie: Stays in active/ as RUNNING]
+    end
+
+
+    %% Recovery / Manual Intervention
+    H -- "Resource Available / Manual Resume" --> Resume[Move back to active/]
+    Resume --> Queue
     
-    Process -- "Crash / Error" --> F[Move to FAILED/{run_id}]
-    Process -- "Wait for Resource" --> H[Move to HOLD/{run_id}]
-    SuccessMark -- "Final Step (Complete)" --> C(Job Complete)
+    F -- "Developer Fix + Retry" --> Retry[Move back to active/ & Reset Manifest]
+    Retry --> Queue
+
+    Zombie -- "Discovery via Recovery Scan + Auto Resume" --> Retry[Move back to active/ & Reset Manifest]
     
-    F -- "Manual/Auto Retry" --> CheckIn
-    H -- "Resource Freed" --> CheckIn
-    
-    C --> Cleanup[Janitor: Purge Active Metadata & physical data/]
-    F -- "TTL Expired" --> Cleanup
-    H -- "TTL Expired" --> Cleanup
+
+    %% Cleanup
+    C --> Janitor[Janitor: TTL Cleanup]
+    F -- "TTL Expired" --> Janitor
+    H -- "TTL Expired" --> Janitor
 ```

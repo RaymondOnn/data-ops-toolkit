@@ -1,12 +1,16 @@
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import msgspec
+import polars as pl
 import structlog
 from src.core.contexts.execution import ExecutionContext
 from src.core.models.job import JobManifest, JobStatus
-from src.services.database import DatabaseService
+from src.services.database import DatabaseSink
+
+from core.contexts.job import JobContext
 
 LOG = structlog.getLogger(__name__)
 CURRENT_EXECUTION_TBL = "CURRENT_EXECUTION"
@@ -14,18 +18,36 @@ CURRENT_EXECUTION_TBL = "CURRENT_EXECUTION"
 
 # TODO: Logging to Error Log? Workflow for refresh current_execution for the day
 class StateStore:
-    def __init__(self, db_service: DatabaseService, exec_ctx: ExecutionContext) -> None:
-        self.service = db_service  # Database-specific logic here
-        self.exec_ctx = exec_ctx
-        self._mirror: dict[str, dict[str, Any]] = {}  # {job_id: {record_data}}
-        self._dirty_keys: set[str] = set()  # Track what needs saving
+    def __init__(self, db_service: DatabaseSink, exec_ctx: ExecutionContext) -> None:
+        self.db: DatabaseSink = db_service
+        self.workspace_dir = Path(exec_ctx.workspace_dir) / "state"
+        self.stage_dir = self.workspace_dir / "stage"
+        self.archive_dir = self.workspace_dir / "archive"
+        # Attribute to store the queried records (The Hot Cache)
+        self._active_records: dict[str, dict[str, Any]] = {}
+
+        # Ensure directories exist
+        for d in [self.stage_dir, self.archive_dir]:
+            d.mkdir(parents=True, exist_ok=True)
+        self.stream_path = self.workspace_dir / "execution_stream.jsonl"
         self.last_sync = 0
 
-    def refresh(self) -> None:
+    @property
+    def active_records(self) -> dict[str, dict[str, Any]]:
+        if self._active_records is None:
+            self.get_latest_state()
+        return self._active_records
+
+    def get_latest_state(
+        self, force_refresh: bool = False
+    ) -> dict[str, dict[str, Any]]:
         """
-        Polls Postgres for active job definitions.
-        Uses JobStatus enum to filter for non-terminal states.
+        Returns the map of active/pending/blocked/deferred records.
+        If _active_records is None or force_refresh is True, it queries the DB view.
         """
+        if self._active_records is None or force_refresh:
+            LOG.info("Refreshing active records from database view")
+
         # We only care about jobs that are not SUCCESS, FAILED, or EXPIRED
         active_statuses = [f"'{s.value}'" for s in JobStatus.active_statuses()]
         status_filter = ", ".join(active_statuses)
@@ -34,55 +56,30 @@ class StateStore:
             SELECT * FROM {CURRENT_EXECUTION_TBL} 
             WHERE JOB_STATUS IN ({status_filter})
         """
+        try:
+            raw_records = self.db.fetch(sql)
+            self._active_records = {r["RUN_ID"]: r for r in raw_records}
+        except Exception as e:
+            LOG.error("Failed to refresh active records", error=str(e))
+            # Fallback to empty dict to avoid NoneType errors in Orchestrator loop
+            self._active_records = self._active_records or {}
 
-        records = self.service.fetch(sql)
-        for r in records:
-            run_id = r["run_id"]
-            # On startup, populate the mirror.
-            # On subsequent ticks, only update if the DB has newer info
-            if run_id not in self._mirror:
-                self._mirror[run_id] = r
-                LOG.debug(
-                    "Loaded active run from DB", run_id=run_id, status=r["job_status"]
-                )
+        return self._active_records
 
-    def get_active_definitions(self) -> list[dict[str, Any]]:
-        """Returns the current list of jobs for the Orchestrator to evaluate."""
-        return list(self._mirror.values())
-
-    def update_run(self, manifest: JobManifest) -> None:
-        """
-        Updates the mirror based on a job's progress.
-        This is called by TerminalSteps or the Orchestrator.
-        """
-        job_id = manifest.job_id
-        if job_id in self._mirror:
-            self._mirror[job_id]["status"] = manifest.job_status
-            self._mirror[job_id]["next_scheduled_time"] = manifest.next_scheduled_time
-            self._dirty_keys.add(job_id)
-
-    def skip_misfired_run(self, job_id: str) -> None:
-        """Updates the next run time in the mirror to bypass a misfire."""
-        # Logic to calculate the NEXT cron occurrence goes here
-        # For now, we just push it forward
-        if job_id in self._mirror:
-            self._mirror[job_id]["next_scheduled_time"] = time.time() + 3600
-            self._dirty_keys.add(job_id)
-
-    def get_run(self, run_id: str) -> dict[str, Any] | None:
-        """Retrieves a specific run from the mirror by Run ID."""
-        return self._mirror.get(run_id)
-
-    # TODO: Deep Sync Mode
     def sync_from_folder(self, folder_path: Path, deep_sync: bool = False) -> None:
         """
         Reads the manifest.json from a physical folder and
         syncs the internal state/database mirror.
         """
         manifest_file = folder_path / "manifest.json"
+        config_file = folder_path / "config.json"
 
         if not manifest_file.exists():
-            LOG.warninging(f"No manifest found at {manifest_file}. Sync skipped.")
+            LOG.warning(f"No manifest found at {manifest_file}. Sync skipped.")
+            return
+
+        if not config_file.exists():
+            LOG.warning(f"No config found at {config_file}. Sync skipped.")
             return
 
         try:
@@ -90,48 +87,18 @@ class StateStore:
             with manifest_file.open("rb") as f:
                 manifest = msgspec.json.decode(f.read(), type=JobManifest)
 
-            # 2. Update the internal mirror
-            # We use the run_id as the primary key for the mirror
-            run_id = manifest.run_id
-            if run_id not in self._mirror:
-                self._mirror[run_id] = {"run_id": run_id, "job_id": manifest.job_id}
+            with config_file.open("rb") as f:
+                ctx = msgspec.yaml.decode(f.read(), type=JobContext)
 
-            # 2. Deep Sync: Load manifest data into DB 'metadata'
-            if deep_sync:
-                # Update mirror with heavy metrics for the final DB flush
-                self._mirror[run_id].update(
-                    {
-                        "metadata": {
-                            "total_rows_in": getattr(m_data.extract, "total_rows", 0),
-                            "total_rows_out": getattr(m_data.write, "rows_written", 0),
-                            "total_duration": m_data.total_duration,
-                            "logic_version": getattr(
-                                m_data.transform, "logic_version", "1.0"
-                            ),
-                        }
-                    }
-                )
-            # Map manifest to the DB structure expected by your SQL
-            self._mirror[run_id] = {
-                "run_id": run_id,
-                "job_id": manifest.job_id,
-                "target_destination": manifest.target_destination,
-                "scheduled_timestamp": manifest.scheduled_timestamp,
-                "start_timestamp": manifest.start_timestamp,
-                "end_timestamp": manifest.end_timestamp,
-                "job_status": manifest.status,
-                "current_step": manifest.current_step,
-                "job_bitmask": manifest.bitmask,
-                "runtime_overrides": manifest.runtime_overrides,
-                "watch_file_path": manifest.watch_file_path,
-                "folder_path": str(folder_path),
-                "retry_attempts": manifest.retry_attempts,
-                "job_manifest": manifest,
-                "errors": manifest.errors,
-            }
+            # 2. Emit to the local stream immediately
+            # We flag this as a 'SYNC' event in metadata if needed
+            self.emit_state(
+                manifest=manifest, context=ctx,  metadata={"sync_source": "disk_recovery"}, deep_sync=deep_sync
+            )
 
-            self._dirty_keys.add(run_id)
-            LOG.debug(f"Synced {run_id} from disk: Status={manifest.status}")
+            LOG.debug(
+                f"Synced {manifest.run_id} from disk: Status={manifest.job_status}"
+            )
 
         except (msgspec.DecodeError, msgspec.ValidationError) as e:
             LOG.error(f"Malformed manifest at {folder_path}: {e}")
@@ -155,47 +122,92 @@ class StateStore:
 
     def flush(self) -> None:
         """
-        Commits mirror updates to Postgres.
-        Matches Approach 1: High-level status + current_step.
+        Rotates JSONL to Parquet and loads into Database.
         """
-        if not self._dirty_keys:
+        if not self.stream_path.exists() or self.stream_path.stat().st_size == 0:
             return
 
-        batch_data = []
-        for run_id in self._dirty_keys:
-            data = self._mirror[run_id]
-            # Ensure Enum values are converted to strings for the DB driver
-            batch_data.append(
-                {
-                    "run_id": data["run_id"],
-                    "job_id": data["job_id"],
-                    "status": str(data["job_status"]),  # e.g., 'RUNNING'
-                    "step": data["current_step"],  # e.g., 'TRANSFORM'
-                    "bitmask": data.get("job_bitmask", 0),
-                    "folder_path": data["folder_path"],
-                }
-            )
-
-        sql = """
-            INSERT INTO CURRENT_EXECUTIONS (
-                RUN_ID, JOB_ID, JOB_STATUS, CURRENT_STEP, 
-                JOB_BITMASK, FOLDER_PATH, LAST_UPDATED_AT_TS
-            )
-            VALUES (
-                :run_id, :job_id, :status, :step, 
-                :bitmask, :folder_path, NOW()
-            )
-            ON CONFLICT (RUN_ID) DO UPDATE SET 
-                JOB_STATUS = EXCLUDED.JOB_STATUS,
-                CURRENT_STEP = EXCLUDED.CURRENT_STEP,
-                JOB_BITMASK = EXCLUDED.JOB_BITMASK,
-                FOLDER_PATH = EXCLUDED.FOLDER_PATH,
-                LAST_UPDATED_AT_TS = NOW();
-        """
+        batch_id = int(time.time())
+        temp_jsonl = self.stage_dir / f"batch_{batch_id}.jsonl"
+        target_parquet = temp_jsonl.with_suffix(".parquet")
 
         try:
-            self.service.execute_batch(sql, batch_data)
-            self._dirty_keys.clear()
-            LOG.debug(f"Flushed {len(batch_data)} updates to Postgres.")
-        except Exception:
-            LOG.exception("Postgres batch update failed")
+            # 1. Rotate & Convert
+            self.stream_path.rename(temp_jsonl)
+            df = pl.read_ndjson(temp_jsonl)
+            df.write_parquet(target_parquet)
+            temp_jsonl.unlink()  # JSONL is no longer needed once Parquet is cut
+
+            # 2. Attempt Load for ALL files in stage (Retrying old failures)
+            self.db.stage_data(self.stage_dir, "EXECUTION_LOG")
+
+            self.last_flush = time.time()
+            LOG.info("StateStore flush successful", batch=batch_id, rows=df.height)
+
+        except Exception as e:
+            LOG.error("StateStore flush failed", error=str(e))
+            # Critical: If rename happened but load failed,
+            # we keep the file for manual recovery.
+
+    def _process_stage(self):
+        """Iterates through stage folder and moves successful loads to archive"""
+        try:
+            self.db.stage_data(self.stage_dir, "EXECUTION_LOG", "parquet")
+            for pq_file in self.stage_dir.glob("*.parquet"):
+                # Move to archive only on success
+                pq_file.rename(self.archive_dir / pq_file.name)
+                LOG.info("Successfully loaded and archived state", file=pq_file.name)
+        except Exception as e:
+            LOG.warning(
+                "Failed to load state file, leaving in stage for retry",
+                file=pq_file.name,
+                error=str(e),
+            )
+
+    def emit_state(
+        self,
+        manifest: JobManifest,
+        context: JobContext,
+        deep_sync: bool = False,
+        metadata: dict | None = None,
+    ) -> None:
+        """
+        Appends state to the local JSONL stream.
+        Low latency, disk-persistent.
+        """
+
+        metadata = metadata or {}
+        record = self.active_records.get(manifest.run_id, {})
+
+        # Align keys with your execution_log.sql columns
+        event = {
+            "RUN_ID": manifest.run_id,
+            "JOB_ID": manifest.job_id,
+            "SCHEDULED_TIMESTAMP": record.get("SCHEDULED_TIMESTAMP", None),
+            "DATASET_ID": manifest.dataset_id,
+            "RUN_DATE": context.run_date,
+            "START_TIMESTAMP": manifest.start.start_timestamp_utc
+            if manifest.start
+            else None,
+            "END_TIMESTAMP": manifest.complete.end_timestamp_utc
+            if manifest.complete
+            else None,
+            "LAST_UPDATED_AT_TS": datetime.now().astimezone().isoformat(),
+            "JOB_STATUS": str(manifest.job_status).upper(),
+            "CURRENT_STEP": manifest.current_step.upper(),
+            "JOB_BITMASK": manifest.bitmask,
+            "WATCH_FILE_PATH": record.get("WATCH_FILE_PATH", None),
+            "RUNTIME_OVERRIDES": context.custom_overrides,
+            "RETRY_ATTEMPTS": manifest.retry_count,
+            "SOURCE_ROW_COUNT": manifest.extract.source_row_count
+            if manifest.extract
+            else None,
+            "FINAL_ROW_COUNT": manifest.publish.final_count
+            if manifest.publish
+            else None,
+            "FINAL_MANIFEST": msgspec.json.encode(manifest) if deep_sync else None,
+        }
+
+        line = msgspec.json.encode(event) + b"\n"
+        with self.stream_path.open("ab") as f:
+            f.write(line)

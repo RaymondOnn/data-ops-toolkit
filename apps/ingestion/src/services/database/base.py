@@ -12,7 +12,7 @@ from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreaker
 
 if TYPE_CHECKING:
-    from libs.clients.database.base import DBClient
+    from libs.database.clients.base import DBClient
 
 
 LOG = structlog.get_logger(__name__)
@@ -46,13 +46,18 @@ class DatabaseService(Service):
         return self.client.sql(query)
 
     @protect_service(breaker)
-    def fetch(self, query: str) -> list[dict[str, Any]]:
+    def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
         """
         Executes a query and expects dict-like rows.
         """
-        if hasattr(self.client, "fetch"):
-            return self.client.fetch(query)  # type: ignore
-        return self.client.sql(query)  # type: ignore
+        return self.client.fetch_df(query)
+
+    @protect_service(breaker)
+    def fetch(self, query: str) -> list[Sequence[Any]]:
+        """
+        Executes a query and expects dict-like rows.
+        """
+        return self.client.sql(query)
 
     @protect_service(breaker)
     def execute_batch(self, query: str, data: list[dict[str, Any]]) -> None:
@@ -66,12 +71,7 @@ class DatabaseService(Service):
                 "Database client does not support batch execution."
             )
 
-    @protect_service(breaker)
-    def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
-        # Centralized protected fetch for all DB types
-        return self.client.fetch_df(query)
-
-
+    
 class DatabaseSource(DatabaseService, SourceMixin):
     def get_work_units(
         self, target: str, num_partitions: int, filter_sql: str | None = None
@@ -82,7 +82,7 @@ class DatabaseSource(DatabaseService, SourceMixin):
 
 class DatabaseSink(DatabaseService, SinkMixin):
     @abstractmethod
-    def stage_data(self, source_dir: Path, target_table: str) -> tuple[str, int]:
+    def stage_data(self, source_dir: Path, target_table: str, file_ext: str = "parquet") -> tuple[str, int]:
         """Phase 1: Returns the name of the temporary staging table and rows loaded."""
         pass
 

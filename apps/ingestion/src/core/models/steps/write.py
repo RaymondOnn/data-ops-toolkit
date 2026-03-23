@@ -23,7 +23,7 @@ class WriteStep(JobStep):
         return "write"
 
     def execute(self, job: "Job") -> str:
-        start_ts = datetime.now(UTC).isoformat()
+        start_ts = datetime.now().astimezone().isoformat()
         job_ctx = job.context
 
         try:

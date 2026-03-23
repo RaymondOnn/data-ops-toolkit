@@ -24,7 +24,7 @@ class StartStep(JobStep):
 
     def execute(self, job: "Job") -> str:
         # persist job-start metadata using engine helper
-        start_timestamp = datetime.now(UTC).isoformat()
+        start_timestamp = datetime.now().astimezone().isoformat()
         try:
             # 3. Gather System Metadata
             commit_hash = self._get_commit_hash()  # Use the helper above

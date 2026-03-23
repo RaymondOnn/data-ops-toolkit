@@ -1,9 +1,10 @@
-import logging
 import io
-from typing import Optional, Union, Callable, Any
+import logging
+from collections.abc import Callable
+from typing import Any
 
-import polars as pl
 import fsspec
+import polars as pl
 
 from libs.file.formats.base import HandlerFactory
 
@@ -21,6 +22,7 @@ class FlatFileMixin:
             LOG.error(f"Source file missing: {target}")
             return False
 
+        # Zero byte check
         size = fs.size(target)
         if size == 0:
             LOG.error(f"Zero-byte file detected: {target}")
@@ -28,14 +30,14 @@ class FlatFileMixin:
             return False
 
         if size > 5 * 1024**3:
-            LOG.warninging(f"Very large file (>5GB): {target}. Forcing streaming mode.")
+            LOG.warning(f"Very large file (>5GB): {target}. Forcing streaming mode.")
 
         return True
 
     def fetch_df(
         self,
-        path_or_list: Union[str, list[str]],
-        file_pattern: Optional[str] = None,
+        path_or_list: str | list[str],
+        file_pattern: str | None = None,
         force_repair: bool = False,
         **kwargs: dict[str, Any],
     ) -> pl.LazyFrame:
@@ -154,7 +156,7 @@ class FlatFileMixin:
             extra={
                 "file": target,
                 "encoding": encoding,
-                "confidence": best_match.rating if best_match else "N/A",
+                "confidence": best_match.confidence if best_match else "N/A",
             },
         )
 
@@ -182,11 +184,11 @@ class FlatFileMixin:
         partitions = []
         current_batch: list[str] = []
         current_size = 0
-        LIMIT = 1 * 1024**3  # 1GB target per partition
+        limit = 1 * 1024**3  # 1GB target per partition
 
         for t in targets:
             size = fs.size(t)
-            if current_size + size > LIMIT and current_batch:
+            if current_size + size > limit and current_batch:
                 partitions.append(current_batch)
                 current_batch = []
                 current_size = 0

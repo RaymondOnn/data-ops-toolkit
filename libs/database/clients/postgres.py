@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 
 from libs.clients.base import ClientCantConnect
-from libs.clients.database.base import DBClient
+from libs.database.clients.base import DBClient
 
 if TYPE_CHECKING:
     from adbc_driver_postgresql.dbapi import Connection

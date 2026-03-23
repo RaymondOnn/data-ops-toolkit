@@ -33,7 +33,7 @@ class TransformStep(JobStep):
         always processing the latest sanitized data without needing
         to know the specific physical timestamped folder.
         """
-        start_ts = datetime.now(UTC).isoformat()
+        start_ts = datetime.now().astimezone().isoformat()
         try:
             with ParquetHandler() as handler:
                 ctx = TransformContext(
@@ -66,7 +66,7 @@ class TransformStep(JobStep):
                     job.exec_ctx.workspace_dir
                     / "data"
                     / self.name
-                    / f"{job.id}_{int(datetime.now(UTC).timestamp())}"
+                    / f"{job.id}_{int(datetime.now().astimezone().timestamp())}"
                 )
                 data_store.mkdir(parents=True, exist_ok=True)
 

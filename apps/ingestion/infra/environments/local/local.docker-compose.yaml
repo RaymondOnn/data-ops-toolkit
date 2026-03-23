@@ -8,8 +8,9 @@ services:
       - CLICKHOUSE_USER=default
       - CLICKHOUSE_PASSWORD=password
     volumes:
-      - ./tmp:/var/lib/clickhouse/user_files/tmp
-      - ./init-scripts:/docker-entrypoint-initdb.d
+      - ../../../tmp:/var/lib/clickhouse/user_files/tmp
+      - ../../../sql/definitions:/docker-entrypoint-initdb.d
+      - ./clickhouse_settings.xml:/etc/clickhouse-server/config.d/clickhouse_settings.xml
     ports:
       - "8123:8123"
       - "9000:9000"

@@ -9,6 +9,7 @@ from libs.file.formats.base import HandlerFactory
 
 LOG = structlog.getLogger(__name__)
 
+
 @TransformFactory.register("skip")
 class NoOpTransformer(Transformer):
     def apply(self, lf: pl.LazyFrame, ctx: TransformContext) -> pl.LazyFrame:
@@ -37,6 +38,7 @@ class NoOpTransformer(Transformer):
         #     "schema": {k: str(v) for k, v in lf.schema.items()}
         # }
         return lf
+
 
 @TransformFactory.register("default")
 class DefaultTransformer(Transformer):

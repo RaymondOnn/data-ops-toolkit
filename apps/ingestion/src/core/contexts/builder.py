@@ -94,7 +94,7 @@ class JobContextBuilder:
             date_val = datetime.strptime(run_date_str, "%Y-%m-%d")
         else:
             offset = spec.get("offset_days", 0)
-            date_val = datetime.now(UTC) + timedelta(days=offset)
+            date_val = datetime.now().astimezone() + timedelta(days=offset)
 
         fmt = date_val.strftime(spec.get("format", "%Y-%m-%d"))
         return f"'{fmt}'" if spec.get("wrap_quotes") else fmt
@@ -148,7 +148,7 @@ class JobContextBuilder:
         run_date = (
             run_date_str
             or settings.get("run_date")
-            or datetime.now(UTC).strftime("%Y-%m-%d")
+            or datetime.now().astimezone().strftime("%Y-%m-%d")
         )
 
         contexts = []

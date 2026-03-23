@@ -15,7 +15,7 @@ class ErrorPayload(msgspec.Struct):
     error_type: str
     message: str
     traceback: str | None = None
-    timestamp_utc: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    timestamp_utc: str = field(default_factory=lambda: datetime.now().astimezone().isoformat())
 
 
 class BasePayload(msgspec.Struct, kw_only=True):
@@ -23,7 +23,7 @@ class BasePayload(msgspec.Struct, kw_only=True):
     source_params: dict[str, Any] = {}
     worker_id: str = ""
     start_timestamp_utc: str = field(
-        default_factory=lambda: datetime.now(UTC).isoformat()
+        default_factory=lambda: datetime.now().astimezone().isoformat()
     )
 
     def save(self, folder_path: Path) -> None:
@@ -40,7 +40,6 @@ class BasePayload(msgspec.Struct, kw_only=True):
             return json.decode(f.read(), type=stage_type)
 
 
-# TODO: Zero Byte Check
 class ExtractPayload(BasePayload, kw_only=True):
     file_count: int  # Number of files detected
     files: list[str] = []  # List of file paths, include checksum per file
@@ -48,7 +47,7 @@ class ExtractPayload(BasePayload, kw_only=True):
     source_row_count: int  # Number of rows detected
     schema_signature: dict[str, str] = {}  # Column names and types
     end_timestamp_utc: str = field(
-        default_factory=lambda: datetime.now(UTC).isoformat()
+        default_factory=lambda: datetime.now().astimezone().isoformat()
     )
 
 
@@ -61,7 +60,7 @@ class TransformPayload(BasePayload, kw_only=True):
     artifact_folder: Path | str
     start_timestamp_utc: str
     end_timestamp_utc: str = field(
-        default_factory=lambda: datetime.now(UTC).isoformat()
+        default_factory=lambda: datetime.now().astimezone().isoformat()
     )
 
 
@@ -74,7 +73,7 @@ class WritePayload(BasePayload, kw_only=True):
     sink_identifier: str
     start_timestamp_utc: str
     end_timestamp_utc: str = field(
-        default_factory=lambda: datetime.now(UTC).isoformat()
+        default_factory=lambda: datetime.now().astimezone().isoformat()
     )
 
 
@@ -85,7 +84,7 @@ class AuditPayload(BasePayload, kw_only=True):
     external_app_status: str
     start_timestamp_utc: str
     end_timestamp_utc: str = field(
-        default_factory=lambda: datetime.now(UTC).isoformat()
+        default_factory=lambda: datetime.now().astimezone().isoformat()
     )
 
 
@@ -95,7 +94,7 @@ class PublishPayload(BasePayload, kw_only=True):
     is_idempotent_cleanup_run: bool = False
     start_timestamp_utc: str
     end_timestamp_utc: str = field(
-        default_factory=lambda: datetime.now(UTC).isoformat()
+        default_factory=lambda: datetime.now().astimezone().isoformat()
     )
 
 
@@ -106,7 +105,7 @@ class CompletePayload(BasePayload, kw_only=True):
     retention_expiry: str | None  # Date when this log/archive can be deleted
     start_timestamp_utc: str
     end_timestamp_utc: str = field(
-        default_factory=lambda: datetime.now(UTC).isoformat()
+        default_factory=lambda: datetime.now().astimezone().isoformat()
     )
 
 
@@ -114,7 +113,7 @@ class JobManifest(msgspec.Struct, kw_only=True):
     # Top-level Metadata (The "Header")
     job_id: str
     run_id: str
-    dataset_name: str
+    dataset_id: str
     job_status: JobStatus = JobStatus.PENDING
     current_step: str
     bitmask: int

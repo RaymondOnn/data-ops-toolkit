@@ -87,7 +87,6 @@ class LifecycleManager:
         """
         Scans for jobs that have passed their TTL and purges their workspaces.
         """
-        now = time.time()
         # List to prevent 'dictionary changed size during iteration'
         runs_to_check = list(self.state_store._mirror.values())
 

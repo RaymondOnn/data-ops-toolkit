@@ -29,7 +29,7 @@ class PublishStep(JobStep):
 
     def execute(self, job: "Job") -> str:
         job_ctx = job.context
-        start_ts = datetime.now(UTC).isoformat()
+        start_ts = datetime.now().astimezone().isoformat()
 
         try:
             write_meta = job.manifest.write

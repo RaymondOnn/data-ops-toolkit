@@ -7,7 +7,7 @@ import structlog
 from src.services.database.base import DatabaseSink, DatabaseSource
 from src.services.factory import ServiceFactory
 
-from libs.clients.database.postgres import PostgresClient
+from libs.database.clients.postgres import PostgresClient
 
 if TYPE_CHECKING:
     from libs.auth.models import Secret
@@ -31,13 +31,13 @@ class PostgresService(DatabaseSource, DatabaseSink):
             port=config.get("port", 5432),
         )
 
-    def stage_data(self, source_dir: Path, target_table: str) -> tuple[str, int]:
+    def stage_data(self, source_dir: Path, target_table: str, file_ext: str = "parquet") -> tuple[str, int]:
         staging_table = f"stg_{target_table}_{int(time.time())}"
         self.client.sql(f"CREATE UNLOGGED TABLE {staging_table} (LIKE {target_table})")
 
         # Polars scan_parquet handles a directory path natively.
         # It will treat all parquet files in the folder as a single dataset.
-        lf = pl.scan_parquet(f"{source_dir}/*.parquet")
+        lf = pl.scan_parquet(f"{source_dir}/*.{file_ext}")
 
         # 1. Get the connection from the DBAPI
         conn = self.client.connect()

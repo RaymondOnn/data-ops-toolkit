@@ -32,7 +32,7 @@ MISFIRE_GRACE_PERIOD_SECS = 3600
 
 def generate_run_id() -> str:
     """Generates a unique run ID for a job."""
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
     short_hash = generate(alphabet="0123456789abcdef", size=6)
     return f"{timestamp}-{short_hash}"
 
@@ -294,7 +294,7 @@ class Orchestrator:
 
                 # C: If delay is beyond the grace period
                 if delay > MISFIRE_GRACE_PERIOD_SECS:
-                    LOG.warninging(
+                    LOG.warning(
                         f"[EXPIRED]: Job {record['job_id']} delayed by {delay}s. "
                         f"Policy: {grace_sec}s"
                     )

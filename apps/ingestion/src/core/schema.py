@@ -2,8 +2,9 @@ import time
 
 import polars as pl
 import structlog
-from libs.database import TARGET_TO_POLARS  # TODO: Check if mapping exists
-from src.core.strategies.ingest.base import ReaderContext
+from src.core.strategies.extract import ReaderContext
+
+from libs.database import TypeResolver
 
 LOG = structlog.getLogger(__name__)
 
@@ -26,25 +27,32 @@ def apply_schema_contract(df: pl.DataFrame, context: ReaderContext) -> pl.DataFr
     for item in schema_items:
         s_col = item.get("source_col")
         t_col = item["target_col"]
-        target_ptype = TARGET_TO_POLARS.get(item["target_dtype"], pl.Utf8)
+
+        # 1. Resolve Polars type using the Canonical Mapper
+        target_ptype = TypeResolver.resolve(context.source_type, item["target_dtype"])
 
         # 1. Handle Audit Columns (Internal Flag + No Source Column)
         if not s_col and t_col.startswith("_"):
             if t_col == "_ingested_at":
                 expr = pl.lit(time.time())
-            elif t_col == "_partition":
+                continue
+            
+            if t_col == "_partition":
                 expr = pl.lit(context.run_date)
-            elif t_col == "_run_id":
+                continue
+            
+            if t_col == "_run_id":
                 expr = pl.lit(context.run_id)
-            elif t_col == "_source_host":
+                continue
+            
+            if t_col == "_source_host":
                 expr = pl.lit(context.source_identifier)
-            elif t_col == "_row_hash":
-                # Decision: Placeholder or basic hash if needed
-                expr = pl.lit("HASH_PENDING")
+
+
             else:
                 expr = pl.lit(None)
 
-            exprs.append(expr.cast(target_ptype).alias(t_col))
+            exprs.append(expr.cast(pl.Utf8).alias(t_col))
             continue
 
         # 2. Defensive: String-first to avoid type-inference crashes
@@ -65,9 +73,9 @@ def apply_schema_contract(df: pl.DataFrame, context: ReaderContext) -> pl.DataFr
     return df.select(exprs)
 
 
-def generate_quarantine_report(lf: pl.LazyFrame):
-    # Only collect a tiny sample for debugging (e.g., 100 rows)
-    report_sample = lf.filter(pl.col("_is_quarantined")).limit(100).collect()
+# def generate_quarantine_report(lf: pl.LazyFrame):
+#     # Only collect a tiny sample for debugging (e.g., 100 rows)
+#     report_sample = lf.filter(pl.col("_is_quarantined")).limit(100).collect()
 
-    # This matches your 'masked_samples' requirement without loading 50M rows
-    return report_sample.to_dicts()
+#     # This matches your 'masked_samples' requirement without loading 50M rows
+#     return report_sample.to_dicts()

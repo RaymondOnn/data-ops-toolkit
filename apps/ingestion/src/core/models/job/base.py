@@ -119,7 +119,7 @@ class Job:
             return JobManifest(
                 job_id=self.id,
                 run_id=self.run_id,
-                dataset_name=self.dataset_id,
+                dataset_id=self.dataset_id,
                 current_step=self.step.name,
                 bitmask=0,
                 job_status=JobStatus.UNKNOWN,

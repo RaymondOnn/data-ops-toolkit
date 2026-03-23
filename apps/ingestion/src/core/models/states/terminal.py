@@ -60,7 +60,7 @@ class HoldState(LifecycleState):
         dt_error = datetime.fromisoformat(self.job.manifest.error.timestamp_utc)
         if dt_error.tzinfo is None:
             dt_error = dt_error.replace(tzinfo=UTC)
-        hold_duration = datetime.now(UTC) - dt_error
+        hold_duration = datetime.now().astimezone() - dt_error
         if hold_duration.total_seconds() > (self.MAX_HOLD_TIME_HOURS * 3600):
             LOG.error("Job expired in HOLD, moving to FAILED", job_id=self.job.id)
             self.job.update_manifest({"job_status": JobStatus.EXPIRED})

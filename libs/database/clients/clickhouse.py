@@ -4,7 +4,7 @@ from typing import Any
 import polars as pl
 from clickhouse_connect.driver.client import Client
 
-from libs.clients.database.base import DBClient
+from libs.database.clients.base import DBClient
 
 
 class ClickhouseClient(DBClient):

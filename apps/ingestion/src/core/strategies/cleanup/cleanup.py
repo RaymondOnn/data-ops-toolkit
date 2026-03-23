@@ -7,6 +7,7 @@ from src.core.contexts.job import JobContext
 LOG = structlog.get_logger(__name__)
 
 
+# delete / move / keep
 class CleanupStrategy(ABC):
     @abstractmethod
     def execute(self, context: JobContext):

@@ -18,7 +18,7 @@ class TimeTriggerEvent(TriggerEvent):
         next_run = job_record.get("next_run_time")  # Unix timestamp
         if not next_run:
             return False
-        return bool(datetime.now().timestamp() >= next_run)
+        return bool(datetime.now().astimezone().timestamp() >= next_run)
 
 
 class FileTriggerEvent(TriggerEvent):

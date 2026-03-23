@@ -6,7 +6,7 @@ import structlog
 from src.services.database.base import DatabaseSink, DatabaseSource
 from src.services.factory import ServiceFactory
 
-from libs.clients.database.clickhouse import ClickhouseClient
+from libs.database.clients.clickhouse import ClickhouseClient
 
 if TYPE_CHECKING:
     from libs.auth.models import Secret
@@ -25,16 +25,16 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             password=secret.resolve(sanitize=True) if secret else "",
         )
 
-    def stage_data(self, source_dir: Path, target_table: str) -> tuple[str, int]:
+    def stage_data(self, source_dir: Path, target_table: str, file_ext: str = "parquet") -> tuple[str, int]:
         staging_table = f"stg_{target_table}_{int(time.time())}"
         try:
             self.client.sql(f"CREATE TEMPORARY TABLE {staging_table} AS {target_table}")
 
             # ClickHouse pulls the folder directly - no Python RAM used
-            path_pattern = source_dir / "*.parquet"
+            path_pattern = source_dir / f"*.{file_ext}"
             sql = f"""
                 INSERT INTO {staging_table} 
-                SELECT * FROM file('{path_pattern}', 'Parquet')
+                SELECT * FROM file('{path_pattern}', '{file_ext}')
             """
 
             self.client.sql(sql)

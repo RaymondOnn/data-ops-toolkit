@@ -1,17 +1,19 @@
-from typing import Any, Optional
+import hashlib
+import json
 import logging
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 import fsspec
 import polars as pl
 
+from libs.file.formats import HandlerFactory
 
 LOG = logging.getLogger(__name__)
 
 
 def calculate_sha256(local_path: str) -> str:
-    import hashlib
 
     sha256_hash = hashlib.sha256()
     with open(local_path, "rb") as f:
@@ -52,7 +54,7 @@ class CASArchiveMixin:
     opts: dict[str, Any]
 
     def archive_to_cas(
-        self, local_path: str, job_id: str, metadata: Optional[dict[str, Any]] = None
+        self, local_path: str, job_id: str, metadata: dict[str, Any] | None = None
     ) -> tuple[str, str]:
         """
         The main entry point for archiving.
@@ -104,15 +106,15 @@ class CASArchiveMixin:
         job_id: str,
         file_hash: str,
         vault_path: str,
-        meta: Optional[dict[str, Any]],
-        reference_date: Optional[datetime] = None,  # New: Support for backfills
+        meta: dict[str, Any] | None,
+        reference_date: datetime | None = None,  # New: Support for backfills
     ) -> str:
         """
         Writes the logical pointer.
         Use reference_date for backfills to ensure data is logically correctly placed.
         """
         # Use the provided date (backfill) or current date (standard run)
-        target_date = reference_date or datetime.now()
+        target_date = reference_date or datetime.now().astimezone()
         date_path = target_date.strftime("%Y/%m/%d")
 
         manifest_dir = f"{self.url}/archive/jobs/{job_id}/{date_path}"
@@ -121,7 +123,7 @@ class CASArchiveMixin:
         manifest_data = {
             "job_id": job_id,
             "logical_date": date_path,
-            "processed_at": datetime.now().isoformat(),
+            "processed_at": datetime.now().astimezone().isoformat(),
             "content_hash": file_hash,
             "physical_path": vault_path,
             "metadata": meta or {},
@@ -137,7 +139,7 @@ class CASArchiveMixin:
 
         return manifest_path
 
-    def crawl_manifests(self, job_id: Optional[str] = None) -> pl.DataFrame:
+    def crawl_manifests(self, job_id: str | None = None) -> pl.DataFrame:
         """
         Aggregates all job manifests into a single Polars DataFrame.
         Useful for storage reporting and audit trails.
@@ -188,7 +190,7 @@ class CASArchiveMixin:
         # 1. Get all manifest-referenced hashes
         manifest_df = self.crawl_manifests()
         if manifest_df.is_empty():
-            LOG.warninging(
+            LOG.warning(
                 "No manifests found. Aborting GC to prevent total data loss."
             )
             return None
@@ -214,7 +216,7 @@ class CASArchiveMixin:
             if dry_run:
                 LOG.info(f"[DRY RUN] Would delete orphaned file: {path}")
             else:
-                LOG.warninging(f"Deleting orphaned file: {path}")
+                LOG.warning(f"Deleting orphaned file: {path}")
                 self.fs.rm(path)
 
         return len(to_delete)

@@ -55,10 +55,7 @@ def clone_sink(
     from src.services.factory import ServiceFactory
     
     LOG.info("Starting skeleton clone", source=source_path, target=target_path)
-    
-    # 1. Resolve the appropriate service (S3, Snowflake, Postgres, etc.)
-    service = ServiceFactory.get_service_from_path(source_path)
-    
+    run_skeleton_clone(ctx, target_path)
     # 2. Execute the 'Clone' logic you added to your Service class
     # Ensure your implementation uses 'LIMIT 0' or similar for metadata-only
     try:

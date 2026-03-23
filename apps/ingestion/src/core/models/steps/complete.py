@@ -27,7 +27,7 @@ class CompleteStep(JobStep):
         """
 
         job_ctx = job.context
-        start_ts = datetime.now(UTC).isoformat()
+        start_ts = datetime.now().astimezone().isoformat()
 
         # 1. Initialize Storage Service for Archival
         # We retrieve the 'archive' service defined in the job configuration
@@ -55,7 +55,7 @@ class CompleteStep(JobStep):
                     shutil.rmtree(target)
 
             # 4. Calculate Timestamps and Duration
-            end_ts = datetime.now(UTC)
+            end_ts = datetime.now().astimezone()
 
             # 5. FINALIZE CANONICAL PAYLOAD
             payload = CompletePayload(

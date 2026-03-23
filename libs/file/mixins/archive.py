@@ -1,10 +1,10 @@
 import logging
 from datetime import datetime, timedelta
-from typing import Optional, Union, Any
 from pathlib import Path
+from typing import Any
 
-import polars as pl
 import fsspec
+import polars as pl
 
 LOG = logging.getLogger(__name__)
 
@@ -21,16 +21,16 @@ class StandardArchiveMixin:
 
     def archive_snapshot(
         self,
-        data: Union[str, pl.LazyFrame],
+        data: str | pl.LazyFrame,
         job_id: str,
         dataset_name: str,  # Added to support multiple tables per job
         category: str,  # 'source' or 'bronze'
-        logical_date: Optional[datetime] = None,
+        logical_date: datetime | None = None,
     ) -> str:
         """
         Archives raw source or normalized Bronze data for a specific dataset.
         """
-        ref_date = logical_date or datetime.now()
+        ref_date = logical_date or datetime.now().astimezone()
         date_path = ref_date.strftime("%Y/%m/%d")
 
         # New Hierarchy: job_id -> dataset_name -> date -> category
@@ -42,11 +42,11 @@ class StandardArchiveMixin:
             dest_path = f"{dest_dir}/{filename}"
             self.fs.cp(data, dest_path)
             return dest_path
-        else:
-            dest_path = f"{dest_dir}/{dataset_name}_bronze.parquet"
-            # Memory-efficient sink for 50M rows
-            data.sink_parquet(dest_path)
-            return dest_path
+        
+        dest_path = f"{dest_dir}/{dataset_name}_bronze.parquet"
+        # Memory-efficient sink for 50M rows
+        data.sink_parquet(dest_path)
+        return dest_path
 
     def restore_from_archive(
         self,
@@ -80,7 +80,7 @@ class StandardArchiveMixin:
         """
         Deletes expired archives for a specific dataset within a job.
         """
-        cutoff_date = datetime.now() - timedelta(days=days)
+        cutoff_date = datetime.now().astimezone() - timedelta(days=days)
         dataset_root = f"{self.url}/archive/{job_id}/{dataset_name}"
 
         if not self.fs.exists(dataset_root):

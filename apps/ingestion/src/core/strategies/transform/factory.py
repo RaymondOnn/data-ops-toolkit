@@ -23,6 +23,7 @@ class TransformFactory:
     def register(cls, name: str) -> Callable[[type], type]:
         """Decorator to register services."""
         name = name.casefold()
+
         def wrapper(wrapped_class: type) -> type:
             cls._TRANSFORMERS[name] = wrapped_class
             return wrapped_class

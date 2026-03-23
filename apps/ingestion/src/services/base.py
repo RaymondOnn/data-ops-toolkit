@@ -51,7 +51,7 @@ class SinkMixin(ABC):
         pass
 
     @abstractmethod
-    def clone_table(self, reference: str, other: str) -> None:
+    def clone(self, reference: str, other: str) -> None:
         """Clone a table to a new table."""
         pass
 

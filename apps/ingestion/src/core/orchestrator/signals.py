@@ -3,27 +3,10 @@ from pathlib import Path
 
 import structlog
 from src.core.contexts import ExecutionContext
-from src.core.models.job import JobStatus
 from src.core.orchestrator.engine import IngestionEngine
 from src.core.orchestrator.state import StateStore
 
 LOG = structlog.getLogger(__name__)
-
-
-def resolve_current_path(
-    job_id: str, run_id: str, status: str, step: str, exec_ctx: ExecutionContext
-) -> Path:
-    """
-    Returns the physical path of a job based on its status.
-    """
-
-    base = exec_ctx.workspace_dir
-
-    if status in [JobStatus.FAILED]:
-        return exec_ctx.failed_path / job_id / run_id
-    if status in (JobStatus.BLOCKED or JobStatus.DEFERRED,):
-        return exec_ctx.hold_path / job_id / run_id
-    return base / step.lower() / job_id / run_id
 
 
 class SignalProcessor:
@@ -61,44 +44,41 @@ class SignalProcessor:
         # iterdir() returns a generator, which is memory efficient
         # This glob automatically ignores files starting with "."
         for pattern, is_deep_sync in signals.items():
-            for crumb in signal_dir.glob(pattern):
+            for signal in signal_dir.glob(pattern):
                 run_id = None
                 try:
                     # 1. Parse metadata from filename
                     # Example: 20240101-abc.transform.3.sync
-                    parts = crumb.stem.split(".")
-                    if not parts:
-                        continue
-                    run_id = parts[0]
+                    run_id = signal.stem.split(".")[0]
+                    record = self.state_store.active_records.get(run_id)
 
-                    # 2. Find the folder path from DB
-                    run_record = self.state_store.get_run(run_id)
-                    if not run_record:
-                        LOG.error("Signal received for unknown run", run_id=run_id)
+                    # If not in cache, leave it for the next iteration.
+                    # This handles the gap between worker start and DB flush.
+                    if not record:
+                        LOG.debug("Signal for unknown run_id, deferring", run_id=run_id)
                         continue
 
                     # Resolve the path using our new utility
-                    physical_path = resolve_current_path(
-                        job_id=run_record["job_id"],
-                        run_id=run_id,
-                        status=run_record["status"],
-                        step=run_record["step"],
-                        exec_ctx=self.exec_ctx,
+                    job_dir = (
+                        self.exec_ctx.workspace_dir
+                        / "active"
+                        / f"{record['JOB_ID']}:{record['DATASET_ID']}_{record['RUN_DATE']}"
+                        / record["RUN_ID"]
                     )
 
                     # 3. Sync manifest -> DB
                     self.state_store.sync_from_folder(
-                        Path(physical_path), deep_sync=is_deep_sync
+                        Path(job_dir), deep_sync=is_deep_sync
                     )
 
-                    # 4. 'Eat' the breadcrumb
-                    crumb.unlink(missing_ok=True)
+                    # 4. Remove the signal
+                    signal.unlink(missing_ok=True)
                     LOG.debug("Signal processed", run_id=run_id)
 
                 except (OSError, ValueError) as e:
-                    LOG.error(f"Failed to process signal {crumb.name}: {e}")
+                    LOG.error(f"Failed to process signal {signal.name}: {e}")
                 except Exception:
-                    LOG.exception(f"Unexpected error processing signal {crumb.name}")
+                    LOG.exception(f"Unexpected error processing signal {signal.name}")
 
     def _check_for_manual_commands(self) -> None:
         """

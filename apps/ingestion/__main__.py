@@ -1,11 +1,12 @@
+import traceback
 from datetime import datetime
 from typing import Optional
 
 import structlog
 import typer
-from src.core.models.steps import JobSteps
-
+from src.cli.test import test_app
 from src.core.contexts import parse_set_options
+from src.core.models.steps import JobSteps
 from src.core.orchestrator import create_orchestrator
 
 app = typer.Typer(help="50M Row Ingest Pipeline")
@@ -69,10 +70,9 @@ def run(
     except Exception as e:
         typer.secho(f"💥 Critical Failure: {e}", fg=typer.colors.RED)
         if state["debug"]:
-            import traceback
 
             traceback.print_exc()
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from e
 
 
 @test_app.command(name="run")

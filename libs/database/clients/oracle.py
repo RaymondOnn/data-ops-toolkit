@@ -4,7 +4,7 @@ from typing import Any
 import polars as pl
 from oracledb import Connection
 
-from libs.clients.database.base import DBClient
+from libs.database.clients.base import DBClient
 
 # Note: Running on Thin mode; no instant client required
 

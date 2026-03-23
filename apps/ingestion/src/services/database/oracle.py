@@ -5,7 +5,7 @@ import structlog
 from src.services.database.base import DatabaseSink, DatabaseSource
 from src.services.factory import ServiceFactory
 
-from libs.clients.database.oracle import OracleClient
+from libs.database.clients.oracle import OracleClient
 
 if TYPE_CHECKING:
     from libs.auth.models import Secret
@@ -24,7 +24,7 @@ class OracleService(DatabaseSource, DatabaseSink):
             dsn=config["dsn"],
         )
 
-    def stage_data(self, source_dir: Path, target_table: str) -> tuple[str, int]:
+    def stage_data(self, source_dir: Path, target_table: str, file_ext: str = "parquet") -> tuple[str, int]:
         staging_table = f"STG_{target_table}"
 
         # Oracle 'ORACLE_BIGDATA' driver can read all files in a location
@@ -39,7 +39,7 @@ class OracleService(DatabaseSource, DatabaseSink):
                 com.oracle.bigdata.fileformat=parquet
             )
             -- Oracle allows wildcards in the location for BigData driver
-            LOCATION ('{source_dir}/*.parquet')
+            LOCATION ('{source_dir}/*.{file_ext}')
         )
         REJECT LIMIT UNLIMITED
         """

@@ -1,9 +1,8 @@
 from collections.abc import Callable
-from typing import Any, ClassVar, TypeVar, cast
-
-from src.services.base import SourceMixin, SinkMixin, ArchiveMixin
+from typing import Any, ClassVar
 
 import structlog
+from src.services.base import ArchiveMixin, SinkMixin, SourceMixin
 
 from libs.auth.factory import AuthFactory
 from libs.auth.models import Secret
@@ -63,18 +62,21 @@ class ServiceFactory:
         service = cls.get_service(service_type, **config)
         if not isinstance(service, SourceMixin):
             raise TypeError(f"Service {service_type} does not implement SourceMixin.")
-        return cast(SourceMixin, service)
+        return service
+        # return cast(SourceMixin, service)
 
     @classmethod
     def get_sink(cls, service_type: str, **config: Any) -> SinkMixin:
         service = cls.get_service(service_type, **config)
         if not isinstance(service, SinkMixin):
             raise TypeError(f"Service {service_type} does not implement SinkMixin.")
-        return cast(SinkMixin, service)
+        return service
+        # return cast(SinkMixin, service)
 
     @classmethod
     def get_archive(cls, service_type: str, **config: Any) -> ArchiveMixin:
         service = cls.get_service(service_type, **config)
         if not isinstance(service, ArchiveMixin):
             raise TypeError(f"Service {service_type} does not implement ArchiveMixin.")
-        return cast(ArchiveMixin, service)
+        return service
+        # return cast(ArchiveMixin, service)
