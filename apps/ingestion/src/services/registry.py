@@ -5,8 +5,8 @@ from typing import Any, ClassVar
 
 import diskcache
 import structlog
-from src.utils.constants import DISKCACHE_FILE_PATH
 
+from apps.ingestion.src.utils.constants import DISKCACHE_FILE_PATH
 from libs.resilience.circuit_breaker import (
     CircuitBreaker,
     CircuitBreakerState,
@@ -53,7 +53,8 @@ class ServiceRegistry:
 
     @classmethod
     def get_last_failure_time(cls, name: str) -> float:
-        return float(cls._get_cache().get(f"last_fail:{name}", 0.0))
+        val = cls._get_cache().get(f"last_fail:{name}") or 0
+        return float(val) if val is not None else 0.0
 
     @classmethod
     def set_last_failure_time(cls, name: str, timestamp: float) -> None:
@@ -94,6 +95,12 @@ class ServiceRegistry:
 
             # Perform Autonomous Logic: Trip the circuit if threshold reached
             if new_total >= 3:  # Example threshold
+                LOG.warning(
+                    "Circuit breaker tripping",
+                    service=name,
+                    failures=new_total,
+                    window=window_seconds,
+                )
                 cache.set(f"status:{name}", "OPEN", expire=300)
 
             return new_total
@@ -103,6 +110,11 @@ class ServiceRegistry:
         """Clears all failure metrics upon a successful call."""
         cache = cls._get_cache()
         with cache.transact():
+            # Check if it was previously open to avoid log spam
+            was_open = cache.get(f"status:{name}") == "OPEN"
+            if was_open:
+                LOG.info("Circuit breaker has been reset to CLOSED", service=name)
+
             cache.delete(f"fails:{name}")
             cache.delete(f"last_fail:{name}")
             cache.delete(f"retries:{name}")

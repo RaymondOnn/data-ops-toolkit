@@ -6,24 +6,22 @@ from typing import Any
 
 import msgspec
 import structlog
-from nanoid import generate
-from src.core.contexts import JobContextBuilder
-from src.core.models.job import Job, JobStatus
-from src.core.models.steps import JobSteps
-from src.core.orchestrator.engine import IngestionEngine
-from src.core.orchestrator.lifecycle import LifecycleManager
-from src.core.orchestrator.signals import SignalProcessor
-from src.core.orchestrator.state import StateStore
-from src.core.orchestrator.trigger import (
+from apps.ingestion.src.core.contexts import JobContextBuilder
+from apps.ingestion.src.core.models.job import Job, JobStatus
+from apps.ingestion.src.core.orchestrator.engine import IngestionEngine
+from apps.ingestion.src.core.orchestrator.lifecycle import LifecycleManager
+from apps.ingestion.src.core.orchestrator.signals import SignalProcessor
+from apps.ingestion.src.core.orchestrator.state import StateStore
+from apps.ingestion.src.core.orchestrator.trigger import (
     FileTriggerEvent,
     TimeTriggerEvent,
     TriggerEvent,
 )
-from src.services.factory import ServiceFactory
-from src.utils.common import find_path
-from src.utils.constants import ALWAYS_ON_MODE
-
+from apps.ingestion.src.services.factory import ServiceFactory
+from apps.ingestion.src.utils.common import find_path
+from apps.ingestion.src.utils.constants import ALWAYS_ON_MODE
 from libs.resilience.heartbeat import Heartbeat
+from nanoid import generate
 
 LOG = structlog.getLogger(__name__)
 PID_FILE = Path(".daemon.pid")
@@ -56,42 +54,32 @@ class Orchestrator:
         self.heartbeat = Heartbeat()
         self.engine = IngestionEngine(self.exec_ctx)
 
-        if ALWAYS_ON_MODE:
-            # Service Discovery: Use the resolved app settings from the builder
-            service_name = "clickhouse_db"
-            db_config = self.builder.app_settings.get("services", {}).get(
-                service_name, {}
-            )
-            self.db_service = ServiceFactory.get_service(service_name, **db_config)
-            self.state_store = StateStore(self.db_service, self.exec_ctx)
-            # State timers
-            self.timers = {
-                "heartbeat": float(0),
-                "engine_scan": float(0),
-                "job_trigger": float(0),
-                "db_poll": float(0),
-                "recovery_sweep": float(0),
-                "state_sync": float(0),
-            }
+        # Service Discovery: Use the resolved app settings from the builder
+        print(dict(self.builder.app_settings))
+        service_name = "clickhouse_db"
+        db_config = self.builder.app_settings.get("services", {}).get(service_name, {})
+        self.db_service = ServiceFactory.get_service(service_name, **db_config)
+        self.state_store = StateStore(self.db_service, self.exec_ctx)
+        # State timers
+        self.timers = {
+            "heartbeat": float(0),
+            "engine_scan": float(0),
+            "job_trigger": float(0),
+            "db_poll": float(0),
+            "recovery_sweep": float(0),
+            "state_sync": float(0),
+        }
 
-            # Component Injection
-            self.signals = SignalProcessor(self.state_store, self.engine, self.exec_ctx)
-            self.lifecycle = LifecycleManager(
-                self.state_store, self.engine, self.exec_ctx
-            )
+        # Component Injection
+        self.signals = SignalProcessor(self.state_store, self.engine, self.exec_ctx)
+        self.lifecycle = LifecycleManager(self.state_store, self.engine, self.exec_ctx)
 
-            # 2. Wire the Signals to the Handlers (The Refactor Fix)
-            self.signals.register_command(
-                "RECOVER_ALL.cmd", self.lifecycle.handle_recovery
-            )
-            self.signals.register_command(
-                "PURGE_EXPIRED.cmd", self.lifecycle.handle_expiry
-            )
-            self.signals.register_command(
-                "RELOAD_CONFIG.cmd", self._reload_internal_config
-            )
+        # 2. Wire the Signals to the Handlers (The Refactor Fix)
+        self.signals.register_command("RECOVER_ALL.cmd", self.lifecycle.handle_recovery)
+        self.signals.register_command("PURGE_EXPIRED.cmd", self.lifecycle.handle_expiry)
+        self.signals.register_command("RELOAD_CONFIG.cmd", self._reload_internal_config)
 
-        LOG.info("Orchestrator initialized", mode=self.mode)
+        LOG.info("Orchestrator initialized")
 
     def run(
         self,
@@ -135,10 +123,12 @@ class Orchestrator:
                     self.timers["heartbeat"] = int(now)
 
                 # --- 2. Database Polling (Every 60s) ---
-                if now - self.timers["db_poll"] > 60:
+                if now - self.timers["db_poll"] > 60 and ALWAYS_ON_MODE:
                     # state_store.refresh() queries Postgres for active job definitions
-                    self.state_store.refresh()
-                    self._evaluate_triggers(self.state_store.get_active_definitions())
+                    active_definitions = self.state_store.get_latest_state(
+                        force_refresh=True
+                    )
+                    self._evaluate_triggers(list(active_definitions.values()))
                     self.timers["db_poll"] = int(now)
 
                 # 2. NEW: Sync the StateStore to Postgres
@@ -160,8 +150,8 @@ class Orchestrator:
 
                 # 3. Maintenance: Run recovery sweep every 5 minutes
                 if now - self.timers["recovery_sweep"] > 300:
-                    self.lifecycle._handle_recovery()
-                    self.lifecycle._handle_expiry()
+                    self.lifecycle.handle_recovery()
+                    self.lifecycle.handle_expiry()
                     self.timers["recovery_sweep"] = int(now)
 
                 # Small sleep to prevent 100% CPU usage
@@ -188,7 +178,7 @@ class Orchestrator:
         )
 
         # 2. Block until this specific job is finished
-        LOG.info(f"Monitoring job {job_id} until completion...")
+        LOG.info("Monitoring job until completion", job_id=job_id)
 
         while True:
             # Run the engine cycle to drive the job forward
@@ -198,7 +188,7 @@ class Orchestrator:
             # Note: We check all stage prefixes for the key
 
             if self._is_job_finished(job_id):
-                LOG.info(f"Job {job_id} finished successfully.")
+                LOG.info("Job finished successfully", job_id=job_id)
                 break
 
             time.sleep(2)
@@ -213,12 +203,12 @@ class Orchestrator:
         active_path = self.exec_ctx.active_path
         return bool(find_path(active_path, job_id))
 
-        # 2. Logical State Check via StateStore Mirror
+        # 2. Logical State Check via StateStore's active records
         # We look for any run associated with this job_id that is still in
         # an 'Active' state
         active_runs = [
             run
-            for run in self.state_store._mirror.values()
+            for run in self.state_store.active_records
             if run["job_id"] == job_id and run["status"] in JobStatus.active_statuses()
         ]
 
@@ -249,6 +239,11 @@ class Orchestrator:
 
             trigger_type = record.get("trigger_type", "CRON")
             if trigger_map[trigger_type].should_fire(record):
+                LOG.info(
+                    "Trigger condition met",
+                    job_id=record["job_id"],
+                    trigger=trigger_type,
+                )
                 self._trigger_job(
                     job_id=record["job_id"],
                     dataset_id=record["dataset_id"],
@@ -277,8 +272,10 @@ class Orchestrator:
                 # Policy -1 means 'run no matter how late we are'
                 if MISFIRE_GRACE_PERIOD_SECS == -1:
                     LOG.info(
-                        f"[FORCE_RUN]: Job {record['job_id']} is {delay}s late. "
-                        f"Policy: -1"
+                        "Triggering FORCE_RUN (Late)",
+                        job_id=record["job_id"],
+                        delay_sec=delay,
+                        policy=-1,
                     )
                     provision_run(record)
                     continue
@@ -286,8 +283,10 @@ class Orchestrator:
                 # B: If delay is within the grace period (delay < grace_sec)
                 if delay <= MISFIRE_GRACE_PERIOD_SECS:
                     LOG.info(
-                        f"[CATCH_UP]]: Job {record['job_id']} within "
-                        f"grace ({delay}s < {grace_sec}s)"
+                        "Triggering CATCH_UP (Grace Period)",
+                        job_id=record["job_id"],
+                        delay_sec=delay,
+                        grace_sec=grace_sec,
                     )
                     provision_run(record)
                     continue
@@ -295,8 +294,10 @@ class Orchestrator:
                 # C: If delay is beyond the grace period
                 if delay > MISFIRE_GRACE_PERIOD_SECS:
                     LOG.warning(
-                        f"[EXPIRED]: Job {record['job_id']} delayed by {delay}s. "
-                        f"Policy: {grace_sec}s"
+                        "Trigger EXPIRED (Skipping)",
+                        job_id=record["job_id"],
+                        delay_sec=delay,
+                        grace_sec=grace_sec,
                     )
                     # We tell the StateStore to update the next run time
                     # without executing
@@ -312,6 +313,7 @@ class Orchestrator:
         # Close DB connections, stop Ray actors, etc.
         sys.exit(0)
 
+    # TODO: Check if able to trigger on a per job or per dataset basis.
     def _trigger_job(
         self,
         job_id: str,
@@ -319,56 +321,35 @@ class Orchestrator:
         run_date_str: str | None = None,
         overrides: dict[str, Any] | None = None,
     ) -> None:
-        # 'overrides' here is the result of parse_set_options:
-        # {"_global": {...}, "dataset_name": {...}}
-        overrides = overrides or {}
-        all_overrides = overrides or {"_global": {}}
 
+        log = LOG.bind(job_id=job_id, dataset_id=dataset_id)
+
+        log.debug("Building job contexts", run_date=run_date_str)
         # 1. Get the list of dataset configurations for this Job ID
         # Uses the injected builder which already has app_settings loaded
-        job_contexts = self.builder.build_job_contexts(
+        job_contexts = self.builder.build(
             job_id=job_id,
+            dataset_id=dataset_id,
             run_date_str=run_date_str,
+            overrides=overrides,
         )
 
         for job_ctx in job_contexts:
-            if dataset_id and dataset_id != job_ctx.dataset_id:
-                continue
-
-            # --- START: NEXT FUNCTIONALITY INTEGRATION ---
-
-            # Resolve specific overrides for this dataset slice
-            active_dataset_overrides = all_overrides.get("_global", {}).copy()
-            active_dataset_overrides.update(all_overrides.get(job_ctx.dataset_id, {}))
-
-            # Apply overrides to the JobContext object
-            for key, value in active_dataset_overrides.items():
-                if hasattr(job_ctx, key):
-                    setattr(job_ctx, key, value)
-                else:
-                    # Store unknown keys in custom_overrides so they aren't lost
-                    job_ctx.custom_overrides[key] = value
-
-            # Set the execution range (Target State)
-            job_ctx.from_step = overrides.get("from_step", JobSteps.first_step().label)
-            job_ctx.to_step = overrides.get("to_step", JobSteps.last_step().label)
-
             # B. Generate the Unique Identity for this Run
             run_id = generate_run_id()
             composite_key = f"{job_ctx.job_id}:{job_ctx.dataset_id}"
             prefix = f"{composite_key}_{run_date_str}_{run_id}"
 
             # C. Create the Folder Structure (Composite Key + Run ID)
+            log.info(
+                "Provisioning new run",
+                run_id=run_id,
+                composite_key=composite_key,
+                from_step=job_ctx.from_step,
+            )
             # Path: storage/active/
             active_root = self.exec_ctx.active_path
             active_root.mkdir(parents=True, exist_ok=True)
-
-            # D. Write the Overlay File (The persistent audit trail)
-            if active_dataset_overrides:
-                # We save this as overrides.json inside the specific run folder
-                overrides_path = active_root / f"{prefix}_overrides.json"
-                with overrides_path.open("wb") as f:
-                    f.write(msgspec.json.encode(active_dataset_overrides))
 
             # E. Freeze the Job Context (The instructions for the workers)
             config_path = active_root / f"{prefix}_config.json"

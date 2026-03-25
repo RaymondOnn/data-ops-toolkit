@@ -5,8 +5,7 @@ from typing import Any
 
 import fsspec
 import polars as pl
-
-from libs.file.formats.base import HandlerFactory
+from libs.file.formats.factory import FormatFactory
 
 LOG = logging.getLogger(__name__)
 
@@ -58,7 +57,7 @@ class FlatFileMixin:
 
             # 3. Identify Handler & Detect Encoding
             ext = target.split(".")[-1].lower()
-            handler = HandlerFactory.get_handler(ext, fs, getattr(self, "opts"))
+            handler = FormatFactory.get_handler(ext, fs, self.opts)
 
             # Step 3: Encoding Detection (Crucial for CSV/JSON/XML)
             # Only run if not Parquet to save cycles
@@ -84,7 +83,7 @@ class FlatFileMixin:
         """
         full_path = self.resolve_path(path)
         ext = full_path.split(".")[-1].lower()
-        handler = HandlerFactory.get_handler(ext, self.fs, getattr(self, "opts"))
+        handler = FormatFactory.get_handler(ext, self.fs, self.opts)
 
         # Ensure directory exists for local paths
         self.fs.makedirs(self.fs._parent(full_path), exist_ok=True)
@@ -93,7 +92,7 @@ class FlatFileMixin:
         handler.from_df(lf, full_path)
 
     def get_reader_context(
-        self, path: str, pattern: Optional[str] = None
+        self, path: str, pattern: str | None = None
     ) -> tuple[fsspec.AbstractFileSystem, list[str]]:
         """
         Internal helper to resolve targets (Folder, Archive, or Pre-partitioned list)
@@ -112,7 +111,7 @@ class FlatFileMixin:
 
         if ext:
             fs = fsspec.filesystem(
-                archive_map[ext], fo=full_path, remote_options=getattr(self, "opts")
+                archive_map[ext], fo=full_path, remote_options=self.opts
             )
             all_files = fs.find("")
         else:

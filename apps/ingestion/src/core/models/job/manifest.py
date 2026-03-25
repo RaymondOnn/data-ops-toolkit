@@ -1,11 +1,18 @@
-from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any
+from __future__ import annotations
+
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 import structlog
 from msgspec import field, json
-from src.core.models.job.status import JobStatus
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from apps.ingestion.src.core.models.job.status import JobStatus
+else:
+    from apps.ingestion.src.core.models.job.status import JobStatus
 
 LOG = structlog.getLogger(__name__)
 
@@ -15,7 +22,9 @@ class ErrorPayload(msgspec.Struct):
     error_type: str
     message: str
     traceback: str | None = None
-    timestamp_utc: str = field(default_factory=lambda: datetime.now().astimezone().isoformat())
+    timestamp_utc: str = field(
+        default_factory=lambda: datetime.now().astimezone().isoformat()
+    )
 
 
 class BasePayload(msgspec.Struct, kw_only=True):

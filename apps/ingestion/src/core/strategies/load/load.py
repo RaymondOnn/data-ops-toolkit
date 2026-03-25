@@ -1,8 +1,8 @@
 from pathlib import Path
 
 import structlog
+from apps.ingestion.src.services.base import SinkMixin
 from msgspec import Struct
-from src.services.base import SinkMixin
 
 LOG = structlog.getLogger(__name__)
 

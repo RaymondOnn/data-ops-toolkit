@@ -3,7 +3,8 @@ from pathlib import Path
 from typing import Any
 
 import msgspec
-from src.services.base import Service
+
+from apps.ingestion.src.services.base import Service
 
 
 class ReaderContext(msgspec.Struct):

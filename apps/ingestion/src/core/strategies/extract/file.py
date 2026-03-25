@@ -1,5 +1,6 @@
-from src.core.strategies.extract import Reader, ReaderContext
-from src.services.base import Service
+from apps.ingestion.src.services.base import Service
+
+from .base import Reader, ReaderContext
 
 
 # For ingestion of flat files

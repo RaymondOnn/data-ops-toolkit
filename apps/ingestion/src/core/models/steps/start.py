@@ -1,15 +1,16 @@
 import os
 import socket
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import msgspec
 import structlog
-from src.core.models.job.manifest import BasePayload
-from src.core.models.steps import JobStep
+from apps.ingestion.src.core.models.job.manifest import BasePayload
+
+from .base import JobStep
 
 if TYPE_CHECKING:
-    from src.core.models.job import Job
+    from apps.ingestion.src.core.models.job import Job
 
 
 LOG = structlog.getLogger(__name__)

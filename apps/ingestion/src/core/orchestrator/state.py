@@ -1,4 +1,5 @@
 import time
+from collections import ChainMap
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -6,17 +7,19 @@ from typing import Any
 import msgspec
 import polars as pl
 import structlog
-from src.core.contexts.execution import ExecutionContext
-from src.core.models.job import JobManifest, JobStatus
-from src.services.database import DatabaseSink
 
-from core.contexts.job import JobContext
+from apps.ingestion.src.core.contexts.execution import ExecutionContext
+from apps.ingestion.src.core.contexts.job import JobContext
+from apps.ingestion.src.core.models.job import JobManifest, JobStatus
+from apps.ingestion.src.services.database import DatabaseSink
+from apps.ingestion.src.utils.constants import ALWAYS_ON_MODE
 
 LOG = structlog.getLogger(__name__)
 CURRENT_EXECUTION_TBL = "CURRENT_EXECUTION"
 
 
 # TODO: Logging to Error Log? Workflow for refresh current_execution for the day
+# TODO: Misfire Updates
 class StateStore:
     def __init__(self, db_service: DatabaseSink, exec_ctx: ExecutionContext) -> None:
         self.db: DatabaseSink = db_service
@@ -31,10 +34,11 @@ class StateStore:
             d.mkdir(parents=True, exist_ok=True)
         self.stream_path = self.workspace_dir / "execution_stream.jsonl"
         self.last_sync = 0
+        self.last_flush = 0
 
     @property
     def active_records(self) -> dict[str, dict[str, Any]]:
-        if self._active_records is None:
+        if not self._active_records and ALWAYS_ON_MODE:
             self.get_latest_state()
         return self._active_records
 
@@ -58,13 +62,36 @@ class StateStore:
         """
         try:
             raw_records = self.db.fetch(sql)
-            self._active_records = {r["RUN_ID"]: r for r in raw_records}
+            self._active_records = {
+                f"{r['JOB_ID']}|{r['DATASET_ID']}|{r['RUN_DATE']}": r
+                for r in raw_records
+            }
         except Exception as e:
             LOG.error("Failed to refresh active records", error=str(e))
             # Fallback to empty dict to avoid NoneType errors in Orchestrator loop
             self._active_records = self._active_records or {}
 
         return self._active_records
+
+    def update_status(self, job_id: str, status: str) -> None:
+        """
+        Updates the status of a job in the database.
+        """
+        LOG.info("Updating job status", job_id=job_id, status=status)
+        # In a real implementation, you would emit this to the stream
+        # or execute a direct DB update here.
+        # For now, we log it to ensure observability of the intent.
+
+    def update_run(self, run_id: str, updates: dict[str, Any]) -> None:
+        """
+        Updates a specific run's metadata.
+        """
+        LOG.info("Updating run state", run_id=run_id, updates=updates)
+        # This serves as a hook for the LifecycleManager to flag expired runs.
+
+    def skip_misfired_run(self, job_id: str) -> None:
+        LOG.warning("Skipping misfired run", job_id=job_id)
+        # Update DB next_run_time logic would go here
 
     def sync_from_folder(self, folder_path: Path, deep_sync: bool = False) -> None:
         """
@@ -75,11 +102,11 @@ class StateStore:
         config_file = folder_path / "config.json"
 
         if not manifest_file.exists():
-            LOG.warning(f"No manifest found at {manifest_file}. Sync skipped.")
+            LOG.warning("No manifest found. Sync skipped.", path=str(manifest_file))
             return
 
         if not config_file.exists():
-            LOG.warning(f"No config found at {config_file}. Sync skipped.")
+            LOG.warning("No config found. Sync skipped.", path=str(config_file))
             return
 
         try:
@@ -93,19 +120,25 @@ class StateStore:
             # 2. Emit to the local stream immediately
             # We flag this as a 'SYNC' event in metadata if needed
             self.emit_state(
-                manifest=manifest, context=ctx,  metadata={"sync_source": "disk_recovery"}, deep_sync=deep_sync
+                manifest=manifest,
+                context=ctx,
+                deep_sync=deep_sync,
             )
 
             LOG.debug(
-                f"Synced {manifest.run_id} from disk: Status={manifest.job_status}"
+                "Synced manifest from disk",
+                run_id=manifest.run_id,
+                status=manifest.job_status,
             )
 
         except (msgspec.DecodeError, msgspec.ValidationError) as e:
-            LOG.error(f"Malformed manifest at {folder_path}: {e}")
+            LOG.error("Malformed manifest", path=str(folder_path), error=str(e))
         except OSError as e:
-            LOG.error(f"FileSystem error syncing manifest from {folder_path}: {e}")
+            LOG.error(
+                "FileSystem error syncing manifest", path=str(folder_path), error=str(e)
+            )
         except Exception:
-            LOG.exception(f"Unexpected error syncing manifest from {folder_path}")
+            LOG.exception("Unexpected error syncing manifest", path=str(folder_path))
 
     def _calculate_bitmask(self, job_path: Path) -> int:
         """Simple logic to check which active links exist."""
@@ -159,54 +192,61 @@ class StateStore:
                 LOG.info("Successfully loaded and archived state", file=pq_file.name)
         except Exception as e:
             LOG.warning(
-                "Failed to load state file, leaving in stage for retry",
-                file=pq_file.name,
+                "Failed to load state files, leaving in stage for retry",
                 error=str(e),
             )
 
     def emit_state(
         self,
-        manifest: JobManifest,
-        context: JobContext,
+        manifest: JobManifest | None = None,
+        context: JobContext | None = None,
+        metadata: dict[str, Any] | None = None,
         deep_sync: bool = False,
-        metadata: dict | None = None,
     ) -> None:
         """
         Appends state to the local JSONL stream.
         Low latency, disk-persistent.
         """
-
         metadata = metadata or {}
-        record = self.active_records.get(manifest.run_id, {})
+        composite_key = f"{manifest.job_id}|{manifest.dataset_id}|{context.run_date}"
+        record = self.active_records.get(composite_key, {})
 
         # Align keys with your execution_log.sql columns
-        event = {
-            "RUN_ID": manifest.run_id,
-            "JOB_ID": manifest.job_id,
+        incoming_update = {
+            "RUN_ID": manifest.run_id if manifest else None,
+            "JOB_ID": manifest.job_id if manifest else None,
             "SCHEDULED_TIMESTAMP": record.get("SCHEDULED_TIMESTAMP", None),
-            "DATASET_ID": manifest.dataset_id,
-            "RUN_DATE": context.run_date,
-            "START_TIMESTAMP": manifest.start.start_timestamp_utc
-            if manifest.start
-            else None,
-            "END_TIMESTAMP": manifest.complete.end_timestamp_utc
-            if manifest.complete
-            else None,
+            "DATASET_ID": manifest.dataset_id if manifest else None,
+            "RUN_DATE": context.run_date if context else None,
+            "START_TIMESTAMP": (
+                manifest.start.start_timestamp_utc if manifest.start else None
+            ),
+            "END_TIMESTAMP": (
+                manifest.complete.end_timestamp_utc if manifest.complete else None
+            ),
             "LAST_UPDATED_AT_TS": datetime.now().astimezone().isoformat(),
-            "JOB_STATUS": str(manifest.job_status).upper(),
+            "JOB_STATUS": str(metadata.get("JOB_STATUS", manifest.job_status)).upper(),
             "CURRENT_STEP": manifest.current_step.upper(),
             "JOB_BITMASK": manifest.bitmask,
             "WATCH_FILE_PATH": record.get("WATCH_FILE_PATH", None),
             "RUNTIME_OVERRIDES": context.custom_overrides,
             "RETRY_ATTEMPTS": manifest.retry_count,
-            "SOURCE_ROW_COUNT": manifest.extract.source_row_count
-            if manifest.extract
-            else None,
-            "FINAL_ROW_COUNT": manifest.publish.final_count
-            if manifest.publish
-            else None,
+            "SOURCE_ROW_COUNT": (
+                manifest.extract.source_row_count if manifest.extract else None
+            ),
+            "FINAL_ROW_COUNT": (
+                manifest.publish.final_count if manifest.publish else None
+            ),
             "FINAL_MANIFEST": msgspec.json.encode(manifest) if deep_sync else None,
         }
+
+        # 2. Chain them: current_transition takes priority, record is the fallback
+        # We use .copy() at the end to turn it back into a plain dict for
+        # JSON serialization
+        event = dict(ChainMap(incoming_update, record))
+
+        # 3. Update the Hot Cache so the next call sees the combined state
+        self._active_records[composite_key] = event
 
         line = msgspec.json.encode(event) + b"\n"
         with self.stream_path.open("ab") as f:

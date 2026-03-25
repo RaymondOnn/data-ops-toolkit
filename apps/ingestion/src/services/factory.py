@@ -2,10 +2,11 @@ from collections.abc import Callable
 from typing import Any, ClassVar
 
 import structlog
-from src.services.base import ArchiveMixin, SinkMixin, SourceMixin
 
 from libs.auth.factory import AuthFactory
 from libs.auth.models import Secret
+
+from .base import ArchiveMixin, SinkMixin, SourceMixin
 
 LOG = structlog.getLogger(__name__)
 
@@ -19,6 +20,16 @@ class ServiceFactory:
     _SERVICES: ClassVar[dict[str, type]] = {}
     # Registry of Singleton Instances (Populated at Runtime)
     _INSTANCES: ClassVar[dict[str, Any]] = {}
+
+    @staticmethod
+    def _make_hashable(value: Any) -> Any:
+        if isinstance(value, dict):
+            return frozenset(
+                (k, ServiceFactory._make_hashable(v)) for k, v in value.items()
+            )
+        if isinstance(value, (list, tuple)):
+            return tuple(ServiceFactory._make_hashable(v) for v in value)
+        return value
 
     @classmethod
     def register(cls, name: str) -> Callable[[type], type]:
@@ -36,13 +47,18 @@ class ServiceFactory:
         Acts as the Singleton Manager.
         Returns a service instance based on account_id.
         """
-        account_id = config.get("account_id", "default")
-        instance_key = f"{type}:{account_id}"
+        config_hash = hash(cls._make_hashable(config))
+        instance_key = f"{service_type}:{config_hash}"
 
         if instance_key not in cls._INSTANCES:
+            LOG.debug(
+                "Creating new service instance",
+                service_type=service_type,
+                instance_key=instance_key,
+            )
             service_cls = cls._SERVICES.get(service_type.casefold())
             if not service_cls:
-                raise ServiceNotFound(f"No service found for {type}")
+                raise ServiceNotFound(f"No service found for {service_type}")
 
             # --- CENTRALIZED SECRET LOGIC ---
             # If 'secret_key' (the ID) is present, wrap it in a Secret object.
@@ -51,8 +67,12 @@ class ServiceFactory:
                 provider = AuthFactory.get_provider()
                 config["password"] = Secret(config["secret_key"], provider)
 
-            cls._INSTANCES[instance_key] = service_cls(
-                name=instance_key, account_id=account_id, **config
+            cls._INSTANCES[instance_key] = service_cls(name=instance_key, **config)
+        else:
+            LOG.debug(
+                "Returning cached service instance",
+                service_type=service_type,
+                instance_key=instance_key,
             )
 
         return cls._INSTANCES[instance_key]

@@ -1,6 +1,6 @@
 import logging
 
-from libs.auth.models import Secret
+from .models import Secret
 
 
 class SecretMasker(logging.Filter):

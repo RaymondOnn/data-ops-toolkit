@@ -2,8 +2,8 @@ import time
 
 import polars as pl
 import structlog
-from src.core.strategies.extract import ReaderContext
 
+from apps.ingestion.src.core.strategies.extract import ReaderContext
 from libs.database import TypeResolver
 
 LOG = structlog.getLogger(__name__)
@@ -36,18 +36,17 @@ def apply_schema_contract(df: pl.DataFrame, context: ReaderContext) -> pl.DataFr
             if t_col == "_ingested_at":
                 expr = pl.lit(time.time())
                 continue
-            
+
             if t_col == "_partition":
                 expr = pl.lit(context.run_date)
                 continue
-            
+
             if t_col == "_run_id":
                 expr = pl.lit(context.run_id)
                 continue
-            
+
             if t_col == "_source_host":
                 expr = pl.lit(context.source_identifier)
-
 
             else:
                 expr = pl.lit(None)

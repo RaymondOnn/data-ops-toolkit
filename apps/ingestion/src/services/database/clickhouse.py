@@ -3,9 +3,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from src.services.database.base import DatabaseSink, DatabaseSource
-from src.services.factory import ServiceFactory
 
+from apps.ingestion.src.services.database.base import DatabaseSink, DatabaseSource
+from apps.ingestion.src.services.factory import ServiceFactory
 from libs.database.clients.clickhouse import ClickhouseClient
 
 if TYPE_CHECKING:
@@ -17,6 +17,7 @@ LOG = structlog.get_logger(__name__)
 @ServiceFactory.register("clickhouse_db")
 class ClickHouseService(DatabaseSource, DatabaseSink):
     def _init_client(self, **config: Any) -> ClickhouseClient:
+        print(config)
         secret: Secret = config["password"]
         return ClickhouseClient(
             host=config.get("host", "localhost"),
@@ -25,7 +26,9 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             password=secret.resolve(sanitize=True) if secret else "",
         )
 
-    def stage_data(self, source_dir: Path, target_table: str, file_ext: str = "parquet") -> tuple[str, int]:
+    def stage_data(
+        self, source_dir: Path, target_table: str, file_ext: str = "parquet"
+    ) -> tuple[str, int]:
         staging_table = f"stg_{target_table}_{int(time.time())}"
         try:
             self.client.sql(f"CREATE TEMPORARY TABLE {staging_table} AS {target_table}")
@@ -40,6 +43,11 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             self.client.sql(sql)
             res = self.client.sql(f"SELECT COUNT(*) FROM {staging_table}")
             rows_staged = int(res[0][0]) if res and res[0] else 0
+            LOG.info(
+                "Staged data to ClickHouse",
+                table=staging_table,
+                rows=rows_staged,
+            )
             return staging_table, rows_staged
 
         except Exception:
@@ -67,6 +75,11 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         try:
             self.client.sql(sql)
         finally:
+            LOG.info(
+                "Promoted partition",
+                table=target_table,
+                partition=partition_val,
+            )
             # Always drop the staging table after the swap attempt
             self.client.sql(f"DROP TABLE IF EXISTS {staging_table}")
 
@@ -89,8 +102,13 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             FROM {other}
         """
         results = self.sql(sql)
-
-        return len(results) == 0
+        is_match = len(results) == 0
+        LOG.info(
+            "Comparing tables", reference=reference, other=other, is_match=is_match
+        )
+        if not is_match:
+            LOG.warning("Table comparison failed", differences=len(results))
+        return is_match
 
     def clone(self, reference: str, other: str) -> None:
         sql = f"""
@@ -98,4 +116,5 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             SELECT * FROM {reference}
             WHERE 1 = 0
         """
+        LOG.info("Cloning table structure", source=reference, destination=other)
         self.client.sql(sql)

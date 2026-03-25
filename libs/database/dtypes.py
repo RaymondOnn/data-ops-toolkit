@@ -5,12 +5,12 @@ import polars as pl
 
 
 class LogicalGroup(Enum):
-    NUMERIC = auto()   # Ints, Decimals, Floats
-    TEXT = auto()      # Strings, Enums
+    NUMERIC = auto()  # Ints, Decimals, Floats
+    TEXT = auto()  # Strings, Enums
     TEMPORAL = auto()  # Dates, Times
-    BOOLEAN = auto()   # Bits, Bools
-    BINARY = auto()    # Bloads, Raw bytes (pl.Binary)
-    OBJECT = auto()    # JSON, Lists, Maps (pl.Struct/pl.List)
+    BOOLEAN = auto()  # Bits, Bools
+    BINARY = auto()  # Bloads, Raw bytes (pl.Binary)
+    OBJECT = auto()  # JSON, Lists, Maps (pl.Struct/pl.List)
 
 
 # Mapping: Database Specific Type -> Canonical Type
@@ -25,11 +25,11 @@ POSTGRES_MAP = {
 }
 
 ORACLE_MAP = {
-    "NUMBER": LogicalGroup.NUMERIC,      # Defaulting to BigInt for safety
+    "NUMBER": LogicalGroup.NUMERIC,  # Defaulting to BigInt for safety
     "BINARY_DOUBLE": LogicalGroup.NUMERIC,
     "VARCHAR2": LogicalGroup.TEXT,
     "CLOB": LogicalGroup.TEXT,
-    "DATE": LogicalGroup.TEMPORAL,      # Oracle DATE includes time
+    "DATE": LogicalGroup.TEMPORAL,  # Oracle DATE includes time
     "TIMESTAMP": LogicalGroup.TEMPORAL,
     "RAW": LogicalGroup.BINARY,
 }
@@ -54,8 +54,9 @@ POLARS_OUT_MAP = {
     LogicalGroup.TEMPORAL: pl.Datetime,
     LogicalGroup.BOOLEAN: pl.Boolean,
     LogicalGroup.BINARY: pl.Binary,
-    LogicalGroup.OBJECT: pl.Utf8,      # Safest to store JSON as String in Parquet
+    LogicalGroup.OBJECT: pl.Utf8,  # Safest to store JSON as String in Parquet
 }
+
 
 class TypeResolver:
     _REGISTRY: ClassVar[dict[str, dict[str, LogicalGroup]]] = {

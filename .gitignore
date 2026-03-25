@@ -4,6 +4,7 @@ tmp/
 .mypy_cache
 .ruff_cache
 __pycache__
+*.py[cod]
 .DS_STORE     
 .cache
 *.egg-info/

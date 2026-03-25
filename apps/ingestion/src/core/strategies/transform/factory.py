@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import structlog
 
 if TYPE_CHECKING:
-    from src.core.strategies.transform.base import Transformer
+    from .base import Transformer
 
 
 LOG = structlog.getLogger(__name__)

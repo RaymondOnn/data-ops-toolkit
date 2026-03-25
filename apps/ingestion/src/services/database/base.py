@@ -5,9 +5,9 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import structlog
-from src.services.base import Service, SinkMixin, SourceMixin
-from src.services.registry import protect_service
 
+from apps.ingestion.src.services.base import Service, SinkMixin, SourceMixin
+from apps.ingestion.src.services.registry import protect_service
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreaker
 
@@ -71,7 +71,7 @@ class DatabaseService(Service):
                 "Database client does not support batch execution."
             )
 
-    
+
 class DatabaseSource(DatabaseService, SourceMixin):
     def get_work_units(
         self, target: str, num_partitions: int, filter_sql: str | None = None
@@ -82,7 +82,9 @@ class DatabaseSource(DatabaseService, SourceMixin):
 
 class DatabaseSink(DatabaseService, SinkMixin):
     @abstractmethod
-    def stage_data(self, source_dir: Path, target_table: str, file_ext: str = "parquet") -> tuple[str, int]:
+    def stage_data(
+        self, source_dir: Path, target_table: str, file_ext: str = "parquet"
+    ) -> tuple[str, int]:
         """Phase 1: Returns the name of the temporary staging table and rows loaded."""
         pass
 

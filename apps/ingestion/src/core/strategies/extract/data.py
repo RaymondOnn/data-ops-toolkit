@@ -6,9 +6,11 @@ from typing import Any
 import polars as pl
 import ray
 import structlog
-from src.core.strategies.extract import Reader, ReaderContext, ReaderFactory
-from src.services.base import Service
-from src.services.database import DatabaseService
+from apps.ingestion.src.services.base import Service
+from apps.ingestion.src.services.database import DatabaseSource
+
+from .base import Reader, ReaderContext
+from .factory import ReaderFactory
 
 LOG = structlog.getLogger(__name__)
 
@@ -41,7 +43,6 @@ class DataReader(Reader):
                 "unit": unit,
                 "context": context,
                 "config": service.config,  # Connection params
-                "account_id": service.account_id,
             }
             for unit in work_units
         ]
@@ -52,8 +53,8 @@ class DataReader(Reader):
         # 3. Define the extraction task (Runs in parallel on Ray Workers)
         def fetch_task(payload: dict[str, Any]) -> pl.DataFrame:
             """This function runs on the Ray Worker (K8S Pod)."""
-            from src.services.factory import ServiceFactory
-            from src.core.schema import apply_schema_contract
+            from apps.ingestion.src.core.schema import apply_schema_contract
+            from apps.ingestion.src.services.factory import ServiceFactory
 
             context = payload["context"]
             service = ServiceFactory.get_service(
@@ -94,7 +95,7 @@ class DataReader(Reader):
         metadata_list = []
 
         for i, df in enumerate(generator):
-            if df.is_empty:
+            if df.is_empty():
                 continue
 
             file_path = destination / f"part_{i:04d}.parquet"
@@ -117,10 +118,10 @@ class DataReader(Reader):
 @ReaderFactory.register("flat_file")
 class FileDataReader(DataReader):
     def get_work_units(self, client: Any, context: ReaderContext) -> list[Any]:
-        if not context.source_path:
+        if not context.source_identifier:
             raise ValueError("source_path is required for FileDataReader")
 
-        return client.get_work_units(context.source_path, context.num_partitions)
+        return client.get_work_units(context.source_identifier, context.num_partitions)
 
 
 @ReaderFactory.register("database")
@@ -129,15 +130,15 @@ class DBDataReader(DataReader):
         super().__init__()
 
     def get_work_units(
-        self, client: DatabaseService, context: ReaderContext
+        self, client: DatabaseSource, context: ReaderContext
     ) -> list[Any]:
         # Uses ORA_HASH for Oracle or ctid for Postgres
         # to generate N unique queries for the 50M rows
-        if not context.target_table:
+        if not context.source_identifier:
             raise ValueError("target_table is required for DBDataReader")
 
         filter_sql = context.options.get("filter_sql")
         units = client.get_work_units(
-            context.target_table, context.num_partitions, filter_sql
+            context.source_identifier, context.num_partitions, filter_sql
         )
         return [str(unit) for unit in units]

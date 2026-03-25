@@ -3,23 +3,22 @@ import sys
 from pathlib import Path
 
 import msgspec
-import polars as pl
 
-# Ensure we can import from src
+# Ensure we can import from apps.ingestion.src
 project_root = Path(__file__).parent.parent.parent
 sys.path.append(str(project_root / "apps" / "ingestion"))
 
-from src.core.models.job import Job
-from src.core.models.steps import JobStep
-from src.core.contexts import JobContextBuilder, ExecutionMode
-from src.core.contexts.job import (
-    JobContext,
-    ExtractConfig,
-    TransformConfig,
-    LoadConfig,
+from apps.ingestion.src.core.contexts import ExecutionMode, JobContextBuilder
+from apps.ingestion.src.core.contexts.job import (
     ArchiveConfig,
+    ExtractConfig,
+    JobContext,
+    LoadConfig,
+    TransformConfig,
 )
-from src.services.factory import ServiceFactory
+from apps.ingestion.src.core.models.job import Job
+from apps.ingestion.src.core.models.steps.utils import get_step_class_by_name
+from apps.ingestion.src.services.factory import ServiceFactory
 
 
 def main():
@@ -45,7 +44,6 @@ def main():
             source_type="flat_file",
             source_identifier="samples/sample_orders.csv",
             source_config={
-                "account_id": "local_storage",
                 "url": f"file://{os.getcwd()}/apps/ingestion",
             },
             num_partitions=1,
@@ -56,7 +54,6 @@ def main():
             sink_type="clickhouse",
             sink_identifier="orders",
             sink_config={
-                "account_id": "local_clickhouse",
                 "host": "localhost",
                 "port": 8123,
                 "user": "default",
@@ -101,7 +98,7 @@ def main():
 
     for step_name in steps_to_run:
         print(f"\n--- Phase: {step_name.upper()} ---")
-        step_instance = JobStep.get_step_class_by_name(step_name)
+        step_instance = get_step_class_by_name(step_name)
         job.set_step(step_instance)
         job.execute()
         print(f"{step_name.capitalize()} completed.")

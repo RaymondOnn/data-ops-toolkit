@@ -18,8 +18,14 @@ local:
   storage_options:
     region: "us-east-1"
   services:
-    clickhouse_db:
-      type: "standard_archive"
+    clickhouse:
+      type: chdb
+      path: "./.local_db" 
+
+dev:
+  services:
+    clickhouse:
+      type: "clickhouse_db"
       password: "password"
       host: "localhost"
       port: 8123
@@ -39,5 +45,4 @@ local:
 #         region: "us-east-1"
 #     vault_cas:
 #       type: "cas_archive"        # Maps to StorageVault
-#       account_id: "prod_aws_secure"
 #       bucket: "immutable-legal-records"

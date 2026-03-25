@@ -1,5 +1,8 @@
 import time
-from typing import TYPE_CHECKING
+
+from apps.ingestion.src.core.models.job.manifest import AuditPayload
+
+from .base import JobStep
 
 
 class AuditStep(JobStep):

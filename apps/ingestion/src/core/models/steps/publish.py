@@ -1,15 +1,17 @@
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import msgspec
 import structlog
-from src.core.models.job.manifest import PublishPayload
-from src.core.models.steps import JobStep
-from src.core.strategies.load.load import Loader, WriteContext
-from src.services.factory import ServiceFactory
+
+from apps.ingestion.src.core.models.job.manifest import PublishPayload
+from apps.ingestion.src.core.strategies.load.load import Loader, WriteContext
+from apps.ingestion.src.services.factory import ServiceFactory
+
+from .base import JobStep
 
 if TYPE_CHECKING:
-    from src.core.models.job import Job
+    from apps.ingestion.src.core.models.job import Job
 
 
 LOG = structlog.getLogger(__name__)
@@ -51,6 +53,12 @@ class PublishStep(JobStep):
                 partition_value=job_ctx.load.partition_value,
             )
 
+            LOG.info(
+                "Promoting to production",
+                target=job_ctx.load.sink_identifier,
+                staging=write_meta.staging_artifact,
+            )
+
             # 2. FINISH THE JOB
             # Move from staging to production
             loader.promote(
@@ -58,7 +66,6 @@ class PublishStep(JobStep):
                 staging_identifier=write_meta.staging_artifact,
                 write_ctx=context,
             )
-            LOG.info("Job Published", job_id=job.id, table=job_ctx.load.sink_identifier)
 
             # 3. PAYLOAD: The 'Success Receipt'
             # Get count from previous write step if available
@@ -73,6 +80,7 @@ class PublishStep(JobStep):
             )
 
             self.finalize(job, results=msgspec.to_builtins(payload))
+            LOG.info("Publish complete", table=job_ctx.load.sink_identifier)
             return str(self._transit(job))
 
         except Exception as e:

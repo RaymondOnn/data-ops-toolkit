@@ -2,8 +2,9 @@ import sys
 from pathlib import Path
 
 import polars as pl
-from src.core.strategies.load.load import Loader, WriteContext
-from src.services.database import ClickHouseService
+
+from apps.ingestion.src.core.strategies.load.load import Loader, WriteContext
+from apps.ingestion.src.services.database import ClickHouseService
 
 
 # Mocking Secret for independent testing
@@ -15,7 +16,7 @@ class MockSecret:
         return self._value
 
 
-# Add apps/ingestion to sys.path to allow imports from src
+# Add apps/ingestion to sys.path to allow imports from apps.ingestion.src
 sys.path.append(str(Path(__file__).parent.parent))
 
 

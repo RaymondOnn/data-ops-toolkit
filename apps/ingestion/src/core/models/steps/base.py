@@ -1,110 +1,20 @@
 import shutil
-import time
 import traceback
 from abc import ABC, abstractmethod
-from enum import IntEnum, IntFlag, auto
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import msgspec
 import structlog
-from src.core.models.job.manifest import ErrorPayload
-from src.core.models.states.terminal import FailedState, HoldState, SuccessState
-
+from apps.ingestion.src.core.models.job.manifest import ErrorPayload
+from apps.ingestion.src.core.models.steps.enums import STEP_ORDER, JobSteps
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreakerTripped
 
 if TYPE_CHECKING:
-    from src.core.models.job import Job
+    from apps.ingestion.src.core.models.job import Job
 
 LOG = structlog.getLogger(__name__)
-
-
-class JobBitmask(IntFlag):
-    """
-    Class representing the bitmask for job steps.
-    """
-
-    NONE = 0
-    START = auto()
-    EXTRACT = auto()
-    TRANSFORM = auto()
-    WRITE = auto()
-    AUDIT = auto()
-    PUBLISH = auto()
-    COMPLETE = auto()
-
-    @classmethod
-    def ALL_DONE(cls) -> "JobBitmask":
-        """
-        Dynamically calculates the sum of all flags.
-        Useful for checking if the 50M row pipeline is 100% complete.
-        """
-        mask = cls.NONE
-        for member in cls:
-            mask |= member
-        return mask
-
-    def is_fully_complete(self) -> bool:
-        """Helper to check if the current instance matches ALL_DONE."""
-        return self == self.ALL_DONE()
-
-
-class JobSteps(IntEnum):
-    START = 0
-    EXTRACT = 1
-    TRANSFORM = 2
-    WRITE = 3
-    AUDIT = 4
-    PUBLISH = 5
-    COMPLETE = 6
-
-    @property
-    def label(self) -> str:
-        return self.name.casefold()
-
-    @property
-    def bitmask(self) -> JobBitmask:
-        # Map the step to the IntFlag
-        mapping = {
-            JobSteps.START: JobBitmask.START,
-            JobSteps.EXTRACT: JobBitmask.EXTRACT,
-            JobSteps.TRANSFORM: JobBitmask.TRANSFORM,
-            JobSteps.WRITE: JobBitmask.WRITE,
-            JobSteps.AUDIT: JobBitmask.AUDIT,
-            JobSteps.PUBLISH: JobBitmask.PUBLISH,
-            JobSteps.COMPLETE: JobBitmask.COMPLETE,
-        }
-        return mapping[self]
-
-    @classmethod
-    def next_step(cls, current_label: str) -> "JobSteps | None":
-        """Finds the next step in the sequence based on a string label."""
-        current_enum = cls[current_label.upper()]
-        try:
-            return cls(current_enum.value + 1)
-        except ValueError:
-            return None  # We have reached the end of the pipeline
-
-    @classmethod
-    def prev_step(cls, current_label: str) -> "JobSteps| None":
-        """Finds the next step in the sequence based on a string label."""
-        current_enum = cls[current_label.upper()]
-        try:
-            return cls(current_enum.value - 1)
-        except ValueError:
-            return None  # We have reached the start of the pipeline
-
-    @classmethod
-    def first_step(cls) -> "JobSteps":
-        return cls(0)
-
-    @classmethod
-    def last_step(cls) -> "JobSteps":
-        return cls(len(cls) - 1)
-
-
-_JOB_ORDER = [step.label for step in sorted(JobSteps)]
 
 
 class JobStep(ABC):
@@ -115,9 +25,9 @@ class JobStep(ABC):
         self.bitmask = step.bitmask
 
     def get_step(self, offset: int) -> str:
-        idx = _JOB_ORDER.index(self.name)
-        if 0 <= idx + offset < len(_JOB_ORDER):
-            return _JOB_ORDER[idx + offset]
+        idx = STEP_ORDER.index(self.name)
+        if 0 <= idx + offset < len(STEP_ORDER):
+            return STEP_ORDER[idx + offset]
 
         raise ValueError(f"Invalid offset: {offset}")
 
@@ -134,9 +44,11 @@ class JobStep(ABC):
 
     def _transit(self, job: "Job") -> str:
         """Transit the Job instance to the next stage."""
+        from apps.ingestion.src.core.models.steps.utils import get_step_class_by_name
+
         next_step = JobSteps.next_step(self.name)
         if next_step:
-            job.set_step(JobStep.get_step_class_by_name(next_step.label))
+            job.set_step(get_step_class_by_name(next_step.label))
             return next_step.label
         return "FINISH"
 
@@ -173,6 +85,12 @@ class JobStep(ABC):
         We avoid searching for 'latest' folders by using a static symlink
         at active/{job_id}/{step_name}.
         """
+        from apps.ingestion.src.core.models.states.terminal import (
+            FailedState,
+            HoldState,
+            SuccessState,
+        )
+
         results = results or {}
         data = msgspec.to_builtins(job.manifest)
 
@@ -243,20 +161,3 @@ class JobStep(ABC):
 
         # 5. ATOMIC SWAP
         job.request_status_sync()
-
-    @classmethod
-    def get_step_class_by_name(cls, name: str) -> "JobStep":
-        """
-        Given a step name, returns the corresponding JobStep class.
-
-        Iterates through all subclasses of JobStep and checks if the name
-        attribute matches the given name.
-        If no match is found, raises a ValueError.
-        """
-        for step_class in cls.__subclasses__():
-            # If you have nested subclasses, you may want a recursive walk here.
-            if getattr(step_class, "name", None) == name:
-                idx = _JOB_ORDER.index(name)
-                step = JobSteps(idx)
-                return step_class(step=step)
-        raise ValueError(f"Unknown step name: {name}")

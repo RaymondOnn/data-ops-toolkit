@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 
 import structlog
 
-from src.core.contexts.job import JobContext
+from apps.ingestion.src.core.contexts.job import JobContext
 
 LOG = structlog.get_logger(__name__)
 

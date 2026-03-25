@@ -1,5 +1,4 @@
-import adbc_driver_snowflake.dbapi as adbc_sf
-from src.core.db.base import DBClient
+from apps.ingestion.src.core.db.base import DBClient
 
 
 class SnowflakeADBCClient(DBClient):

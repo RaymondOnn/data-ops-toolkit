@@ -1,16 +1,16 @@
 import shutil
-import time
 from pathlib import Path
 
 import msgspec
 import structlog
-from src.core.contexts import ExecutionContext, JobContext
-from src.core.models.job import Job, JobStatus
-from src.core.models.states.terminal import HoldState
-from src.core.orchestrator.engine import IngestionEngine
-from src.core.orchestrator.state import StateStore
-from src.utils.common import find_path
-from src.utils.dates import is_expired
+
+from apps.ingestion.src.core.contexts import ExecutionContext, JobContext
+from apps.ingestion.src.core.models.job import Job, JobStatus
+from apps.ingestion.src.core.models.states.terminal import HoldState
+from apps.ingestion.src.core.orchestrator.engine import IngestionEngine
+from apps.ingestion.src.core.orchestrator.state import StateStore
+from apps.ingestion.src.utils.common import find_path
+from apps.ingestion.src.utils.dates import is_expired
 
 LOG = structlog.getLogger(__name__)
 
@@ -26,7 +26,7 @@ class LifecycleManager:
         self.engine = engine
         self.exec_ctx = exec_ctx
 
-    def _handle_recovery(self) -> None:
+    def handle_recovery(self) -> None:
         """
         Scans the HOLD and FAILED directories to re-queue stuck jobs.
         Uses the directory structure as the source of truth when the DB is stale.
@@ -50,7 +50,7 @@ class LifecycleManager:
                 if not state.can_recover():
                     continue
 
-                LOG.info(f"Auto-recovering job {job.run_id} from HOLD.")
+                LOG.info("Auto-recovering job from HOLD", run_id=job.run_id)
 
                 # 3. Construct the composite key for the Engine
                 # Line 313 fix: composite_key = "job_id:table"
@@ -73,22 +73,24 @@ class LifecycleManager:
                 self.state_store.sync_from_folder(job.folder)
 
             except StopIteration:
-                LOG.error(f"Recovery failed for {manifest_path}: Missing _config.json")
+                LOG.error("Recovery failed: Missing config", path=str(manifest_path))
             except (OSError, ValueError) as e:
-                LOG.error(f"Recovery failed for {manifest_path}: {e}")
+                LOG.error("Recovery failed", path=str(manifest_path), error=str(e))
             except Exception:
-                LOG.exception(f"Unexpected error recovering job at {manifest_path}")
+                LOG.exception(
+                    "Unexpected error recovering job", path=str(manifest_path)
+                )
 
         # Final flush to Postgres to commit all recovered statuses
         self.state_store.flush()
         LOG.info("Recovery sweep complete.")
 
-    def _handle_expiry(self) -> None:
+    def handle_expiry(self) -> None:
         """
         Scans for jobs that have passed their TTL and purges their workspaces.
         """
         # List to prevent 'dictionary changed size during iteration'
-        runs_to_check = list(self.state_store._mirror.values())
+        runs_to_check = list(self.state_store.active_records)
 
         for data in runs_to_check:
             # We only expire jobs that are stuck in a non-terminal state

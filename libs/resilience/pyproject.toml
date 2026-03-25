@@ -7,9 +7,6 @@ dependencies = [
 ]
 requires-python = ">=3.11"
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["."]
+[tool.setuptools]
+packages = ["resilience"]
+package-dir = { "resilience" = "." }

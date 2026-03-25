@@ -4,11 +4,13 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from src.core.models.job.status import JobStatus
-from src.services.registry import ServiceRegistry
+
+from apps.ingestion.src.services.registry import ServiceRegistry
 
 if TYPE_CHECKING:
-    from src.core.models.job import Job
+    from apps.ingestion.src.core.models.job import Job
+    from apps.ingestion.src.core.models.job.status import JobStatus
+
 
 LOG = structlog.getLogger(__name__)
 

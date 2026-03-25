@@ -3,13 +3,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from src.services.base import ArchiveMixin, Service, SinkMixin, SourceMixin
-from src.services.factory import ServiceFactory
-from src.services.registry import protect_service
 
 from libs.clients.base import ClientCantConnect
 from libs.file import FileSystemClient, FileSystemSkills
 from libs.resilience.circuit_breaker import CircuitBreaker
+
+from .base import ArchiveMixin, Service, SinkMixin, SourceMixin
+from .factory import ServiceFactory
+from .registry import protect_service
 
 if TYPE_CHECKING:
     from libs.auth.models import Secret
@@ -72,7 +73,16 @@ class StorageSource(BaseStorageService, SourceMixin):
 
         path = self.client.resolve_path(target)
         files = self.client.fs.glob(f"{path}/**/*")
-        return [{"files": files[i::num_partitions]} for i in range(num_partitions)]
+        LOG.debug(
+            "Generating work units",
+            target=target,
+            files_found=len(files),
+            partitions=num_partitions,
+        )
+        # Ensure files is treated as a list to support slice indexing
+        return [
+            {"files": list(files)[i::num_partitions]} for i in range(num_partitions)
+        ]
 
 
 class StorageSink(BaseStorageService, SinkMixin):
@@ -92,6 +102,12 @@ class StorageSink(BaseStorageService, SinkMixin):
         staging_full_path = self.client.resolve_path(staging_path)
         files_staged = len(self.client.fs.find(staging_full_path))
 
+        LOG.info(
+            "Staged files",
+            source=str(source_dir),
+            target=staging_path,
+            count=files_staged,
+        )
         return staging_path, files_staged
 
     @protect_service(breaker)
@@ -116,6 +132,7 @@ class StorageSink(BaseStorageService, SinkMixin):
         # 2. Atomic Move: Move the staged folder to the production path
         # On S3, this is a metadata-only rename or a fast copy/delete
         self.client.move_dir(staging_table, final_path)
+        LOG.info("Promoted data", staging=staging_table, final=final_path)
 
     @protect_service(breaker)
     def is_equal(
@@ -147,15 +164,15 @@ class StorageSink(BaseStorageService, SinkMixin):
 
         # Reporting
         if not only_in_reference and not only_in_other and not mismatched:
-            LOG.info("✅ Folders are identical.")
+            LOG.info("Folders are identical", match=True)
             return
 
         if only_in_reference:
-            LOG.error(f"❌ Missing in {other}: {list(only_in_reference)}")
+            LOG.error("Validation mismatch", missing_in_target=list(only_in_reference))
         if only_in_other:
-            LOG.error(f"❌ Extra in {other}: {list(only_in_other)}")
+            LOG.error("Validation mismatch", extra_in_target=list(only_in_other))
         if mismatched:
-            LOG.error(f"⚠️ Content mismatch (Size/ETag): {mismatched}")
+            LOG.error("Content mismatch", files=mismatched)
 
     @protect_service(breaker)
     def clone(self, reference: str, other: str) -> None:
@@ -206,7 +223,7 @@ class StandardArchiveService(StorageArchive):
 class CASArchive(StorageArchive):
     """Content Addressable Storage for immutable records."""
 
-    def __init__(self, name: str, account_id: str, **config: Any) -> None:
+    def __init__(self, name: str, **config: Any) -> None:
         # Vaults often use specific storage classes (e.g., Glacier or WORM)
         super().__init__(
             name=name,
@@ -215,7 +232,6 @@ class CASArchive(StorageArchive):
             storage_options=config.get(
                 "storage_options", {"s3_storage_class": "GLACIER"}
             ),
-            account_id=account_id,
             **config,
         )
 

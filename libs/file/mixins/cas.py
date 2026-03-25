@@ -8,7 +8,7 @@ from typing import Any
 import fsspec
 import polars as pl
 
-from libs.file.formats import HandlerFactory
+from libs.file.formats import FormatFactory
 
 LOG = logging.getLogger(__name__)
 
@@ -132,7 +132,7 @@ class CASArchiveMixin:
         self.fs.makedirs(manifest_dir, exist_ok=True)
 
         # Write using JSONHandler
-        handler = HandlerFactory.get_handler("json", self.fs, self.opts)
+        handler = FormatFactory.get_handler("json", self.fs, self.opts)
         handler.write_file(
             json.dumps(manifest_data, indent=4).encode("utf-8"), manifest_path
         )
@@ -190,9 +190,7 @@ class CASArchiveMixin:
         # 1. Get all manifest-referenced hashes
         manifest_df = self.crawl_manifests()
         if manifest_df.is_empty():
-            LOG.warning(
-                "No manifests found. Aborting GC to prevent total data loss."
-            )
+            LOG.warning("No manifests found. Aborting GC to prevent total data loss.")
             return None
 
         active_hashes = set(manifest_df["content_hash"].to_list())

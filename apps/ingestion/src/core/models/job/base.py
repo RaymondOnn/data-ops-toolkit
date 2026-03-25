@@ -1,15 +1,21 @@
+from __future__ import annotations
+
 import os
 import shutil
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 import structlog
-from src.core.contexts import ExecutionContext, JobContext
-from src.core.models.job.manifest import JobManifest
-from src.core.models.job.status import JobStatus
-from src.core.models.steps import JobStep, JobSteps
+
+from apps.ingestion.src.core.models.job.manifest import JobManifest
+from apps.ingestion.src.core.models.job.status import JobStatus
+from apps.ingestion.src.core.models.steps.enums import JobSteps
+
+if TYPE_CHECKING:
+    from apps.ingestion.src.core.contexts import ExecutionContext, JobContext
+    from apps.ingestion.src.core.models.steps.base import JobStep
 
 LOG = structlog.getLogger(__name__)
 
@@ -42,7 +48,7 @@ class Job:
         folder_path: Path,
         exec_ctx: ExecutionContext,
         target_step: JobSteps | None = None,
-    ) -> "Job":
+    ) -> Job:
         """
         Factory to rehydrate a Job. If a target_step is provided,
         it performs an immediate check-in.
@@ -134,6 +140,9 @@ class Job:
         Finds the config file and returns a hydrated JobContext object.
         Does not store the object in self to save RAM.
         """
+        # Local import to prevent circular dependency
+        from apps.ingestion.src.core.contexts import JobContext
+
         try:
             # Look for the first file ending in _config.json
             config_path = next(self.folder.glob("*_config.json"))
@@ -151,9 +160,11 @@ class Job:
 
     @property
     def step(self) -> JobStep:
+        from apps.ingestion.src.core.models.steps.utils import get_step_class_by_name
+
         if not self._step:
             step = self.manifest.current_step or JobSteps.START.label
-            self._step = JobStep.get_step_class_by_name(step)
+            self._step = get_step_class_by_name(step)
         return self._step
 
     def set_step(self, step: JobStep) -> None:
@@ -164,7 +175,14 @@ class Job:
 
         :raises ValueError: If the job is not initialized.
         """
+        start_time = time.perf_counter()
+        log = LOG.bind(job_id=self.id, run_id=self.run_id, step=self.step.name)
+
+        log.info("Executing step logic")
         self.step.execute(job=self)
+
+        duration = time.perf_counter() - start_time
+        log.info("Step execution finished", duration_sec=round(duration, 4))
 
     def update_manifest(self, updates: dict[str, Any] | None = None) -> None:
         """
@@ -177,6 +195,9 @@ class Job:
 
         # 2. Apply updates
         data.update(updates)
+
+        # Debug log for state changes
+        LOG.debug("Updating manifest", run_id=self.run_id, updates=updates)
 
         # 3. Atomic Write to avoid corruption during crashes (Write to .tmp then replace)
         tmp_path = self._manifest_path.with_suffix(".tmp")

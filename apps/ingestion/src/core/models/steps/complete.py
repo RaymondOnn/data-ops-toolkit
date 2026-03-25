@@ -1,13 +1,14 @@
 import shutil
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 import msgspec
 import structlog
-from src.core.models.job import Job
-from src.core.models.job.manifest import CompletePayload
-from src.core.models.steps import JobStep
-from src.services.base import ArchiveMixin
-from src.services.factory import ServiceFactory
+from apps.ingestion.src.core.models.job import Job
+from apps.ingestion.src.core.models.job.manifest import CompletePayload
+from apps.ingestion.src.services.base import ArchiveMixin
+from apps.ingestion.src.services.factory import ServiceFactory
+
+from .base import JobStep
 
 LOG = structlog.getLogger(__name__)
 
@@ -19,7 +20,7 @@ class CompleteStep(JobStep):
     def name(self) -> str:
         return "complete"
 
-    def execute(self, job: "Job") -> str:
+    def execute(self, job: Job) -> str:
         """
         Decision: The 'Zero-Footprint' Protocol.
         We preserve the audit trail and the output data in long-term storage
@@ -101,7 +102,7 @@ class CompleteStep(JobStep):
                     source_dir=src_folder, archive_path=dest_folder
                 )
 
-    def _calculate_expiry(self, job: "Job", end_timestamp: datetime) -> str:
+    def _calculate_expiry(self, job: Job, end_timestamp: datetime) -> str:
         # e.g., standard 7-year retention or 30-day GDPR limit
         """
         Calculates the retention expiry date for a job.

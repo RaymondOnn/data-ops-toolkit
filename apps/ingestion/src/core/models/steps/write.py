@@ -1,15 +1,17 @@
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import msgspec
 import structlog
-from src.core.models.job.manifest import WritePayload
-from src.core.models.steps import JobStep
-from src.core.strategies.load.load import Loader
-from src.services.factory import ServiceFactory
+
+from apps.ingestion.src.core.models.job.manifest import WritePayload
+from apps.ingestion.src.core.strategies.load.load import Loader
+from apps.ingestion.src.services.factory import ServiceFactory
+
+from .base import JobStep
 
 if TYPE_CHECKING:
-    from src.core.models.job import Job
+    from apps.ingestion.src.core.models.job import Job
 
 
 LOG = structlog.getLogger(__name__)
@@ -35,6 +37,12 @@ class WriteStep(JobStep):
                 job_ctx.load.sink_type, **job_ctx.load.sink_config
             )
 
+            LOG.info(
+                "Starting load",
+                sink_type=job_ctx.load.sink_type,
+                target=job_ctx.load.sink_identifier,
+            )
+
             # 2. Get the behavioral Strategy
             loader = Loader()
 
@@ -57,6 +65,11 @@ class WriteStep(JobStep):
             )
 
             self.finalize(job, results=msgspec.to_builtins(payload))
+            LOG.info(
+                "Load complete",
+                rows=int(rows_loaded),
+                staging_artifact=staging_artifact,
+            )
             return str(self._transit(job))
 
         except Exception as exc:

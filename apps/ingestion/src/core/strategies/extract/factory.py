@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from typing import ClassVar
 
-from src.core.strategies.extract import Reader
+from .base import Reader
 
 
 class ReaderFactory:

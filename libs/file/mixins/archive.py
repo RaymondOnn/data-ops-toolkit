@@ -42,7 +42,7 @@ class StandardArchiveMixin:
             dest_path = f"{dest_dir}/{filename}"
             self.fs.cp(data, dest_path)
             return dest_path
-        
+
         dest_path = f"{dest_dir}/{dataset_name}_bronze.parquet"
         # Memory-efficient sink for 50M rows
         data.sink_parquet(dest_path)

@@ -2,9 +2,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from src.services.database.base import DatabaseSink, DatabaseSource
-from src.services.factory import ServiceFactory
 
+from apps.ingestion.src.services.database.base import DatabaseSink, DatabaseSource
+from apps.ingestion.src.services.factory import ServiceFactory
 from libs.database.clients.oracle import OracleClient
 
 if TYPE_CHECKING:
@@ -24,7 +24,9 @@ class OracleService(DatabaseSource, DatabaseSink):
             dsn=config["dsn"],
         )
 
-    def stage_data(self, source_dir: Path, target_table: str, file_ext: str = "parquet") -> tuple[str, int]:
+    def stage_data(
+        self, source_dir: Path, target_table: str, file_ext: str = "parquet"
+    ) -> tuple[str, int]:
         staging_table = f"STG_{target_table}"
 
         # Oracle 'ORACLE_BIGDATA' driver can read all files in a location
@@ -46,6 +48,11 @@ class OracleService(DatabaseSource, DatabaseSink):
         self.client.sql(sql)
         res = self.client.sql(f"SELECT COUNT(*) FROM {staging_table}")
         rows_staged = int(res[0][0]) if res and res[0] else 0
+        LOG.info(
+            "Staged data to Oracle",
+            table=staging_table,
+            rows=rows_staged,
+        )
         return staging_table, rows_staged
 
     def promote_data(
@@ -75,6 +82,11 @@ class OracleService(DatabaseSource, DatabaseSink):
         END;
         """
         self.client.sql(sql)
+        LOG.info(
+            "Promoted partition",
+            table=target_table,
+            partition=partition_val,
+        )
 
     def is_equal(
         self,
@@ -96,8 +108,13 @@ class OracleService(DatabaseSource, DatabaseSink):
             FROM {other}
         """
         results = self.sql(sql)
-
-        return len(results) == 0
+        is_match = len(results) == 0
+        LOG.info(
+            "Comparing tables", reference=reference, other=other, is_match=is_match
+        )
+        if not is_match:
+            LOG.warning("Table comparison failed", differences=len(results))
+        return is_match
 
     def clone(self, reference: str, other: str) -> None:
         sql = f"""
@@ -105,4 +122,5 @@ class OracleService(DatabaseSource, DatabaseSink):
             SELECT * FROM {reference} 
             WHERE 1 = 0
         """
+        LOG.info("Cloning table structure", source=reference, destination=other)
         self.client.sql(sql)

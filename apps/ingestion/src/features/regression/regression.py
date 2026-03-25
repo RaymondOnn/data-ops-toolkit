@@ -2,9 +2,10 @@ from pathlib import Path
 
 import msgspec
 import structlog
-from src.core.contexts import JobContext, JobContextBuilder
-from src.services.factory import ServiceFactory
-from src.utils.constants import APP_CONFIG_ROOT
+
+from apps.ingestion.src.core.contexts import JobContext, JobContextBuilder
+from apps.ingestion.src.services.factory import ServiceFactory
+from apps.ingestion.src.utils.constants import APP_CONFIG_ROOT
 
 LOG = structlog.getLogger(__name__)
 
@@ -25,7 +26,9 @@ def run_skeleton_clone(job_id: str, dataset_id: str, target_path: str):
     service.clone(reference=ctx.load.sink_identifier, other=cloned_identifier)
 
 
-def run_comparison(job_id: str, dataset_id: str, feature_path: str, ignore_cols: list[str]) -> bool:
+def run_comparison(
+    job_id: str, dataset_id: str, feature_path: str, ignore_cols: list[str]
+) -> bool:
     """Execution logic for equality check."""
 
     ctx = get_job_ctx(job_id, dataset_id)

@@ -13,9 +13,9 @@ dependencies = [
 ]
 requires-python = ">=3.11"
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+[tool.setuptools]
+packages = ["file"]
+package-dir = { "file" = "." }
 
-[tool.hatch.build.targets.wheel]
-packages = ["."]
+[tool.setuptools.package-data]
+"*" = ["py.typed"]

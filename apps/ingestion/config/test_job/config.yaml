@@ -5,10 +5,9 @@ default:
   source:
     type: "flat_file"
     config:
-      url: "file:///Users/main/Documents/Code/Github/data-ops-toolkit/apps/ingestion"
-
+    
   sink:
-    type: "clickhouse_db"
+    service_ref: clickhouse
 
   num_partitions: 1
 
@@ -27,14 +26,14 @@ default:
           filter_sql: ""         # e.g. "WHERE order_date = {{run_date}}"
           bind_params: {}
       transform:
-        type: bitmask
+        type: default
         options:
-          column_bitmasks:
-            order_id: 1
-            customer_id: 2
-            order_date: 4
-            total_amount: 8
-            status: 16
+          # column_bitmasks:
+          #   order_id: 1
+          #   customer_id: 2
+          #   order_date: 4
+          #   total_amount: 8
+          #   status: 16
       load:
         sink_identifier: "orders"
       partition_value: "2023-10-27"
@@ -42,10 +41,10 @@ default:
         enable_archival: true    # per-dataset archival override
 
 # ── Local env overrides ──────────────────────────────────────────────────────
-local:
-  source:
-    config:
-      url: "file:///Users/main/Documents/Code/Github/data-ops-toolkit/apps/ingestion"
+# local:
+#   source:
+#     config:
+#       url: "file:///Users/main/Documents/Code/Github/data-ops-toolkit/apps/ingestion"
 
 # production:
 #   source:

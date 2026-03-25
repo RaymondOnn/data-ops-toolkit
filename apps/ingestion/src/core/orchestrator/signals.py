@@ -2,9 +2,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 import structlog
-from src.core.contexts import ExecutionContext
-from src.core.orchestrator.engine import IngestionEngine
-from src.core.orchestrator.state import StateStore
+
+from apps.ingestion.src.core.contexts import ExecutionContext
+from apps.ingestion.src.core.orchestrator.engine import IngestionEngine
+from apps.ingestion.src.core.orchestrator.state import StateStore
 
 LOG = structlog.getLogger(__name__)
 
@@ -76,9 +77,13 @@ class SignalProcessor:
                     LOG.debug("Signal processed", run_id=run_id)
 
                 except (OSError, ValueError) as e:
-                    LOG.error(f"Failed to process signal {signal.name}: {e}")
+                    LOG.error(
+                        "Failed to process signal", signal=signal.name, error=str(e)
+                    )
                 except Exception:
-                    LOG.exception(f"Unexpected error processing signal {signal.name}")
+                    LOG.exception(
+                        "Unexpected error processing signal", signal=signal.name
+                    )
 
     def _check_for_manual_commands(self) -> None:
         """

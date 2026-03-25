@@ -4,9 +4,9 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import structlog
-from src.services.database.base import DatabaseSink, DatabaseSource
-from src.services.factory import ServiceFactory
 
+from apps.ingestion.src.services.database.base import DatabaseSink, DatabaseSource
+from apps.ingestion.src.services.factory import ServiceFactory
 from libs.database.clients.postgres import PostgresClient
 
 if TYPE_CHECKING:
@@ -31,7 +31,9 @@ class PostgresService(DatabaseSource, DatabaseSink):
             port=config.get("port", 5432),
         )
 
-    def stage_data(self, source_dir: Path, target_table: str, file_ext: str = "parquet") -> tuple[str, int]:
+    def stage_data(
+        self, source_dir: Path, target_table: str, file_ext: str = "parquet"
+    ) -> tuple[str, int]:
         staging_table = f"stg_{target_table}_{int(time.time())}"
         self.client.sql(f"CREATE UNLOGGED TABLE {staging_table} (LIKE {target_table})")
 
@@ -63,6 +65,11 @@ class PostgresService(DatabaseSource, DatabaseSink):
 
             # Commit only if the entire 50M row stream succeeded
             conn.commit()
+            LOG.info(
+                "Staged data to Postgres",
+                table=staging_table,
+                rows=rows_staged,
+            )
             return staging_table, rows_staged
         except Exception as e:
             conn.rollback()
@@ -87,6 +94,11 @@ class PostgresService(DatabaseSource, DatabaseSink):
         DROP TABLE {staging_table};
         """
         self.client.sql(sql)
+        LOG.info(
+            "Promoted partition",
+            table=target_table,
+            partition=partition_val,
+        )
 
     def is_equal(
         self,
@@ -107,7 +119,13 @@ class PostgresService(DatabaseSource, DatabaseSink):
             FROM {other}
         """
         results = self.sql(sql)
-        return len(results) == 0
+        is_match = len(results) == 0
+        LOG.info(
+            "Comparing tables", reference=reference, other=other, is_match=is_match
+        )
+        if not is_match:
+            LOG.warning("Table comparison failed", differences=len(results))
+        return is_match
 
     def clone(self, reference: str, other: str) -> None:
         sql = f"""
@@ -115,4 +133,5 @@ class PostgresService(DatabaseSource, DatabaseSink):
             SELECT * FROM {reference} 
             WHERE 1 = 0
         """
+        LOG.info("Cloning table structure", source=reference, destination=other)
         self.client.sql(sql)

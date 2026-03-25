@@ -6,17 +6,22 @@ from typing import TYPE_CHECKING
 import msgspec
 import polars as pl
 import structlog
-from src.core.models.job.manifest import ExtractPayload
-from src.core.models.steps import JobStep
-from src.core.strategies.extract import Reader, ReaderContext, ReaderFactory
-from src.services.factory import ServiceFactory
-from src.utils.exceptions import JobBlocked
 
+from apps.ingestion.src.core.models.job.manifest import ExtractPayload
+from apps.ingestion.src.core.strategies.extract import (
+    Reader,
+    ReaderContext,
+    ReaderFactory,
+)
+from apps.ingestion.src.services.factory import ServiceFactory
+from apps.ingestion.src.utils.exceptions import JobBlocked
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreakerTripped
 
+from .base import JobStep
+
 if TYPE_CHECKING:
-    from src.core.models.job import Job
+    from apps.ingestion.src.core.models.job import Job
 
 
 LOG = structlog.getLogger(__name__)
@@ -76,7 +81,11 @@ class ExtractStep(JobStep):
                 job_ctx.extract.source_identifier, **job_ctx.extract.source_config
             )
             reader: Reader = ReaderFactory.get_reader(ctx.source_type)
-            LOG.info(f"Executing ingestion using strategy: {ctx.source_type}")
+            LOG.info(
+                "Executing ingestion strategy",
+                strategy=ctx.source_type,
+                source=ctx.source_identifier,
+            )
 
             # 3. We create a temporary physical folder in 'data'
             data_store = (
@@ -142,7 +151,11 @@ class ExtractStep(JobStep):
             )
 
             self.finalize(job, results=msgspec.to_builtins(payload))
-            LOG.info("Reader completed", file_count=len(file_infos))
+            LOG.info(
+                "Reader completed",
+                file_count=len(file_infos),
+                total_rows=total_rows,
+            )
 
             # 4. State Transition
             return str(self._transit(job))
@@ -153,7 +166,7 @@ class ExtractStep(JobStep):
             LOG.error("Halt by circuit breaker.", error=str(cb))
             raise
         except Exception as e:
-            LOG.error(f"Extract Step failed: {e}")
+            LOG.error("Extract Step failed", error=str(e))
             self.finalize(job, exception=e)
             raise
 
@@ -162,6 +175,7 @@ class ExtractStep(JobStep):
         Calculate the MD5 checksum of a file.
         Important to ensure data integrity and can be used for deduplication
         """
+        LOG.debug("Calculating checksum", file=str(path))
         hash_md5 = hashlib.md5()
         with path.open("rb") as f:
             for chunk in iter(lambda: f.read(4096), b""):
@@ -173,6 +187,7 @@ class ExtractStep(JobStep):
         Unions all schemas found in the source files to create a
         master schema for the Transform step.
         """
+        LOG.debug("Merging schemas from extracted files", file_count=len(schemas))
         merged = {}
         for schema in schemas:
             for col, dtype in schema.items():

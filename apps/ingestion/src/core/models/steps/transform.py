@@ -1,18 +1,21 @@
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 import polars as pl
 import structlog
-from src.core.models.job.manifest import TransformPayload
-from src.core.models.steps import JobStep
-from src.core.strategies.transform.base import TransformContext
-from src.core.strategies.transform.factory import TransformFactory
 
-from libs.file.formats.parquet import ParquetHandler
+from apps.ingestion.src.core.models.job.manifest import TransformPayload
+from apps.ingestion.src.core.strategies.transform import (
+    TransformContext,
+    TransformFactory,
+)
+from libs.file.formats import ParquetHandler
+
+from .base import JobStep
 
 if TYPE_CHECKING:
-    from src.core.models.job import Job
+    from apps.ingestion.src.core.models.job import Job
 
 
 LOG = structlog.getLogger(__name__)
@@ -34,10 +37,11 @@ class TransformStep(JobStep):
         to know the specific physical timestamped folder.
         """
         start_ts = datetime.now().astimezone().isoformat()
+        LOG.info("Starting transformation", type=job.context.transform.transform_type)
         try:
             with ParquetHandler() as handler:
                 ctx = TransformContext(
-                    options=job.context.transform.params,
+                    options=job.context.transform.transform_params,
                     source_dir=(job.folder / "extract" / "part_*.parquet").resolve(),
                     destination_dir=job.folder / "transform",
                     output_format=APP_TRANSFORM_OUTPUT_EXT,
@@ -73,7 +77,7 @@ class TransformStep(JobStep):
                 # 4. Decision: Use a partitioned sink.
                 # This creates part-0.parquet, part-1.parquet, etc., in the data_store folder.
                 # This is much safer for 2GB RAM as it flushes buffers more frequently.
-                handler.from_df(tr_lf, str(data_store))
+                handler.from_df(tr_lf, data_store.resolve())
 
             # 5. DECISION: Get accurate stats after the stream is closed
             # scan_parquet + select(len) on the OUTPUT directory reads only the
@@ -91,14 +95,21 @@ class TransformStep(JobStep):
             if hasattr(stats, "fetch_blocking"):
                 stats = cast("Any", stats).fetch_blocking()
 
+            output_rows = int(stats["count"][0])
             payload = TransformPayload(
                 logic_version=getattr(transformer, "version", "1.0.0"),
                 transform_type=job.context.transform.transform_type,
                 artifact_folder=str(data_store),
-                output_row_count=int(stats["count"][0]),
+                output_row_count=output_rows,
                 schema_validation_pass=True,
                 refined_schema={k: str(v) for k, v in tr_lf.schema.items()},
                 start_timestamp_utc=start_ts,
+            )
+
+            LOG.info(
+                "Transformation complete",
+                output_rows=output_rows,
+                output_folder=str(data_store.name),
             )
 
             # 4. Finalize & Flip the Link

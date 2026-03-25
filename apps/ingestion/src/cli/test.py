@@ -1,8 +1,8 @@
 import structlog
 import typer
 
-from src.core.contexts.builder import JobContextBuilder
-from src.features.regression.regression import run_comparison
+from apps.ingestion.src.core.contexts.builder import JobContextBuilder
+from apps.ingestion.src.features.regression.regression import run_comparison
 
 LOG = structlog.get_logger(__name__)
 
@@ -45,21 +45,20 @@ def test_regression(
         raise typer.Exit(1)
 @test_app.command("clone")
 def clone_sink(
-    source_path: str = typer.Option(..., help="Source Table or S3 Path"),
-    target_path: str = typer.Option(..., help="Target Skeleton Path"),
+    job_id: str = typer.Option(..., "--job-id", help="The job identifier"),
+    dataset: str = typer.Option(..., "--dataset", help="The dataset identifier"),
 ):
     """
     Clones the structure/schema of a sink without copying the underlying data.
     Used to prepare a clean environment for regression testing.
     """
-    from src.services.factory import ServiceFactory
+    from apps.ingestion.src.features.regression.regression import run_skeleton_clone
     
     LOG.info("Starting skeleton clone", source=source_path, target=target_path)
-    run_skeleton_clone(ctx, target_path)
     # 2. Execute the 'Clone' logic you added to your Service class
     # Ensure your implementation uses 'LIMIT 0' or similar for metadata-only
     try:
-        service.clone(source=source_path, target=target_path, metadata_only=True)
+        run_skeleton_clone(job_id, dataset, target_path)
         print(f"✅ Successfully created skeleton at: {target_path}")
     except Exception as e:
         LOG.error("Clone failed", error=str(e))
@@ -113,3 +112,29 @@ def test_impact(
 
     # 3. Print Final Report
     print_summary_table(results)
+    
+@test_app.command(name="run")
+def test(
+    # Main Argument
+    run_date: datetime = typer.Argument(
+        ..., formats=["%Y-%m-%d"], help="The target date for processing (YYYY-MM-DD)"
+    ),
+    # Required/Common Options
+    job_id: str = typer.Option(
+        ..., "--job-id", "-j", help="The unique UUID for this run"
+    ),
+    dataset: str = typer.Option(
+        ..., "--dataset", "-d", help="Dataset identifier (e.g., 'sales_data')"
+    ),
+    from_step: Optional[JobSteps] = typer.Option(
+        None, "--from", help="Force start from this step"
+    ),
+    to_step: Optional[JobSteps] = typer.Option(
+        None, "--to", help="Stop execution after this step"
+    ),
+    force: bool = typer.Option(True, "--force", help="Defaults to True for testing"),
+) -> None:
+    """Developer test mode. Allows slicing the pipeline."""
+    _execute_pipeline(
+        run_date, job_id, dataset, from_step=from_step, to_step=to_step, force=force
+    )

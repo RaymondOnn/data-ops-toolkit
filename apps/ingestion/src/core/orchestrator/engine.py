@@ -7,13 +7,14 @@ import msgspec
 import ray
 import structlog
 from filelock import FileLock
-from src.core.contexts import ExecutionContext
-from src.core.models.job import Job, JobManifest
-from src.core.models.steps import _JOB_ORDER
-from src.services.registry import ServiceRegistry
-from src.utils.common import find_path
-from src.utils.constants import DISKCACHE_FILE_PATH
-from src.utils.dates import epoch_to_iso, get_end_of_day_ts
+
+from apps.ingestion.src.core.contexts import ExecutionContext
+from apps.ingestion.src.core.models.job import Job, JobManifest
+from apps.ingestion.src.core.models.steps.enums import STEP_ORDER
+from apps.ingestion.src.services.registry import ServiceRegistry
+from apps.ingestion.src.utils.common import find_path
+from apps.ingestion.src.utils.constants import DISKCACHE_FILE_PATH
+from apps.ingestion.src.utils.dates import epoch_to_iso, get_end_of_day_ts
 
 LOG = structlog.getLogger(__name__)
 LOCK_FILE = "/tmp/orchestrator.lock"
@@ -40,6 +41,9 @@ class Worker:
 
     def process_step(self, key: str, config_file_path: str | Path) -> None:
         current_step, composite_key = key.split(":", 1)
+        log = structlog.get_logger().bind(
+            worker_id=self.worker_id, job_key=composite_key, step=current_step
+        )
 
         # 1. Rehydrate Job
         with self.lock:
@@ -54,6 +58,7 @@ class Worker:
             target_step=current_step,
         )
         self.is_busy = True
+        log.info("Worker started processing step", run_id=meta["run_id"])
 
         try:
             # 2. Execute the single step
@@ -72,12 +77,16 @@ class Worker:
                     meta["current_step"] = next_step
                     meta["status"] = "PENDING"  # Ready for the next worker pool
                     self.cache[f"{next_step}:{composite_key}"] = meta
+                    log.info(
+                        "Step complete. Job returned to queue.", next_step=next_step
+                    )
                 else:
-                    LOG.info(f"Job {composite_key} fully completed.")
+                    log.info("Job fully completed.")
                     meta["status"] = "COMPLETED"
                     self.cache[f"{current_step}:{composite_key}"] = meta
 
         except Exception as e:
+            log.exception("Worker failed processing step")
             with self.lock:
                 meta["status"] = "FAILED"
                 self.cache[f"{current_step}:{composite_key}"] = meta
@@ -114,12 +123,12 @@ class IngestionEngine:
         # Initialize specialized pools
         workspace = self.exec_ctx.workspace_dir
         self.io_pool: list[ray.actor.ActorHandle] = [
-            Worker.remote(f"io_{i}", workspace)  # type: ignore
-            for i in range(15)
+            Worker.remote(f"io_{i}", workspace)
+            for i in range(15)  # type: ignore
         ]
         self.cpu_pool: list[ray.actor.ActorHandle] = [
-            Worker.remote(f"cpu_{i}", workspace)  # type: ignore
-            for i in range(4)
+            Worker.remote(f"cpu_{i}", workspace)
+            for i in range(4)  # type: ignore
         ]
 
     def run(self) -> None:
@@ -166,8 +175,11 @@ class IngestionEngine:
                     "retry_count": 0,
                 }
             LOG.info(
-                f"Queued Job: {job_id} | RunID: {run_id} | "
-                f"Step: {current_step} | Expires: {expiry_str}"
+                "Queued Job",
+                job_id=job_id,
+                run_id=run_id,
+                step=current_step,
+                expires=expiry_str,
             )
 
     def _process_jobs(self) -> None:
@@ -308,14 +320,14 @@ class IngestionEngine:
         """
 
         try:
-            current_idx = _JOB_ORDER.index(current_step)
+            current_idx = STEP_ORDER.index(current_step)
             # Return next step, or 'complete' if we are at the end
-            if current_idx + 1 < len(_JOB_ORDER):
-                return str(_JOB_ORDER[current_idx + 1])
+            if current_idx + 1 < len(STEP_ORDER):
+                return str(STEP_ORDER[current_idx + 1])
             return "complete"
         except ValueError:
             # If the step is unknown (e.g., job just started), start at the beginning
-            return str(_JOB_ORDER[0])
+            return str(STEP_ORDER[0])
 
     def _recover_from_manifest(self, job_id: str, run_id: str) -> str:
         """
@@ -333,7 +345,7 @@ class IngestionEngine:
 
         if not manifest_path.exists():
             LOG.info("No active manifest found, starting fresh.", job_id=job_id)
-            return str(_JOB_ORDER[0])  # Usually 'start'
+            return str(STEP_ORDER[0])  # Usually 'start'
 
         with manifest_path.open("rb") as f:
             # msgspec is fast enough to do this in the main recovery loop
@@ -341,7 +353,7 @@ class IngestionEngine:
 
             # Logic: If the current step is done, move forward.
             # Otherwise, the step crashed mid-way; resume/retry it.
-            for step in _JOB_ORDER:
+            for step in STEP_ORDER:
                 if hasattr(meta, step):
                     continue
 

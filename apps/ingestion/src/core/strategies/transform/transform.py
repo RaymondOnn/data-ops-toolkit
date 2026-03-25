@@ -2,10 +2,11 @@ from typing import ClassVar
 
 import polars as pl
 import structlog
-from src.core.strategies.transform.base import TransformContext, Transformer
-from src.core.strategies.transform.factory import TransformFactory
 
-from libs.file.formats.base import HandlerFactory
+from libs.file.formats import FormatFactory
+
+from .base import TransformContext, Transformer
+from .factory import TransformFactory
 
 LOG = structlog.getLogger(__name__)
 
@@ -24,7 +25,7 @@ class NoOpTransformer(Transformer):
             raise ValueError("Source directory contains multiple formats")
 
         if src_fmt != set(ctx.output_format):
-            writer = HandlerFactory.get_handler(ctx.output_format)
+            writer = FormatFactory.get_handler(ctx.output_format)
             for file in ctx.source_dir.iterdir():
                 filename = file.stem
                 output_file = ctx.destination_dir / f"{filename}.{ctx.output_format}"
