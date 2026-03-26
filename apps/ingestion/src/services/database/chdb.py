@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any
 
 import structlog
+
 from apps.ingestion.src.services.database.base import DatabaseSink, DatabaseSource
 from apps.ingestion.src.services.factory import ServiceFactory
 from libs.database.clients.chdb import ChDBClient
@@ -14,9 +15,7 @@ LOG = structlog.get_logger(__name__)
 class ChDBService(DatabaseSource, DatabaseSink):
     def _init_client(self, **config: Any) -> ChDBClient:
         # chDB only needs a path for persistence
-        return ChDBClient(
-            path=config.get("path", "./.chdb_data")
-        )
+        return ChDBClient(path=config["path"])
 
     def stage_data(
         self, source_dir: Path, target_table: str, file_ext: str = "parquet"
@@ -25,7 +24,8 @@ class ChDBService(DatabaseSource, DatabaseSink):
 
         # 1. Create Staging Table (Matches Target Structure)
         # chDB supports 'CREATE TABLE AS'
-        self.client.sql( f"""
+        self.client.sql(
+            f"""
                 CREATE TABLE IF NOT EXISTS {staging_table} 
                 ENGINE = Log AS 
                     SELECT * FROM {target_table} 

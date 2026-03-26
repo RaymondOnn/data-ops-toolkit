@@ -7,7 +7,7 @@ import msgspec
 import polars as pl
 import structlog
 
-from apps.ingestion.src.core.models.job.manifest import ExtractPayload
+from apps.ingestion.src.core.models.job.manifest import ExtractPayload, FileInfo
 from apps.ingestion.src.core.strategies.extract import (
     Reader,
     ReaderContext,
@@ -19,6 +19,7 @@ from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreakerTripped
 
 from .base import JobStep
+from .enums import JobSteps
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.job import Job
@@ -27,23 +28,9 @@ if TYPE_CHECKING:
 LOG = structlog.getLogger(__name__)
 
 
-class FileInfo(msgspec.Struct):
-    """
-    Metadata for an individual physical file artifact.
-    """
-
-    path: str  # Absolute or relative path to the parquet file
-    checksum: str  # MD5/SHA hash for forensic integrity
-    row_count: int  # Number of rows in THIS specific file
-    size_bytes: int  # Physical file size on disk
-
-
 class ExtractStep(JobStep):
+    name = JobSteps.EXTRACT.label
     manifest: ExtractPayload
-
-    @property
-    def name(self) -> str:
-        return "extract"
 
     def execute(self, job: "Job") -> str:
 
@@ -71,6 +58,7 @@ class ExtractStep(JobStep):
                 run_id=job.run_id,
                 run_date=job_ctx.run_date,
                 job_id=job.id,
+                workspace_dir=str(job.exec_ctx.workspace_dir),
                 options=options,
             )
 
@@ -78,7 +66,7 @@ class ExtractStep(JobStep):
             # Decision: DataReader.fetch uses the functional apply_schema_contract
             # inside the Ray workers to prevent double-handling.
             service = ServiceFactory.get_source(
-                job_ctx.extract.source_identifier, **job_ctx.extract.source_config
+                job_ctx.extract.source_type, **job_ctx.extract.source_config
             )
             reader: Reader = ReaderFactory.get_reader(ctx.source_type)
             LOG.info(
@@ -142,7 +130,9 @@ class ExtractStep(JobStep):
             # 6. Create Payload and Finalize
             # We map the strategy output to our ExtractPayload schema
             payload = ExtractPayload(
-                artifact_folder=data_store,  # ?: Point to virtual or physical folder
+                artifact_folder=str(
+                    data_store
+                ),  # ?: Point to virtual or physical folder
                 file_count=len(file_infos),
                 files=file_infos,
                 source_row_count=total_rows,

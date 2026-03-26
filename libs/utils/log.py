@@ -2,49 +2,77 @@ import logging
 import sys
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
-def setup_logging(log_dir: Path, is_prod: bool = False):
-    # 1. The Detailed File Handler (DEBUG)
+
+def setup_logging(
+    log_dir: Path, is_prod: bool = False, filename: str = "platform.jsonl"
+):
+    # Ensure the log directory exists before initializing handlers
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. The JSON File Handler
+    # We use a standard Formatter that just outputs the message
+    # (which structlog will provide as JSON)
     file_handler = TimedRotatingFileHandler(
-        filename=f"{log_dir}/platform.log", when="midnight", backupCount=7
+        filename=log_dir / filename, when="midnight", backupCount=7
     )
     file_handler.setLevel(logging.DEBUG)
 
-    # 2. The Clean Console Handler (INFO)
+    # 2. The Console Handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
 
-    # 3. Configure Structlog to use the Standard Lib bridge
+    # 3. Define the Shared Processors
+    # These run for BOTH the console and the file
+    shared_processors: list[Callable] = [
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.dict_tracebacks,
+    ]
+
     structlog.configure(
         processors=[
-            structlog.contextvars.merge_contextvars,
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.dict_tracebacks,
-            structlog.processors.CallsiteParameterAdder(
-                {
-                    structlog.processors.CallsiteParameter.FUNC_NAME,
-                    structlog.processors.CallsiteParameter.LINENO,
-                }
-            ),
-            # In Dev, ConsoleRenderer makes the Console pretty,
-            # while JSON goes to the file if configured.
-            (
-                structlog.dev.ConsoleRenderer()
-                if not is_prod
-                else structlog.processors.JSONRenderer()
-            ),
+            *shared_processors,
+            # This is the bridge: it sends the log to the standard logging module
+            structlog.stdlib.filter_by_level,
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],
         logger_factory=structlog.stdlib.LoggerFactory(),
         wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
     )
 
+    # 4. Use ProcessorFormatter to split the rendering styles
+    # FILE gets JSON
+    file_formatter = structlog.stdlib.ProcessorFormatter(
+        processor=structlog.processors.JSONRenderer(),
+        foreign_pre_chain=shared_processors,
+    )
+    file_handler.setFormatter(file_formatter)
+
+    # CONSOLE gets Pretty (if not prod) or JSON
+    console_formatter = structlog.stdlib.ProcessorFormatter(
+        processor=(
+            structlog.dev.ConsoleRenderer(colors=True)
+            if not is_prod
+            else structlog.processors.JSONRenderer()
+        ),
+        foreign_pre_chain=shared_processors,
+    )
+    console_handler.setFormatter(console_formatter)
+
     root = logging.getLogger()
-    root.setLevel(
-        logging.DEBUG
-    )  # Root must be DEBUG to allow file_handler to see everything
-    root.addHandler(file_handler)
-    root.addHandler(console_handler)
+
+    # Clear existing handlers to prevent duplicate logs in Ray workers
+    if root.hasHandlers():
+        root.handlers.clear()
+
+    root.handlers = [file_handler, console_handler]
+    root.setLevel(logging.DEBUG)

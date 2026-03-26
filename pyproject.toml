@@ -106,6 +106,8 @@ ignore = [
     "PLR0913", 
     "COM812",
     "N818", # error-suffix-on-exception-name
+    "TD002", # missing-todo-author
+    "PLC0415", # import-outside-top-level
 ]
 
 [tool.ruff.lint.pydocstyle]

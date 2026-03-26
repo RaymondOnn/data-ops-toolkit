@@ -1,11 +1,10 @@
 import logging
-from typing import Any, Optional
+from typing import Any
 
 import fsspec
 from fsspec.implementations.local import LocalFileSystem
 
 from libs.file.base import FileSystemClient
-
 
 LOG = logging.getLogger(__name__)
 
@@ -17,11 +16,17 @@ class LocalClient(FileSystemClient):
         - auto_mkdir: True (Automatically create parent directories)
     """
 
-    def __init__(self, url: str, storage_options: Optional[dict[str, Any]] = None):
+    def __init__(self, url: str, storage_options: dict[str, Any] | None = None):
         super().__init__(url, storage_options)
-        self.fs = self.connect()
+
+    @property
+    def fs(self) -> LocalFileSystem:
+        """Concrete implementation of the abstract property from FileSystemClient."""
+        if self._fs is None:
+            self.connect()
+        return self._fs
 
     def connect(self) -> LocalFileSystem:
-        if not self.fs:
-            self.fs = fsspec.filesystem("file", **self.opts)
-        return self.fs
+        if not self._fs:
+            self._fs = fsspec.filesystem("file", **self.opts)
+        return self._fs

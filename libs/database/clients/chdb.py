@@ -4,13 +4,14 @@ from typing import Any
 import chdb
 import polars as pl
 from chdb import dbapi
+
 from libs.database.clients.base import DBClient
 
 
 class ChDBClient(DBClient):
     def connect(self) -> Any:
         """
-        chDB is embedded, so 'connecting' just means pointing to 
+        chDB is embedded, so 'connecting' just means pointing to
         a persistence directory.
         If 'path' is not provided, it runs in-memory (ephemeral).
         """
@@ -43,12 +44,12 @@ class ChDBClient(DBClient):
         filter_clause = filter_sql.replace("WHERE", "").strip() if filter_sql else ""
 
         return [
-            f"{base_query} WHERE {' AND '.join(
+            f"""{base_query} WHERE {' AND '.join(
                 filter(
                     None, 
                     [filter_clause, f'cityHash64(*) % {num_partitions} = {i}']
                 )
-            )}"
+            )}"""
             for i in range(num_partitions)
         ]
 

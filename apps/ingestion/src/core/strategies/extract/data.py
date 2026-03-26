@@ -6,7 +6,7 @@ from typing import Any
 import polars as pl
 import ray
 import structlog
-from apps.ingestion.src.services.base import Service
+from apps.ingestion.src.services.base import SourceMixin
 from apps.ingestion.src.services.database import DatabaseSource
 
 from .base import Reader, ReaderContext
@@ -22,7 +22,7 @@ class DataReader(Reader):
     """
 
     def fetch(
-        self, service: Service, context: ReaderContext, target_folder: Path
+        self, service: SourceMixin, context: ReaderContext, target_folder: Path
     ) -> list[dict[str, Any]]:
         """Entry point for ExtractStep."""
         df_generator = self._get_ray_generator(service, context)
@@ -30,19 +30,21 @@ class DataReader(Reader):
 
     def _get_ray_generator(
         self,
-        service: Any,
+        service: SourceMixin,
         context: ReaderContext,
     ) -> Generator[pl.DataFrame, None, None]:
         # 1. Slice the work into parts (e.g., ORA_HASH queries)
         work_units = self.get_work_units(service, context)
+
+        import msgspec
 
         # 2. Package the metadata for the workers.
         # We don't send the 'service' object; we send the 'config' to recreate it.
         task_payloads = [
             {
                 "unit": unit,
-                "context": context,
-                "config": service.config,  # Connection params
+                "context": msgspec.to_builtins(context),
+                "config": msgspec.to_builtins(service.config),  # Connection params
             }
             for unit in work_units
         ]
@@ -51,23 +53,36 @@ class DataReader(Reader):
         ds = ray.data.from_items(task_payloads)
 
         # 3. Define the extraction task (Runs in parallel on Ray Workers)
-        def fetch_task(payload: dict[str, Any]) -> pl.DataFrame:
+        def fetch_task(batch: dict[str, list[Any]]) -> pl.DataFrame:
             """This function runs on the Ray Worker (K8S Pod)."""
-            from apps.ingestion.src.core.schema import apply_schema_contract
-            from apps.ingestion.src.services.factory import ServiceFactory
+            from pathlib import Path
 
-            context = payload["context"]
-            service = ServiceFactory.get_service(
-                context.source_type, **payload["config"]
-            )
+            import msgspec
+            from apps.ingestion.src.core.schema import apply_schema_contract
+            from apps.ingestion.src.core.strategies.extract.base import ReaderContext
+            from apps.ingestion.src.services.factory import ServiceFactory
+            from apps.ingestion.src.services.registry import ServiceRegistry
+
+            # map_batches receives a batch (dict of lists). With batch_size=1,
+            # we extract our single task payload from the first index.
+            ctx_dict = batch["context"][0]
+            context = msgspec.convert(ctx_dict, type=ReaderContext)
+
+            config = batch["config"][0]
+            unit = batch["unit"][0]
+
+            # Initialize the ServiceRegistry for this Ray worker process
+            if context.workspace_dir:
+                ServiceRegistry.configure(Path(context.workspace_dir))
+
+            service = ServiceFactory.get_source(context.source_type, **config)
 
             # 1. Extraction
             # Support both DB query string and File list dict
-            unit = payload["unit"]
             if isinstance(unit, dict) and "files" in unit:
                 unit = unit["files"]
 
-            result = service.fetch_df(unit)
+            result = service.fetch_data(unit)
 
             # Convert LazyFrame to DataFrame for Ray compatibility
             df = result.collect() if isinstance(result, pl.LazyFrame) else result
@@ -76,13 +91,16 @@ class DataReader(Reader):
             return apply_schema_contract(df, context)
 
         # 4. Map the task across the cluster
-        # .iter_batches() makes this a generator!
-        ray_dataset = ds.map(fetch_task)
+        # Use map_batches instead of map because fetch_task returns a Polars
+        # DataFrame (a block of rows). Ray 2.5+ requires map_batches when
+        # expanding a single task into a tabular result.
+        ray_dataset = ds.map_batches(fetch_task, batch_size=1)
 
         # 5. Yield blocks back to IngestionStream
         # Ray handles backpressure here: it only fetches the next block
         # when IngestionStream is ready for it.
-        yield from ray_dataset.iter_batches(batch_format="polars")
+        for batch in ray_dataset.iter_batches(batch_format="pyarrow"):
+            yield pl.from_arrow(batch)
 
     def to_parquet(
         self, generator: Generator[pl.DataFrame, None, None], destination: Path

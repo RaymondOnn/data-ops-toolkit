@@ -1,5 +1,6 @@
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Generator
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,14 @@ class FileSystemClient(BaseIOClient, ABC):
     @abstractmethod
     def fs(self) -> fsspec.AbstractFileSystem:
         raise NotImplementedError("Subclasses must implement connect() method.")
+
+    def open(self, path: str, mode: str = "rb") -> Any:
+        """Standard file open delegating to the fsspec filesystem."""
+        return self.fs.open(self.resolve_path(path), mode=mode)
+
+    def close(self) -> None:
+        """FileSystem clients are generally stateless wrappers around fsspec."""
+        pass
 
     # ?: Perhaps quarantine file as a separate method
     # def validate_integrity(self, path: str) -> bool:
@@ -48,6 +57,31 @@ class FileSystemClient(BaseIOClient, ABC):
             )
             return str(self.fs.unstrip_protocol(normalized))
         return str(Path(path).resolve())
+
+    def walk_paths(self, path: str, pattern: str = "*") -> Generator[str, None, None]:
+        """
+        Discovery utility:
+        - If path is a file, yields it.
+        - If path is a folder, yields all files matching the pattern.
+        """
+        resolved = self.resolve_path(path)
+
+        if not self.fs.exists(resolved):
+            LOG.warning(f"Path does not exist: {resolved}")
+            return
+
+        # fsspec glob behavior can vary; check if the resolved path itself is a file first
+        if self.fs.isfile(resolved):
+            if pattern == "*" or Path(resolved).match(pattern):
+                yield resolved
+        else:
+            # Handle Directory globbing
+            # We use a recursive glob by default for landing zones
+            search_pattern = f"{resolved.rstrip('/')}/**/{pattern}"
+            for p in self.fs.glob(search_pattern):
+                # glob() often returns directories; we strictly yield files
+                if self.fs.isfile(p):
+                    yield str(self.fs.unstrip_protocol(p))
 
     def smart_transfer(self, local_source: str, remote_dest: str) -> None:
         """Handles local-to-cloud or cloud-to-cloud transfers safely."""
@@ -108,9 +142,9 @@ def create_fs_client(
     """
     Assembles a Managed Client with dynamic capabilities (Ingestion, Archive, etc.).
     """
-    from .clients.s3 import S3Client
     from .clients.azure import AzureClient
     from .clients.local import LocalClient
+    from .clients.s3 import S3Client
 
     # 1. Map Protocol to Base Class
     protocol_map = {

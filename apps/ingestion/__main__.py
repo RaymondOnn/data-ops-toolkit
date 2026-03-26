@@ -1,6 +1,5 @@
 import traceback
 from datetime import datetime
-from pathlib import Path
 from typing import Annotated
 
 import structlog
@@ -22,12 +21,6 @@ def _configure_runtime(debug: bool, dry_run: bool) -> None:
     """Helper to apply runtime configurations (Logging, Dry Run)."""
     state["dry_run"] = dry_run
     state["debug"] = debug
-
-    log_dir = Path("logs")
-    log_dir.mkdir(exist_ok=True)
-
-    # Initialize logging (JSON for Prod/False, Console for Debug/True)
-    setup_logging(log_dir=log_dir, is_prod=not debug)
 
     if debug:
         structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(10))
@@ -78,13 +71,21 @@ def run(
     if debug:
         _configure_runtime(debug=True, dry_run=state["dry_run"])
 
-    typer.echo(f"🚀 Initializing {dataset} for {run_date.date()} (ID: {job_id})")
-
     # 1. Configuration & Overrides
     overrides = parse_set_options(settings)
 
     # 2. Initialize Orchestrator
     orchestrator = create_orchestrator()
+
+    # 2.5 Initialize Unified Logging in the Workspace
+    # We name the file after the job_id to fulfill the 'one log per run' request
+    setup_logging(
+        log_dir=orchestrator.exec_ctx.workspace_dir / "logs",
+        is_prod=not state["debug"],
+        filename=f"{job_id}.jsonl",
+    )
+
+    typer.echo(f"🚀 Initializing {dataset} for {run_date.date()} (ID: {job_id})")
 
     # 3. Hand off to Orchestrator
     try:

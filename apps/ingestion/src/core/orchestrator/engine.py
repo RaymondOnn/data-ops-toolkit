@@ -9,15 +9,17 @@ import structlog
 from filelock import FileLock
 
 from apps.ingestion.src.core.contexts import ExecutionContext
-from apps.ingestion.src.core.models.job import Job, JobManifest
+from apps.ingestion.src.core.models.job import Job, JobManifest, JobStatus
 from apps.ingestion.src.core.models.steps.enums import STEP_ORDER
 from apps.ingestion.src.services.registry import ServiceRegistry
 from apps.ingestion.src.utils.common import find_path
 from apps.ingestion.src.utils.constants import DISKCACHE_FILE_PATH
 from apps.ingestion.src.utils.dates import epoch_to_iso, get_end_of_day_ts
+from libs.utils.log import setup_logging
+
+from .enums import JobMetadata
 
 LOG = structlog.getLogger(__name__)
-LOCK_FILE = "/tmp/orchestrator.lock"
 CACHE_DIR = ".cache/ingestion"
 
 
@@ -29,67 +31,96 @@ class Worker:
         self.cache = diskcache.Cache(
             (self.exec_ctx.workspace_dir / DISKCACHE_FILE_PATH).resolve(),
             timeout=10,  # Increase timeout for slow PV file locks (NFS/EFS)
-            settings={
-                "sqlite_journal_mode": "wal"
-            },  # Ensure WAL mode is active for concurrent reads/writes
+            disk_pickle_protocol=4,  # Recommended for Python 3.8+
+            # Unpack settings or just pass them as kwargs directly
+            sqlite_journal_mode="wal",
+            sqlite_synchronous=1,  # 'NORMAL' - better for WAL mode performance
         )
         # Share the same cache path with ServiceRegistry so that circuit-breaker
         # state (written by workers) is visible to the Orchestrator's registry.
         ServiceRegistry.configure(self.exec_ctx.workspace_dir)
-        self.lock = FileLock(LOCK_FILE)
-        self._busy = False
+        self.lock = FileLock(self.exec_ctx.workspace_dir / "orchestrator.lock")
+
+        # Initialize logging for the worker process.
+        # Using 'platform.jsonl' for workers as they are shared across runs.
+        log_dir = self.exec_ctx.workspace_dir / "logs"
+        setup_logging(log_dir=log_dir, is_prod=not self.exec_ctx.is_debug())
+        self.is_busy = False
 
     def process_step(self, key: str, config_file_path: str | Path) -> None:
-        current_step, composite_key = key.split(":", 1)
-        log = structlog.get_logger().bind(
-            worker_id=self.worker_id, job_key=composite_key, step=current_step
-        )
+        current_step, _ = key.split(":", 1)
+        log = structlog.get_logger().bind(worker_id=self.worker_id, step=current_step)
 
         # 1. Rehydrate Job
         with self.lock:
-            meta = self.cache[key]
+            raw_meta = self.cache[key]
+            if not isinstance(raw_meta, JobMetadata):
+                raise ValueError(f"Invalid job metadata for key {key}: {raw_meta}")
+            meta: JobMetadata = raw_meta
+
+        # Update status to RUNNING immediately so Engine occupancy tracking is accurate
+        with self.lock:
+            meta.status = JobStatus.RUNNING.value
+            self.cache[key] = meta
 
         job: Job = Job(
-            composite_key=composite_key,
-            run_id=meta["run_id"],
-            run_date=meta["run_date"],
+            composite_key=f"{meta.job_id}:{meta.dataset_id}",
+            run_id=meta.run_id,
+            run_date=meta.run_date,
             worker_id=self.worker_id,
             exec_ctx=self.exec_ctx,
             target_step=current_step,
         )
         self.is_busy = True
-        log.info("Worker started processing step", run_id=meta["run_id"])
+        log.info(
+            "Worker started processing step", run_id=meta.run_id, job_id=meta.job_id
+        )
+
+        # Ensure the job's workspace is fully provisioned before check-in
+        _ = job.folder
 
         try:
-            # 2. Execute the single step
-            job.execute()
+            # 2. Step Check-in: Update manifest immediately to 'RUNNING'
+            job.check_in(current_step)
 
-            # 3. Get the next step signal
-            next_step = job._step._transit(job)
+            # 3. Execute and get the next step signal (returns label or 'FINISH')
+            next_step = job.execute()
 
             # 4. Atomic Handoff
             with self.lock:
                 # Remove from current queue
-                self.cache.pop(f"{current_step}:{composite_key}")
+                self.cache.pop(key)
 
                 # Push to next queue if not finished
-                if next_step != "complete":
-                    meta["current_step"] = next_step
-                    meta["status"] = "PENDING"  # Ready for the next worker pool
-                    self.cache[f"{next_step}:{composite_key}"] = meta
+                if not next_step:
+                    log.warning("Step returned no signal", next_step=next_step)
+                    return
+
+                if next_step.casefold() != "finish":
+                    meta.current_step = next_step
+                    meta.status = (
+                        JobStatus.PENDING.value
+                    )  # Ready for the next worker pool
+                    new_key = f"{next_step}:{meta.job_id}:{meta.dataset_id}:{meta.run_date}:{meta.run_id}"
+                    self.cache[new_key] = meta
                     log.info(
                         "Step complete. Job returned to queue.", next_step=next_step
                     )
                 else:
                     log.info("Job fully completed.")
-                    meta["status"] = "COMPLETED"
-                    self.cache[f"{current_step}:{composite_key}"] = meta
+                    # Remove the job from the active queue entirely
+                    self.cache.pop(key, None)
+                    # Cleanup lookup key used by Orchestrator
+                    lookup_key = (
+                        f"active_run:{meta.job_id}:{meta.dataset_id}:{meta.run_date}"
+                    )
+                    self.cache.pop(lookup_key, None)
 
         except Exception as e:
             log.exception("Worker failed processing step")
             with self.lock:
-                meta["status"] = "FAILED"
-                self.cache[f"{current_step}:{composite_key}"] = meta
+                meta.status = JobStatus.FAILED.value
+                self.cache[key] = meta
             raise e
         finally:
             self.is_busy = False
@@ -104,9 +135,10 @@ class IngestionEngine:
         # 2. Initialize the Global Registry (Diskcache)
         # This ensures the shared cache path exists for all Ray workers
         self.registry = ServiceRegistry()
+        cache_path = (self.exec_ctx.workspace_dir / DISKCACHE_FILE_PATH).resolve()
 
-        self.cache = diskcache.Cache(DISKCACHE_FILE_PATH)
-        self.lock = FileLock(f"{cache_dir}/orchestrator.lock")
+        self.cache = diskcache.Cache(cache_path)
+        self.lock = FileLock(self.exec_ctx.workspace_dir / "orchestrator.lock")
 
         if not ray.is_initialized():
             ray.init(ignore_reinit_error=True)
@@ -121,15 +153,15 @@ class IngestionEngine:
         }
 
         # Initialize specialized pools
-        workspace = self.exec_ctx.workspace_dir
         self.io_pool: list[ray.actor.ActorHandle] = [
-            Worker.remote(f"io_{i}", workspace)
-            for i in range(15)  # type: ignore
+            Worker.remote(f"io_{i}", self.exec_ctx) for i in range(15)  # type: ignore
         ]
         self.cpu_pool: list[ray.actor.ActorHandle] = [
-            Worker.remote(f"cpu_{i}", workspace)
-            for i in range(4)  # type: ignore
+            Worker.remote(f"cpu_{i}", self.exec_ctx) for i in range(4)  # type: ignore
         ]
+
+        # Local tracker for active Ray tasks to avoid blocking RPC calls
+        self._active_tasks: dict[ray.ObjectRef, ray.actor.ActorHandle] = {}
 
     def run(self) -> None:
         """Main loop managing multiple jobs."""
@@ -144,13 +176,14 @@ class IngestionEngine:
         composite_key: str,
         run_id: str,
         config_file_path: str,
+        run_date: str,
         current_step: str | None = None,
     ) -> None:
         """Checks config, creates jobs if not in cache, and submits them."""
         # Always start in the 'start' queue
         current_step = current_step or "start"
-        queue_key = f"{current_step}:{composite_key}"
-        job_id, table = composite_key.split(":", 1)
+        queue_key = f"{current_step}:{composite_key}:{run_date}:{run_id}"
+        job_id, dataset_id = composite_key.split(":", 1)
 
         # Logic to determine if this is a snapshot (e.g., based on
         # job naming convention)
@@ -164,16 +197,21 @@ class IngestionEngine:
             # Check if job exists in cache
             if queue_key not in self.cache:
                 # Brand new entry
-                self.cache[queue_key] = {
-                    "job_id": job_id,
-                    "run_id": run_id,
-                    "status": "PENDING",
-                    "config_file": config_file_path,
-                    "table_name": table,
-                    "current_step": current_step,  # Default start
-                    "last_hb": time.time(),
-                    "retry_count": 0,
-                }
+                meta = JobMetadata(
+                    job_id=job_id,
+                    run_id=run_id,
+                    dataset_id=dataset_id,
+                    run_date=run_date,
+                    status=JobStatus.PENDING.value,
+                    config_file=config_file_path,
+                    current_step=current_step,
+                    last_hb=time.time(),
+                    expires_at=expires_at,
+                )
+                self.cache[queue_key] = meta
+                # Set the lookup key so Orchestrator can find the run_id for this date
+                self.cache[f"active_run:{job_id}:{dataset_id}:{run_date}"] = run_id
+
             LOG.info(
                 "Queued Job",
                 job_id=job_id,
@@ -188,52 +226,86 @@ class IngestionEngine:
         current_occupancy = self._get_current_occupancy()
 
         with self.lock:
-            for key in self.cache.iterkeys():
-                if ":" not in key:
+            # We take a snapshot of keys to avoid 'dict changed size' during iteration
+            for key in list(self.cache.iterkeys()):
+                if not isinstance(key, str) or ":" not in key:
                     continue
-                step, _ = key.split(":", 1)
-                job_meta = self.cache[key]
 
-                if job_meta["status"] == "PENDING":
-                    limits = min(self.stage_limits[step]["limit"], 1)
+                step = key.split(":", 1)[0]
+                if step not in self.stage_limits:
+                    continue
+
+                # Use isinstance to narrow the type for the linter and
+                # ensure runtime safety
+                raw_meta = self.cache[key]
+                if not isinstance(raw_meta, JobMetadata):
+                    continue
+                job_meta: JobMetadata = raw_meta
+
+                if job_meta.status == JobStatus.PENDING.value:
+                    limit = self.stage_limits[step]["limit"]
                     # 2. Check if the specific stage has room
-                    if current_occupancy[step] < limits:
-                        continue
+                    if current_occupancy[step] < limit:
+                        # 2. Select the correct Worker Pool
+                        # 3. Find a free Ray worker
+                        pool = (
+                            self.cpu_pool
+                            if self.stage_limits[step]["pool"] == "cpu"
+                            else self.io_pool
+                        )
+                        if worker := self._get_idle_worker_from_pool(pool):
+                            job_meta.status = JobStatus.PROVISIONING.value
+                            job_meta.last_hb = time.time()
+                            self.cache[key] = job_meta
 
-                    # 2. Select the correct Worker Pool
-                    # 3. Find a free Ray worker
-                    pool = (
-                        self.cpu_pool
-                        if self.stage_limits[step]["pool"] == "cpu"
-                        else self.io_pool
-                    )
-                    if worker := self._get_idle_worker_from_pool(pool):
-                        job_meta["status"] = "SUBMITTED"
-                        job_meta["last_hb"] = time.time()
-                        self.cache[key] = job_meta
+                            # Update local occupancy count
+                            current_occupancy[step] += 1
 
-                        # Update local occupancy count
-                        current_occupancy[step] += 1
-
-                        # Pass the key and the job_meta to the Ray Task
-                        worker.process_step.remote(key, job_meta["config_file"])
+                            # Dispatch non-blocking and track the reference
+                            ref = worker.process_step.remote(key, job_meta.config_file)
+                            self._active_tasks[ref] = worker
 
     def _get_current_occupancy(self) -> dict[str, int]:
         """Counts how many workers are active in each stage."""
         counts = dict.fromkeys(self.stage_limits, 0)
-        for key in self.cache.iterkeys():
-            if ":" in key:
-                step = key.split(":")[0]
-                if self.cache[key]["status"] == "RUNNING":
+        for key in list(self.cache.iterkeys()):
+            if isinstance(key, str) and ":" in key:
+                step = key.split(":", 1)[0]
+                if step not in self.stage_limits:
+                    continue
+
+                meta = self.cache[key]
+                if (
+                    isinstance(meta, JobMetadata)
+                    and meta.status == JobStatus.RUNNING.value
+                ):
                     counts[step] += 1
         return counts
 
     def _get_idle_worker_from_pool(
         self, pool: list[ray.actor.ActorHandle]
     ) -> Any | None:
-        for w in pool:
-            if ray.get(w.is_idle.remote()):
-                return w
+        # 1. Clean up finished tasks from our tracker without blocking
+        if self._active_tasks:
+            ready, _ = ray.wait(
+                list(self._active_tasks.keys()),
+                timeout=0,
+                num_returns=len(self._active_tasks),
+            )
+            for ref in ready:
+                try:
+                    # Retrieve the result to re-raise any remote exceptions
+                    # into the Orchestrator's context.
+                    ray.get(ref)
+                except Exception:
+                    LOG.exception("Ray worker task failed")
+                self._active_tasks.pop(ref, None)
+
+        # 2. Find a worker that isn't currently assigned a task
+        busy_workers = set(self._active_tasks.values())
+        for worker in pool:
+            if worker not in busy_workers:
+                return worker
         return None
 
     # TODO: Handle Timeouts
@@ -241,32 +313,42 @@ class IngestionEngine:
         """Scans all stage queues for zombie jobs."""
         with self.lock:
             for key in list(self.cache.iterkeys()):
-                if ":" not in key:
+                key_str = key if isinstance(key, str) else key.decode("utf-8")
+                if ":" not in key_str:
                     continue
 
-                step, composite_key = key.split(":", 1)
-                meta = self.cache[key]
+                step, rest = key_str.split(":", 1)
+                if step not in self.stage_limits:
+                    continue
+
+                raw_meta = self.cache[key]
+                if not isinstance(raw_meta, JobMetadata):
+                    continue
+
+                meta: JobMetadata = raw_meta
 
                 # Check if heartbeat is older than 5 minutes
                 if (
-                    meta.get("status") == "RUNNING"
-                    and time.time() - meta.get("last_hb", 0) > 300
+                    meta.status == JobStatus.RUNNING.value
+                    and time.time() - meta.last_hb > 300
                 ):
-                    LOG.warning("Zombie job detected", key=key)
-                    self._recover_job(step, composite_key)
+                    LOG.warning("Zombie job detected", key=key_str)
+                    self._recover_job(step, rest)
 
-    def _recover_job(self, step_name: str, composite_key: str) -> None:
+    def _recover_job(self, step_name: str, rest_of_key: str) -> None:
         """
         Recovers a stalled job by checking its physical progress.
         """
         with self.lock:
-            key = f"{step_name}:{composite_key}"
+            key = f"{step_name}:{rest_of_key}"
+
+            # .get() returns Optional[Any], so we check type and None-ness at once
             job_meta = self.cache.get(key)
-            if not job_meta:
+            if not isinstance(job_meta, JobMetadata):
                 return
 
-        job_id = job_meta["job_id"]
-        run_id = job_meta["run_id"]
+        job_id = job_meta.job_id
+        run_id = job_meta.run_id
 
         # 1. Verify if the step actually finished on disk but failed to transit
         # We check for the .success marker in the current step's folder
@@ -281,9 +363,9 @@ class IngestionEngine:
             )
 
             del self.cache[key]
-            if next_step != "complete":
-                job_meta["status"] = "PENDING"
-                self.cache[f"{next_step}:{composite_key}"] = job_meta
+            if next_step.casefold() != "complete":
+                job_meta.status = JobStatus.PENDING.value
+                self.cache[f"{next_step}:{rest_of_key}"] = job_meta
         else:
             # If no symlink exists, the worker died mid-stream or before finalize.
             # Reset to PENDING in the SAME queue to allow a retry.
@@ -292,8 +374,8 @@ class IngestionEngine:
                 job_id=job_id,
                 step=step_name,
             )
-            job_meta["status"] = "PENDING"
-            job_meta["last_hb"] = time.time()
+            job_meta.status = JobStatus.PENDING.value
+            job_meta.last_hb = time.time()
             self.cache[key] = job_meta
 
     def _check_step_completion_on_disk(

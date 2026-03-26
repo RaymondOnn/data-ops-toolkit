@@ -6,6 +6,8 @@ from typing import Any
 
 import msgspec
 import structlog
+from nanoid import generate
+
 from apps.ingestion.src.core.contexts import JobContextBuilder
 from apps.ingestion.src.core.models.job import Job, JobStatus
 from apps.ingestion.src.core.orchestrator.engine import IngestionEngine
@@ -18,10 +20,8 @@ from apps.ingestion.src.core.orchestrator.trigger import (
     TriggerEvent,
 )
 from apps.ingestion.src.services.factory import ServiceFactory
-from apps.ingestion.src.utils.common import find_path
 from apps.ingestion.src.utils.constants import ALWAYS_ON_MODE
 from libs.resilience.heartbeat import Heartbeat
-from nanoid import generate
 
 LOG = structlog.getLogger(__name__)
 PID_FILE = Path(".daemon.pid")
@@ -55,9 +55,8 @@ class Orchestrator:
         self.engine = IngestionEngine(self.exec_ctx)
 
         # Service Discovery: Use the resolved app settings from the builder
-        print(dict(self.builder.app_settings))
-        service_name = "clickhouse_db"
-        db_config = self.builder.app_settings.get("services", {}).get(service_name, {})
+        db_config = self.builder.app_settings.get("services.clickhouse", {})
+        service_name = db_config.pop("type")
         self.db_service = ServiceFactory.get_service(service_name, **db_config)
         self.state_store = StateStore(self.db_service, self.exec_ctx)
         # State timers
@@ -77,7 +76,7 @@ class Orchestrator:
         # 2. Wire the Signals to the Handlers (The Refactor Fix)
         self.signals.register_command("RECOVER_ALL.cmd", self.lifecycle.handle_recovery)
         self.signals.register_command("PURGE_EXPIRED.cmd", self.lifecycle.handle_expiry)
-        self.signals.register_command("RELOAD_CONFIG.cmd", self._reload_internal_config)
+        # self.signals.register_command("RELOAD_CONFIG.cmd", self._reload_internal_config)
 
         LOG.info("Orchestrator initialized")
 
@@ -170,7 +169,7 @@ class Orchestrator:
         if not overrides:
             raise ValueError("Dumb mode requires a valid JobConfig.")
 
-        self._trigger_job(
+        run_ids = self._trigger_job(
             job_id,
             dataset_id=dataset_id,
             run_date_str=run_date_str,
@@ -179,40 +178,84 @@ class Orchestrator:
 
         # 2. Block until this specific job is finished
         LOG.info("Monitoring job until completion", job_id=job_id)
+        target_run_id = run_ids[0] if run_ids else None
 
         while True:
             # Run the engine cycle to drive the job forward
             self.engine._process_jobs()
+            self.signals._process_worker_signals()
 
-            # Check if our specific job is in the 'complete' prefix or marked COMPLETED
-            # Note: We check all stage prefixes for the key
-
-            if self._is_job_finished(job_id):
-                LOG.info("Job finished successfully", job_id=job_id)
+            if self.is_job_finished(job_id, dataset_id, run_date_str, target_run_id):
+                LOG.info("Job finished successfully", run_id=target_run_id)
                 break
-
+            print(
+                f"Waiting for job to finish: {datetime.now().astimezone().isoformat()}"
+            )
             time.sleep(2)
 
-    def _is_job_finished(self, job_id: str) -> bool:
+    def is_job_finished(
+        self,
+        job_id: str,
+        dataset_id: str,
+        run_date: str | None,
+        run_id: str | None = None,
+    ) -> bool:
         """
-        Checks if all tables associated with a job_id have cleared the pipeline.
-        Decision: Enum-driven Lifecycle Check.
-        A job is finished if no associated runs are in an 'Active' state.
+        Checks if any active markers for this dataset exist in the cache.
+        If no keys match the pattern, it performs a final check on the filesystem.
         """
-        # 1. Physical Workspace Check (The primary breadcrumb)
-        active_path = self.exec_ctx.active_path
-        return bool(find_path(active_path, job_id))
+        # 1. Define the unique identity of this run
+        # We look for the specific run_id in the cache key to be precise.
+        identity_pattern = (
+            f":{run_id}" if run_id else f":{job_id}:{dataset_id}:{run_date}"
+        )
 
-        # 2. Logical State Check via StateStore's active records
-        # We look for any run associated with this job_id that is still in
-        # an 'Active' state
-        active_runs = [
-            run
-            for run in self.state_store.active_records
-            if run["job_id"] == job_id and run["status"] in JobStatus.active_statuses()
-        ]
+        found_active_key = False
+        run_id = None
 
-        return len(active_runs) == 0
+        # 2. Iterate over keys to find a match
+        # diskcache.Cache is an Iterable that yields keys
+        for key in self.engine.cache:
+            if isinstance(key, str) and identity_pattern in key:
+                found_active_key = True
+                # Try to extract the run_id if the value is a string or JobMetadata
+                val = self.engine.cache.get(key)
+                if isinstance(val, str):
+                    run_id = val
+                elif hasattr(val, "run_id"):  # if it's a JobMetadata msgspec object
+                    run_id = val.run_id
+                break
+
+        # 3. If a key is found, the job is definitely NOT finished
+        if found_active_key:
+            # Check if the state is terminal just in case a cleanup failed
+            if run_id:
+                record = self.state_store.active_records.get(run_id)
+                if record and record.get("JOB_STATUS") in ["SUCCESS", "FAILED"]:
+                    # If it's terminal in the DB but still in cache, clean it up now
+                    self.engine.cache.delete(key)
+                    return True
+            return False
+
+        # 4. If NO key is found, we do the 'Certainty Check'
+        # Check for the existence of the physical workspace folder
+        try:
+            active_root = self.exec_ctx.active_path
+            job_identity = f"{job_id}:{dataset_id}_{run_date}"
+
+            # If we have a specific run_id, check if its directory still exists in active
+            if run_id:
+                specific_run_path = active_root / job_identity / run_id
+                return not specific_run_path.exists()
+
+            # Fallback for generic checks
+            job_folder = active_root / job_identity
+            if not job_folder.exists() or not any(job_folder.iterdir()):
+                return True
+
+            return False
+        except Exception:
+            return True
 
     def _evaluate_triggers(
         self,
@@ -320,9 +363,10 @@ class Orchestrator:
         dataset_id: str,
         run_date_str: str | None = None,
         overrides: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> list[str]:
 
         log = LOG.bind(job_id=job_id, dataset_id=dataset_id)
+        run_ids = []
 
         log.debug("Building job contexts", run_date=run_date_str)
         # 1. Get the list of dataset configurations for this Job ID
@@ -361,11 +405,15 @@ class Orchestrator:
                 composite_key=composite_key,
                 run_id=run_id,
                 config_file_path=str(config_path),
+                run_date=job_ctx.run_date,
             )
 
             # 5. Optional: Update DB so it doesn't trigger again immediately
             self.state_store.update_status(job_id, JobStatus.QUEUED)
             self.timers["job_trigger"] = time.time()
+            run_ids.append(run_id)
+
+        return run_ids
 
     def _terminate_job(
         self, job: Job, status: JobStatus, reason: str | None = None

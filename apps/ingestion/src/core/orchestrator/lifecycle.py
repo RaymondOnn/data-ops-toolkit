@@ -90,7 +90,7 @@ class LifecycleManager:
         Scans for jobs that have passed their TTL and purges their workspaces.
         """
         # List to prevent 'dictionary changed size during iteration'
-        runs_to_check = list(self.state_store.active_records)
+        runs_to_check = list(self.state_store.active_records.values())
 
         for data in runs_to_check:
             # We only expire jobs that are stuck in a non-terminal state

@@ -9,16 +9,14 @@ from apps.ingestion.src.services.base import ArchiveMixin
 from apps.ingestion.src.services.factory import ServiceFactory
 
 from .base import JobStep
+from .enums import JobSteps
 
 LOG = structlog.getLogger(__name__)
 
 
 class CompleteStep(JobStep):
+    name = JobSteps.COMPLETE.label
     manifest: CompletePayload
-
-    @property
-    def name(self) -> str:
-        return "complete"
 
     def execute(self, job: Job) -> str:
         """

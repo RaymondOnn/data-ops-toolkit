@@ -1,9 +1,12 @@
 # src/core/services/base.py
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import polars as pl
 
 
-class Service(ABC):
+class Service:
     """
     Base class for all resilient services.
     Ensures the decorator can find the 'name' for the Registry.
@@ -18,6 +21,11 @@ class SourceMixin(ABC):
     @abstractmethod
     def get_work_units(self, target: str, num_partitions: int) -> list[Any]:
         """How this service splits 50M rows into chunks."""
+        pass
+
+    @abstractmethod
+    def fetch_data(self, unit: Any) -> "pl.DataFrame | pl.LazyFrame":
+        """Fetches data for a given work unit and returns a Polars object."""
         pass
 
 

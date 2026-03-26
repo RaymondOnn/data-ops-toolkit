@@ -2,10 +2,10 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import polars as pl
 import structlog
-
 from libs.clients.base import ClientCantConnect
-from libs.file import FileSystemClient, FileSystemSkills
+from libs.file import FileSystemClient, FileSystemSkills, FormatFactory
 from libs.resilience.circuit_breaker import CircuitBreaker
 
 from .base import ArchiveMixin, Service, SinkMixin, SourceMixin
@@ -14,6 +14,7 @@ from .registry import protect_service
 
 if TYPE_CHECKING:
     from libs.auth.models import Secret
+    from libs.file.formats.base import FormatHandler
 
 LOG = structlog.get_logger(__name__)
 
@@ -40,6 +41,9 @@ class BaseStorageService(Service):
 
         super().__init__(name, **config)
         self.url = url
+        # The 'url' parameter represents the base folder/directory (or bucket root).
+        # For local files, this should be a directory path like 'file:///tmp/data'
+        # or an absolute path '/tmp/data'.
         self.capabilities = capabilities
         self.opts = storage_options
         self.client = self._init_client(**config)
@@ -49,8 +53,9 @@ class BaseStorageService(Service):
 
         # 1. Resolve Secret (Password/Keys)
         # Assuming 'password' is the Secret object containing S3/Azure keys
-        secret: Secret = config["password"]
-        config["password"] = secret.resolve(sanitize=True) if secret else {}
+        if config.get("password") is not None:
+            secret: Secret = config["password"]
+            config["password"] = secret.resolve(sanitize=True) if secret else {}
 
         # 2. Merge Credentials with Storage Options
         # Patch: Create a new dict instead of using .update() which returns None
@@ -71,18 +76,45 @@ class StorageSource(BaseStorageService, SourceMixin):
         if not getattr(self.client, "fs", None):
             raise RuntimeError("Filesystem client is not initialized")
 
-        path = self.client.resolve_path(target)
-        files = self.client.fs.glob(f"{path}/**/*")
+        # Use the discovery utility to handle file vs folder automatically
+        files = list(self.client.walk_paths(target))
+
         LOG.debug(
             "Generating work units",
             target=target,
             files_found=len(files),
             partitions=num_partitions,
         )
-        # Ensure files is treated as a list to support slice indexing
-        return [
-            {"files": list(files)[i::num_partitions]} for i in range(num_partitions)
-        ]
+        return [{"files": files[i::num_partitions]} for i in range(num_partitions)]
+
+    @protect_service(breaker)
+    def fetch_data(self, unit: list[str] | str) -> pl.DataFrame:
+        """
+        Reads a list of files (the work unit) into a single Polars DataFrame.
+        Supports Parquet, CSV, and JSON formats.
+        """
+        if not unit:
+            return pl.DataFrame()
+
+        # Handle both single path strings and lists of paths
+        paths = [unit] if isinstance(unit, str) else unit
+
+        # Resolve paths via the client (handles file:// vs s3:// etc)
+        resolved_paths = [self.client.resolve_path(p) for p in paths]
+
+        # 1. Determine format from the first file to select the handler
+        ext = Path(resolved_paths[0]).suffix.lstrip(".").lower()
+        handler: FormatHandler = FormatFactory.get_handler(
+            ext, self.client.fs, self.opts
+        )
+
+        # 2. Iterate and fetch individually (supports per-file repairs/cleaning)
+        dfs = [handler.to_df(p) for p in resolved_paths]
+
+        if not dfs:
+            return pl.DataFrame()
+
+        return pl.concat(dfs)
 
 
 class StorageSink(BaseStorageService, SinkMixin):
@@ -194,11 +226,14 @@ class FlatFileService(StorageSource):
     """Specifically for reading source data from landing zones."""
 
     def __init__(self, name: str, **config: Any) -> None:
+        url = config.pop("url", "")
+        storage_options = config.pop("storage_options", {})
+
         super().__init__(
             name=name,
-            url=config.get("url", "file:///tmp/landing"),
+            url=url,
             capabilities=[FileSystemSkills.FILE],
-            storage_options=config.get("storage_options", {}),
+            storage_options=storage_options,
             **config,
         )
 
@@ -209,11 +244,14 @@ class StandardArchiveService(StorageArchive):
     """Standard archival for job artifacts and logs."""
 
     def __init__(self, name: str, **config: Any) -> None:
+        url = config.pop("url", "s3://archive-bucket")
+        storage_options = config.pop("storage_options", {})
+
         super().__init__(
             name=name,
-            url=config.get("url", "s3://archive-bucket"),
+            url=url,
             capabilities=[FileSystemSkills.ARCHIVE],
-            storage_options=config.get("storage_options", {}),
+            storage_options=storage_options,
             **config,
         )
 
@@ -224,14 +262,15 @@ class CASArchive(StorageArchive):
     """Content Addressable Storage for immutable records."""
 
     def __init__(self, name: str, **config: Any) -> None:
+        url = config.pop("url", "s3://cas-vault")
+        storage_options = config.pop("storage_options", {"s3_storage_class": "GLACIER"})
+
         # Vaults often use specific storage classes (e.g., Glacier or WORM)
         super().__init__(
             name=name,
-            url=config.get("url", "s3://cas-vault"),
+            url=url,
             capabilities=[FileSystemSkills.CAS],
-            storage_options=config.get(
-                "storage_options", {"s3_storage_class": "GLACIER"}
-            ),
+            storage_options=storage_options,
             **config,
         )
 
@@ -242,10 +281,13 @@ class DataLakeService(StorageSource, StorageSink):
     """General purpose S3/Azure Blob for reading and writing."""
 
     def __init__(self, name: str, **config: Any) -> None:
+        url = config.pop("url", "s3://data-lake")
+        storage_options = config.pop("storage_options", {})
+
         super().__init__(
             name=name,
-            url=config.get("url", "s3://data-lake"),
+            url=url,
             capabilities=[FileSystemSkills.FILE],
-            storage_options=config.get("storage_options", {}),
+            storage_options=storage_options,
             **config,
         )

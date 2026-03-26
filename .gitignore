@@ -3,6 +3,9 @@ specs/
 tmp/
 .mypy_cache
 .ruff_cache
+.vscode
+.workspace
+logs/
 __pycache__
 *.py[cod]
 .DS_STORE     

@@ -2,7 +2,6 @@ from collections.abc import Generator, Sequence
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
-
 from libs.clients.base import ClientCantConnect
 from libs.database.clients.base import DBClient
 
@@ -64,7 +63,7 @@ class PostgresClient(DBClient):
     def fetch_df(self, query: str) -> Generator[pl.DataFrame, None, None]:
         with self.connect().cursor() as cursor:
             cursor.execute(query)
-            # ADBC native streaming to Arrow, then to Pandas
+            # ADBC native streaming to Arrow, then to Polars
             reader = cursor.fetch_record_batch()
             for batch in reader:
                 # ADBC to Arrow to Polars is zero-copy and very fast

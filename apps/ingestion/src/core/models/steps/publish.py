@@ -3,12 +3,12 @@ from typing import TYPE_CHECKING
 
 import msgspec
 import structlog
-
 from apps.ingestion.src.core.models.job.manifest import PublishPayload
 from apps.ingestion.src.core.strategies.load.load import Loader, WriteContext
 from apps.ingestion.src.services.factory import ServiceFactory
 
 from .base import JobStep
+from .enums import JobSteps
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.job import Job
@@ -23,11 +23,9 @@ class PublishStep(JobStep):
     We use the context to identify the target 'Prod' table vs 'Staging' table.
     """
 
-    manifest: PublishPayload
+    name = JobSteps.PUBLISH.label
 
-    @property
-    def name(self) -> str:
-        return "publish"
+    manifest: PublishPayload
 
     def execute(self, job: "Job") -> str:
         job_ctx = job.context

@@ -4,7 +4,6 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import structlog
-
 from apps.ingestion.src.services.database.base import DatabaseSink, DatabaseSource
 from apps.ingestion.src.services.factory import ServiceFactory
 from libs.database.clients.postgres import PostgresClient
@@ -17,10 +16,6 @@ LOG = structlog.get_logger(__name__)
 
 @ServiceFactory.register("postgres_db")
 class PostgresService(DatabaseSource, DatabaseSink):
-    def __init__(self, name: str, **config: Any) -> None:
-        super().__init__(name, **config)
-        self.client = self._init_client(**config)
-
     def _init_client(self, **config: Any) -> PostgresClient:
         secret: Secret = config["password"]
         return PostgresClient(
@@ -134,4 +129,5 @@ class PostgresService(DatabaseSource, DatabaseSink):
             WHERE 1 = 0
         """
         LOG.info("Cloning table structure", source=reference, destination=other)
+        self.client.sql(sql)
         self.client.sql(sql)

@@ -1,22 +1,18 @@
-from __future__ import annotations
-
 import os
 import shutil
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import msgspec
 import structlog
 
+from apps.ingestion.src.core.contexts import ExecutionContext, JobContext
 from apps.ingestion.src.core.models.job.manifest import JobManifest
 from apps.ingestion.src.core.models.job.status import JobStatus
+from apps.ingestion.src.core.models.steps.base import JobStep
 from apps.ingestion.src.core.models.steps.enums import JobSteps
 from apps.ingestion.src.core.models.steps.utils import get_step_class_by_name
-
-if TYPE_CHECKING:
-    from apps.ingestion.src.core.contexts import ExecutionContext, JobContext
-    from apps.ingestion.src.core.models.steps.base import JobStep
 
 LOG = structlog.getLogger(__name__)
 
@@ -34,7 +30,7 @@ class Job:
         run_date: str,
         worker_id: str,
         exec_ctx: ExecutionContext,
-        target_step: str = JobSteps.START.name,
+        target_step: str = JobSteps.START.label,
     ) -> None:
         self.id, self.dataset_id = composite_key.split(":", 1)
         self.run_id = run_id
@@ -43,6 +39,14 @@ class Job:
         self.exec_ctx = exec_ctx
         self.target_step = target_step
 
+        # Initialize folder/manifest paths without triggering a full sync
+        self._folder = (
+            self.exec_ctx.workspace_dir
+            / "active"
+            / f"{self.id}:{self.dataset_id}_{self.run_date}"
+            / self.run_id
+        )
+        self._manifest_path = self._folder / "manifest.json"
     @classmethod
     def from_folder(
         cls,
@@ -90,19 +94,17 @@ class Job:
             # 2. Store the initial manifest directly in the active root
             # Decision: The manifest in the active root is the 'Single Source of Truth'
             # for the Orchestrator to monitor progress.
-            manifest_path = folder / "manifest.json"
-            if not manifest_path.exists():
-                manifest_path.touch()
-
-            data = {
-                "job_id": self.id,
-                "run_id": self.run_id,
-                "dataset_name": self.dataset_id,
-                "status": "RUNNING",
-                "current_step": self.step.name,
-                "bitmask": 0,
-            }
-            self.update_manifest(data)
+            # We check size to avoid decoding truncated files during lazy init
+            if not self._manifest_path.exists() or self._manifest_path.stat().st_size == 0:
+                data = {
+                    "job_id": self.id,
+                    "run_id": self.run_id,
+                    "dataset_id": self.dataset_id,
+                    "job_status": "RUNNING",
+                    "current_step": self.target_step,
+                    "bitmask": 0,
+                }
+                self.update_manifest(data)
 
             # Move file into job folder
             job_cfg_file = f"{self.id}:{self.dataset_id}_{self.run_id}_config.json"
@@ -121,13 +123,13 @@ class Job:
         Dynamic accessor. Reads manifest from disk on demand.
         Ensures we don't hold JSON objects for thousands of jobs in RAM.
         """
-        if not self._manifest_path.exists():
+        if not self._manifest_path.exists() or self._manifest_path.stat().st_size == 0:
             # Return a default manifest if file is missing/corrupt
             return JobManifest(
                 job_id=self.id,
                 run_id=self.run_id,
                 dataset_id=self.dataset_id,
-                current_step=self.step.name,
+                current_step=self.target_step,
                 bitmask=0,
                 job_status=JobStatus.UNKNOWN,
             )
@@ -161,20 +163,21 @@ class Job:
 
     @property
     def step(self) -> JobStep:
-        if not self._step:
-            step = self.manifest.current_step or JobSteps.START.label
-            self._step = get_step_class_by_name(step)
+
+        if not hasattr(self, "_step") or not self._step:
+            # Prioritize target_step (intent) over manifest (state)
+            step_name = (
+                self.target_step or self.manifest.current_step or JobSteps.START.label
+            )
+            self._step = get_step_class_by_name(step_name)
         return self._step
 
     def set_step(self, step: JobStep) -> None:
         self._step = step
 
-    def execute(self) -> None:
-        """Execute the current job step.
-
-        :raises ValueError: If the job is not initialized.
-        """
-        self.step.execute(job=self)
+    def execute(self) -> str:
+        """Execute the current job step and return the next step label."""
+        return self.step.execute(job=self)
 
     def update_manifest(self, updates: dict[str, Any] | None = None) -> None:
         """

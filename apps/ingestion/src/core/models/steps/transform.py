@@ -4,7 +4,6 @@ from typing import TYPE_CHECKING, Any, cast
 import msgspec
 import polars as pl
 import structlog
-
 from apps.ingestion.src.core.models.job.manifest import TransformPayload
 from apps.ingestion.src.core.strategies.transform import (
     TransformContext,
@@ -13,6 +12,7 @@ from apps.ingestion.src.core.strategies.transform import (
 from libs.file.formats import ParquetHandler
 
 from .base import JobStep
+from .enums import JobSteps
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.job import Job
@@ -23,11 +23,8 @@ APP_TRANSFORM_OUTPUT_EXT = "parquet"
 
 
 class TransformStep(JobStep):
+    name = JobSteps.TRANSFORM.label
     manifest: TransformPayload
-
-    @property
-    def name(self) -> str:
-        return "transform"
 
     def execute(self, job: "Job") -> str:
         """

@@ -10,26 +10,30 @@ default:
   enable_archival: true
   archive_type: "standard_archive"
   num_partitions: 10
-  read_mode: "snapshot"
 
 local:
-  workspace_dir: "./workspace/"
+  workspace_dir: "./.workspace/"
   archive_base_path: "file:///tmp/archive"
   storage_options:
     region: "us-east-1"
   services:
+    file:
+      type: flat_file
+      url: "."
     clickhouse:
       type: chdb
       path: "./.local_db" 
 
 dev:
   services:
+    file:
+      type: flat_file
     clickhouse:
       type: "clickhouse_db"
-      password: "password"
       host: "localhost"
       port: 8123
       user: "default"
+      secret_key: "CLICKHOUSE_PASSWORD" 
 
 # production:
 #   archive_base_path: "s3://prod-vault/archival"

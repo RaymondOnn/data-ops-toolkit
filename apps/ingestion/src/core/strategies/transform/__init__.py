@@ -12,7 +12,7 @@ LOG = structlog.getLogger(__name__)
 
 # 1. Discover CORE transformers (bitmask, default, etc.)
 # These are located in src.core.strategies.transform.transform
-import src.core.strategies.transform.transform as _
+import apps.ingestion.src.core.strategies.transform.transform
 
 # 2. Dynamically Discover CUSTOM/SHARED transformers
 # We walk the 'custom' subdirectory recursively

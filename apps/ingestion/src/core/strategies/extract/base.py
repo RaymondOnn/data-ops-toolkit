@@ -3,8 +3,7 @@ from pathlib import Path
 from typing import Any
 
 import msgspec
-
-from apps.ingestion.src.services.base import Service
+from apps.ingestion.src.services.base import SourceMixin
 
 
 class ReaderContext(msgspec.Struct):
@@ -20,6 +19,7 @@ class ReaderContext(msgspec.Struct):
     run_date: str | None = None
     job_id: str | None = None
     # For any source-specific extras (e.g., API keys, custom filters)
+    workspace_dir: str | None = None
     options: dict[str, Any] = {}
     schema_items: list[dict[str, Any]] = []
 
@@ -31,6 +31,6 @@ class ReaderContext(msgspec.Struct):
 class Reader(ABC):
     @abstractmethod
     def fetch(
-        self, service: Service, context: ReaderContext, target_folder: Path
+        self, service: SourceMixin, context: ReaderContext, target_folder: Path
     ) -> list[dict[str, Any]]:
         raise NotImplementedError("Subclasses must implement this method")

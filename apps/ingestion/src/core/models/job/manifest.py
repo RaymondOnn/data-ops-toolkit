@@ -1,20 +1,24 @@
-from __future__ import annotations
-
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import msgspec
 import structlog
-from msgspec import field, json
+from msgspec import field
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
-    from apps.ingestion.src.core.models.job.status import JobStatus
-else:
-    from apps.ingestion.src.core.models.job.status import JobStatus
+from apps.ingestion.src.core.models.job.status import JobStatus
 
 LOG = structlog.getLogger(__name__)
+
+
+class FileInfo(msgspec.Struct):
+    """
+    Metadata for an individual physical file artifact.
+    """
+
+    path: str  # Absolute or relative path to the parquet file
+    checksum: str  # MD5/SHA hash for forensic integrity
+    row_count: int  # Number of rows in THIS specific file
+    size_bytes: int  # Physical file size on disk
 
 
 class ErrorPayload(msgspec.Struct):
@@ -35,24 +39,10 @@ class BasePayload(msgspec.Struct, kw_only=True):
         default_factory=lambda: datetime.now().astimezone().isoformat()
     )
 
-    def save(self, folder_path: Path) -> None:
-        """Saves the current state to the standardized manifest file."""
-        path = folder_path / "manifest.json"
-        with path.open("wb") as f:
-            f.write(json.encode(self))
-
-    @classmethod
-    def load(cls, folder_path: Path, stage_type: type) -> Any:
-        """Loads the manifest and decodes it into a specific Stage type."""
-        path = folder_path / "manifest.json"
-        with path.open("rb") as f:
-            return json.decode(f.read(), type=stage_type)
-
-
 class ExtractPayload(BasePayload, kw_only=True):
     file_count: int  # Number of files detected
-    files: list[str] = []  # List of file paths, include checksum per file
-    artifact_folder: Path
+    files: list[FileInfo] = []  # List of file metadata
+    artifact_folder: str
     source_row_count: int  # Number of rows detected
     schema_signature: dict[str, str] = {}  # Column names and types
     end_timestamp_utc: str = field(
@@ -66,7 +56,7 @@ class TransformPayload(BasePayload, kw_only=True):
     output_row_count: int  # Number of rows detected
     schema_validation_pass: bool = False  # True if schema matches the expected schema
     refined_schema: dict[str, str] = {}  # Column names and types
-    artifact_folder: Path | str
+    artifact_folder: str
     start_timestamp_utc: str
     end_timestamp_utc: str = field(
         default_factory=lambda: datetime.now().astimezone().isoformat()
@@ -143,6 +133,7 @@ class JobManifest(msgspec.Struct, kw_only=True):
 
 __sll__ = [
     # BasePayload,
+    FileInfo,
     ExtractPayload,
     TransformPayload,
     WritePayload,

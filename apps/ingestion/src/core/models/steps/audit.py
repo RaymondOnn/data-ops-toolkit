@@ -1,11 +1,16 @@
 import time
+from typing import TYPE_CHECKING, Any
 
 from apps.ingestion.src.core.models.job.manifest import AuditPayload
 
 from .base import JobStep
+from .enums import JobSteps
 
+if TYPE_CHECKING:
+    from apps.ingestion.src.core.models.job import Job
 
 class AuditStep(JobStep):
+    name = JobSteps.AUDIT.label
     manifest: AuditPayload
 
     def execute(self, job: "Job") -> str:
@@ -13,7 +18,7 @@ class AuditStep(JobStep):
 
         try:
             write_meta: AuditPayload = (
-                manifest.write
+                job.manifest.write
             )  # Access staging info from WriteStep
 
             # 1. Internal Heuristic Checks (The 'Stand-in' Logic)

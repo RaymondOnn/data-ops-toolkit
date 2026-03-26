@@ -3,12 +3,12 @@ from typing import TYPE_CHECKING
 
 import msgspec
 import structlog
-
 from apps.ingestion.src.core.models.job.manifest import WritePayload
 from apps.ingestion.src.core.strategies.load.load import Loader
 from apps.ingestion.src.services.factory import ServiceFactory
 
 from .base import JobStep
+from .enums import JobSteps
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.job import Job
@@ -18,11 +18,8 @@ LOG = structlog.getLogger(__name__)
 
 
 class WriteStep(JobStep):
+    name = JobSteps.WRITE.label
     manifest: WritePayload
-
-    @property
-    def name(self) -> str:
-        return "write"
 
     def execute(self, job: "Job") -> str:
         start_ts = datetime.now().astimezone().isoformat()

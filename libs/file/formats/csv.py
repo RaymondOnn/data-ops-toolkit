@@ -4,10 +4,16 @@ from typing import IO, Any, BinaryIO, cast
 
 import polars as pl
 
+from libs.file.base import FileSystemClient
+
 from .base import FormatHandler
 
 
 class CSVHandler(FormatHandler):
+    def discover(self, client: FileSystemClient, target: str):
+        # The handler knows it only wants .csv or .txt
+        return client.walk_paths(target, pattern="*.[ct][sx][vt]") 
+    
     def read_mem(self, input_file: Path | str, **kwargs: Any) -> io.BytesIO:
         """Strips BOM and handles encoding-safe reading."""
         encoding = kwargs.get("encoding", "utf-8")

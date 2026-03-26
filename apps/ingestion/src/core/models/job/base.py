@@ -1,21 +1,17 @@
-from __future__ import annotations
-
 import os
 import shutil
 import time
+from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any, Self
 
 import msgspec
 import structlog
-
+from apps.ingestion.src.core.contexts import ExecutionContext, JobContext
 from apps.ingestion.src.core.models.job.manifest import JobManifest
 from apps.ingestion.src.core.models.job.status import JobStatus
+from apps.ingestion.src.core.models.steps.base import JobStep
 from apps.ingestion.src.core.models.steps.enums import JobSteps
-
-if TYPE_CHECKING:
-    from apps.ingestion.src.core.contexts import ExecutionContext, JobContext
-    from apps.ingestion.src.core.models.steps.base import JobStep
 
 LOG = structlog.getLogger(__name__)
 
@@ -33,7 +29,7 @@ class Job:
         run_date: str,
         worker_id: str,
         exec_ctx: ExecutionContext,
-        target_step: str = JobSteps.START.name,
+        target_step: str = JobSteps.START.label,
     ) -> None:
         self.id, self.dataset_id = composite_key.split(":", 1)
         self.run_id = run_id
@@ -42,13 +38,22 @@ class Job:
         self.exec_ctx = exec_ctx
         self.target_step = target_step
 
+        # Ensure the physical workspace is set up
+        self._make_folder()
+        self._manifest_path = self._folder / "manifest.json"
+
+        # Immediately set the current step based on the target_step from the engine
+        # This ensures the Job object knows what step it's supposed to execute
+        from apps.ingestion.src.core.models.steps.utils import get_step_class_by_name
+        self._step = get_step_class_by_name(self.target_step)
+
     @classmethod
     def from_folder(
         cls,
         folder_path: Path,
         exec_ctx: ExecutionContext,
         target_step: JobSteps | None = None,
-    ) -> Job:
+    ) -> Self:
         """
         Factory to rehydrate a Job. If a target_step is provided,
         it performs an immediate check-in.
@@ -75,44 +80,25 @@ class Job:
         Lazily creates the composite structure:
         active/[job_id]:[dataset]_[run_date]/[run_id]
         """
-        if not hasattr(self, "_folder") or not self._folder:
-            # 1. Setup the Active Directory
-            # Path: storage/active/{job_id}
-            folder = (
-                self.exec_ctx.workspace_dir
-                / "active"
-                / f"{self.id}:{self.dataset_id}_{self.run_date}"
-                / self.run_id
+        # 1. Physically create the folder if missing
+        if not self._folder.exists():
+            self._make_folder()
+
+        # 2. Initialize the manifest directly in the run folder if missing
+        if not self._manifest_path.exists():
+            LOG.info("Initializing run manifest", run_id=self.run_id)
+            self.update_manifest(
+                {
+                    "job_id": self.id,
+                    "run_id": self.run_id,
+                    "dataset_id": self.dataset_id,
+                    "job_status": JobStatus.RUNNING,
+                    "current_step": self.target_step,
+                    "bitmask": 0,
+                }
             )
-            folder.mkdir(parents=True, exist_ok=True)
 
-            # 2. Store the initial manifest directly in the active root
-            # Decision: The manifest in the active root is the 'Single Source of Truth'
-            # for the Orchestrator to monitor progress.
-            manifest_path = folder / "manifest.json"
-            if not manifest_path.exists():
-                manifest_path.touch()
-
-            data = {
-                "job_id": self.id,
-                "run_id": self.run_id,
-                "dataset_name": self.dataset_id,
-                "status": "RUNNING",
-                "current_step": self.step.name,
-                "bitmask": 0,
-            }
-            self.update_manifest(data)
-
-            # Move file into job folder
-            job_cfg_file = f"{self.id}:{self.dataset_id}_{self.run_id}_config.json"
-            source_path = self.exec_ctx.workspace_dir / "active" / job_cfg_file
-            dest_path = folder / job_cfg_file
-            shutil.move(str(source_path), str(dest_path))
-
-            # 4. Update the job pointer
-            self._folder = folder
-            self._manifest_path = manifest_path
-        return Path(self._folder)
+        return self._folder
 
     @property
     def manifest(self) -> JobManifest:
@@ -120,13 +106,13 @@ class Job:
         Dynamic accessor. Reads manifest from disk on demand.
         Ensures we don't hold JSON objects for thousands of jobs in RAM.
         """
-        if not self._manifest_path.exists():
+        if not self._manifest_path.exists() or self._manifest_path.stat().st_size == 0:
             # Return a default manifest if file is missing/corrupt
             return JobManifest(
                 job_id=self.id,
                 run_id=self.run_id,
                 dataset_id=self.dataset_id,
-                current_step=self.step.name,
+                current_step=self.target_step,
                 bitmask=0,
                 job_status=JobStatus.UNKNOWN,
             )
@@ -162,7 +148,9 @@ class Job:
     def step(self) -> JobStep:
         from apps.ingestion.src.core.models.steps.utils import get_step_class_by_name
 
-        if not self._step:
+        if not hasattr(self, "_step") or not self._step:
+            # This should ideally not be reached if _step is set in __init__
+            LOG.warning("Job._step not set, falling back to manifest/start", job_id=self.id, run_id=self.run_id)
             step = self.manifest.current_step or JobSteps.START.label
             self._step = get_step_class_by_name(step)
         return self._step
@@ -170,7 +158,7 @@ class Job:
     def set_step(self, step: JobStep) -> None:
         self._step = step
 
-    def execute(self) -> None:
+    def execute(self) -> str:
         """Execute the current job step.
 
         :raises ValueError: If the job is not initialized.
@@ -179,11 +167,37 @@ class Job:
         log = LOG.bind(job_id=self.id, run_id=self.run_id, step=self.step.name)
 
         log.info("Executing step logic")
-        self.step.execute(job=self)
+        next_step_label = self.step.execute(job=self)
 
         duration = time.perf_counter() - start_time
         log.info("Step execution finished", duration_sec=round(duration, 4))
+        return next_step_label
+        
+    def _make_folder(self) -> None:
+        # 1. Assignment (Ensures paths are correctly calculated)
+        identity = f"{self.id}:{self.dataset_id}_{self.run_date}"
+        self._folder = self.exec_ctx.workspace_dir / "active" / identity / self.run_id
+        
+        # 2. Physically create the folder if missing
+        if not self._folder.exists():
+            LOG.info("Creating job run directory", path=str(self._folder))
+            self._folder.mkdir(parents=True, exist_ok=True)
+            
+        # 3. Relocate the config file if it's still in the active root
+        job_cfg_file = (
+            f"{self.id}:{self.dataset_id}_{self.run_date}_{self.run_id}_config.json"
+        )
+        source_path = self.exec_ctx.workspace_dir / "active" / job_cfg_file
+        dest_path = self._folder / job_cfg_file
 
+        if source_path.exists() and not dest_path.exists():
+            LOG.info(
+                "Relocating configuration file",
+                src=str(source_path),
+                dst=str(dest_path),
+            )
+            shutil.move(source_path, dest_path)
+            
     def update_manifest(self, updates: dict[str, Any] | None = None) -> None:
         """
         Performs an atomic partial update directly to the disk.
@@ -199,8 +213,13 @@ class Job:
         # Debug log for state changes
         LOG.debug("Updating manifest", run_id=self.run_id, updates=updates)
 
-        # 3. Atomic Write to avoid corruption during crashes (Write to .tmp then replace)
+        # 3. Atomic Write to avoid corruption during crashes
+        # (Write to .tmp then replace)
         tmp_path = self._manifest_path.with_suffix(".tmp")
+
+        # Safety: Ensure the folder exists before attempting to write the manifest
+        self._make_folder()
+
         with tmp_path.open(mode="wb") as f:
             f.write(msgspec.json.encode(data))
             f.flush()
@@ -213,8 +232,29 @@ class Job:
         The 'Step Check-in': Mark the start of a process on disk immediately.
         Ensures the folder reflects the current step if a crash/outage occurs.
         """
+        # Ensure workspace is provisioned (relocates config if needed   
+        _ = self.folder
+
+        # Ensure the manifest is initialized if it doesn't exist,
+        # or update it with the current step.
+        if not self._manifest_path.exists() or self._manifest_path.stat().st_size == 0:
+            LOG.info("Manifest not found or empty, initializing with current step", run_id=self.run_id, step=step_name)
+            initial_manifest_data = {
+                "job_id": self.id,
+                "run_id": self.run_id,
+                "dataset_id": self.dataset_id,
+                "job_status": JobStatus.RUNNING,
+                "current_step": step_name, # Use the actual step being checked in
+                "bitmask": 0,
+            }
+            self.update_manifest(initial_manifest_data)
+            
         self.update_manifest(
-            {"current_step": step_name, "status": "RUNNING", "last_active": time.time()}
+            {
+                "current_step": step_name,
+                "job_status": JobStatus.RUNNING,
+                "last_active": datetime.now().astimezone().isoformat(),
+            }
         )
         LOG.debug("Job checked in to step", run_id=self.run_id, step=step_name)
 
@@ -259,6 +299,7 @@ class Job:
         # might not even need to open the manifest for simple status updates.
         # Filename contains run_id for Orchestrator lookup
         signal_path = signal_dir / f"{self.run_id}{ext}"
+        LOG.debug("Dropping state sync signal", run_id=self.run_id, signal=ext)
         signal_path.touch()  # Create hidden/temp
 
     # TODO: Consider if this is needed

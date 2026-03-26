@@ -62,10 +62,7 @@ class StateStore:
         """
         try:
             raw_records = self.db.fetch(sql)
-            self._active_records = {
-                f"{r['JOB_ID']}|{r['DATASET_ID']}|{r['RUN_DATE']}": r
-                for r in raw_records
-            }
+            self._active_records = {r["RUN_ID"]: r for r in raw_records}
         except Exception as e:
             LOG.error("Failed to refresh active records", error=str(e))
             # Fallback to empty dict to avoid NoneType errors in Orchestrator loop
@@ -208,8 +205,8 @@ class StateStore:
         Low latency, disk-persistent.
         """
         metadata = metadata or {}
-        composite_key = f"{manifest.job_id}|{manifest.dataset_id}|{context.run_date}"
-        record = self.active_records.get(composite_key, {})
+        run_id = manifest.run_id if manifest else "UNKNOWN"
+        record = self.active_records.get(run_id, {})
 
         # Align keys with your execution_log.sql columns
         incoming_update = {
@@ -246,7 +243,7 @@ class StateStore:
         event = dict(ChainMap(incoming_update, record))
 
         # 3. Update the Hot Cache so the next call sees the combined state
-        self._active_records[composite_key] = event
+        self._active_records[run_id] = event
 
         line = msgspec.json.encode(event) + b"\n"
         with self.stream_path.open("ab") as f:

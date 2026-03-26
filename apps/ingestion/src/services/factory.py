@@ -2,7 +2,6 @@ from collections.abc import Callable
 from typing import Any, ClassVar
 
 import structlog
-
 from libs.auth.factory import AuthFactory
 from libs.auth.models import Secret
 
@@ -37,6 +36,11 @@ class ServiceFactory:
 
         def wrapper(wrapped_class: type) -> type:
             cls._SERVICES[name.casefold()] = wrapped_class
+            LOG.debug(
+                "Service registered successfully",
+                service_name=name.casefold(),
+                class_name=wrapped_class.__name__,
+            )
             return wrapped_class
 
         return wrapper
@@ -63,7 +67,7 @@ class ServiceFactory:
             # --- CENTRALIZED SECRET LOGIC ---
             # If 'secret_key' (the ID) is present, wrap it in a Secret object.
             # This 'Secret' object is what gets sent to Ray workers.
-            if "secret_key" in config:
+            if config.get("secret_key"):
                 provider = AuthFactory.get_provider()
                 config["password"] = Secret(config["secret_key"], provider)
 
@@ -99,4 +103,5 @@ class ServiceFactory:
         if not isinstance(service, ArchiveMixin):
             raise TypeError(f"Service {service_type} does not implement ArchiveMixin.")
         return service
+        # return cast(ArchiveMixin, service)
         # return cast(ArchiveMixin, service)

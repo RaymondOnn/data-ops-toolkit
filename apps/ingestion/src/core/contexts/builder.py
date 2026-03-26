@@ -1,3 +1,4 @@
+from collections import ChainMap
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -85,9 +86,9 @@ class JobContextBuilder:
         )
 
         # --- DEBUG INSTRUMENTATION ---
-        print(f"DEBUG: Config Path Absolute: {Path(self.app_cfg_path).resolve()}")
-        print(f"DEBUG: File Exists: {Path(self.app_cfg_path).exists()}")
-        print(f"DEBUG: Loaded Keys: {list(self.app_settings.keys())}")
+        LOG.debug(f"DEBUG: Config Path Absolute: {Path(self.app_cfg_path).resolve()}")
+        LOG.debug(f"DEBUG: File Exists: {Path(self.app_cfg_path).exists()}")
+        LOG.debug(f"DEBUG: Loaded Keys: {list(self.app_settings.keys())}")
 
         try:
             LOG.info("Resolved App Config", config=self.app_settings.to_dict())
@@ -117,24 +118,51 @@ class JobContextBuilder:
             self.app_settings.get("workspace_dir", "~/.ingestion/data/")
         ).expanduser()
 
+        # Ensure the base workspace directory exists so lock files
+        # and subdirectories can be created safely.
+        workspace.mkdir(parents=True, exist_ok=True)
+
         return ExecutionContext(workspace_dir=workspace, execution_mode=mode)
 
-    def _resolve_service(self, settings: Dynaconf, ref_key: str) -> dict:
-        """
-        Resolves a service_ref string to its full config dict from services.*.
-        Falls back to the inline config block if no ref is given.
-        """
-        ref = settings.get(f"{ref_key}.service_ref")
+    def _resolve_service(
+        self, settings: Dynaconf, ref_key: str, dataset_id: str
+    ) -> dict:
+        # Search hierarchy for service_ref:
+        # Dataset (Active -> Default) > Job (Active -> Default)
+        ref = (
+            settings.get(f"datasets.{dataset_id}.{ref_key}.service_ref")
+            or settings.from_env("default").get(
+                f"datasets.{dataset_id}.{ref_key}.service_ref"
+            )
+            or settings.get(f"job.{ref_key}.service_ref")
+            or settings.from_env("default").get(f"job.{ref_key}.service_ref")
+        )
+
         if ref:
-            # 1. Try Global App Config (app.yaml)
-            # Dynaconf dot-access handles missing keys gracefully (returns None)
-            global_def = self.app_settings.get(f"services.{ref}")
+            # 1. Try Global app.yaml (Active env, then fallback to default)
+            global_def = self.app_settings.get(
+                f"services.{ref}"
+            ) or self.app_settings.from_env("default").get(f"services.{ref}")
             if global_def:
                 return dict(global_def)
 
-            # 2. Try Job Config (config.yaml)
-            return dict(settings.get(f"services.{ref}", {}))
-        return dict(settings.get(f"{ref_key}.config", {}))
+            # 2. Try Job-level config.yaml services block
+            job_level_def = settings.get(f"services.{ref}") or settings.from_env(
+                "default"
+            ).get(f"services.{ref}")
+            return dict(job_level_def or {})
+
+        # Fallback to inline config block:
+        # Dataset (Active -> Default) > Job (Active -> Default)
+        return dict(
+            settings.get(f"datasets.{dataset_id}.{ref_key}.config")
+            or settings.from_env("default").get(
+                f"datasets.{dataset_id}.{ref_key}.config"
+            )
+            or settings.get(f"job.{ref_key}.config")
+            or settings.from_env("default").get(f"job.{ref_key}.config")
+            or {}
+        )
 
     def build(
         self,
@@ -171,25 +199,41 @@ class JobContextBuilder:
             or datetime.now().astimezone().strftime("%Y-%m-%d")
         )
 
+        # 4. Get the Job-level defaults and the Dataset-level specifics
+        job_defaults = settings.get("job", {})
+        all_datasets = settings.get("datasets", {})
+
+        # Filter if a specific dataset was requested via CLI
+        target_dataset_ids = [dataset_id] if dataset_id else list(all_datasets.keys())
+
         contexts = []
-        datasets = settings.get("datasets", {})
+        for ds_id in target_dataset_ids:
+            if ds_id not in all_datasets:
+                LOG.warning(f"Dataset '{ds_id}' not found in job '{job_id}'. Skipping.")
+                continue
 
-        # Filter specific dataset if requested
-        target_datasets = (
-            {dataset_id: datasets[dataset_id]}
-            if dataset_id and dataset_id in datasets
-            else datasets
-        )
+            ds_cfg = all_datasets[ds_id]
 
-        if dataset_id and dataset_id not in datasets:
-            raise ValueError(f"Dataset '{dataset_id}' not found in job '{job_id}'")
+            # 5. Build the context using the resolution: Dataset Spec > Job Default
+            ctx = self._create_job_context(
+                job_id=job_id,
+                dataset_id=ds_id,
+                run_date=run_date,
+                # Pass both layers for hierarchical lookup
+                # job_defaults=job_defaults,
+                # ds_cfg=ds_cfg,
+                # Pass the full settings object to resolve global service refs
+                settings=settings,
+            )
 
-        for ds_name, ds_cfg in target_datasets.items():
-            ctx = self._create_job_context(job_id, ds_name, run_date, settings, ds_cfg)
-
-            # Apply Runtime Overrides
+            # 6. Final Layer: Apply Runtime CLI Overrides (--set)
             if overrides:
-                for key, value in overrides.items():
+                # Create a prioritized view: Dataset overrides > Global overrides
+                active_overrides = ChainMap(
+                    overrides.get(ds_id, {}), overrides.get("_global", {})
+                )
+
+                for key, value in active_overrides.items():
                     if hasattr(ctx, key):
                         setattr(ctx, key, value)
                     else:
@@ -206,82 +250,77 @@ class JobContextBuilder:
         dataset_id: str,
         run_date: str,
         settings: Dynaconf,
-        ds_cfg: Any,
     ) -> JobContext:
-        """Helper to create a JobContext object from configuration."""
-        # Resolve Filter SQL Tokens (e.g., {{run_date}})
-        source_params = ds_cfg.get("extract", {}).get("source_params", {})
-        bind_params = source_params.get("bind_params", {})
-        resolved_sql = source_params.get("filter_sql", "")
+        """
+        Helper that implements the 'Dataset > Job' fallback logic.
+        """
 
-        actual_date = run_date
-        for key, val in bind_params.items():
-            if isinstance(val, dict) and val.get("type") == "relative_date":
-                actual_date = self._resolve_run_date(val, run_date)
-                resolved_sql = resolved_sql.replace(f"{{{{{key}}}}}", actual_date)
+        def get_val(path: str, default: Any = None) -> Any:
+            """
+            Hierarchical lookup helper.
+            Search priority:
+            Dataset (Env) -> Dataset (Default) -> Job (Env) -> Job (Default) -> Fallback
+            """
+            search_paths = [f"datasets.{dataset_id}.{path}", f"job.{path}"]
+            for p in search_paths:
+                # 1. Check active environment
+                val = settings.get(p)
+                if val is not None:
+                    return val
 
-        # Resolve Archival Config
-        archive_conf = ds_cfg.get("archive", settings.get("archive", {}))
-        archive_service_details = self._resolve_service(settings, "archive")
+                # 2. Check 'default' environment fallback
+                val = settings.from_env("default").get(p)
+                if val is not None:
+                    return val
+            return default
 
-        # Resolve Transform Type
-        transform_cfg = ds_cfg.get("transform", {})
+        # 1. Resolve full service dictionaries (respecting service_ref)
+        source_svc = self._resolve_service(settings, "extract", dataset_id)
+        sink_svc = self._resolve_service(settings, "load", dataset_id)
+        archive_svc = self._resolve_service(settings, "archive", dataset_id)
 
-        # Instantiate JobContext via msgspec
+        # 2. Extract specific 'type' and leave residual as 'config'
+        source_type = source_svc.pop("type", get_val("source.type", "flat_file"))
+        sink_type = sink_svc.pop("type", get_val("sink.type", "clickhouse"))
+        archive_type = archive_svc.pop("type", get_val("archive.type", "s3"))
+
         ctx_data = {
             "job_id": job_id,
             "dataset_id": dataset_id,
             "run_date": run_date,
             "output_path": f"storage/active/{job_id}/{dataset_id}",
             "extract": {
-                "source_type": (
-                    ds_cfg.get("extract", {}).get("source_type")
-                    or settings.get("source.type")
-                ),
-                "source_identifier": (
-                    ds_cfg.get("extract", {}).get("source_identifier")
-                    or ds_cfg.get("source_path")
-                ),
-                "num_partitions": ds_cfg.get(
-                    "num_partitions", settings.get("num_partitions", 10)
-                ),
-                "load_mode": ds_cfg.get("extract", {}).get("load_mode", "snapshot"),
-                "source_config": self._resolve_service(settings, "source"),
-                "source_params": {**source_params, "filter_sql": resolved_sql},
-                "schema_items": ds_cfg.get("schema_items", []),
+                "source_type": source_type,
+                "source_identifier": get_val("extract.source_identifier")
+                or get_val("source_identifier"),
+                "num_partitions": get_val("num_partitions", 1),
+                "load_mode": get_val("extract.load_mode", "snapshot"),
+                "source_config": source_svc,
+                "source_params": get_val("extract.source_params", {}),
+                "schema_items": get_val("schema_items", []),
             },
             "transform": {
-                "transform_type": transform_cfg.get("type", "default"),
-                "transform_params": transform_cfg.get("options", {}),
+                "transform_type": get_val("transform.type", "default"),
+                "transform_params": get_val("transform.options", {}),
             },
             "load": {
-                "sink_type": (
-                    ds_cfg.get("load", {}).get("sink_type") or settings.get("sink.type")
-                ),
-                "sink_identifier": (
-                    ds_cfg.get("load", {}).get("sink_identifier")
-                    or ds_cfg.get("target_destination")
-                ),
-                "sink_config": self._resolve_service(settings, "sink"),
-                "partition_col": (
-                    ds_cfg.get("partition_col")
-                    or settings.get("partition_col", "run_date")
-                ),
-                "partition_value": ds_cfg.get("partition_value") or actual_date,
-                "load_params": ds_cfg.get("load", {}).get("load_params", {}),
+                "sink_type": sink_type,
+                "sink_identifier": get_val("load.sink_identifier")
+                or get_val("target_destination"),
+                "sink_config": sink_svc,
+                "partition_col": get_val("partition_col", "run_date"),
+                "partition_value": get_val("partition_value", run_date),
+                "load_params": get_val("load.load_params", {}),
             },
             "archive": {
-                "enabled": archive_conf.get("enable_archival", True),
-                "retention_days": archive_conf.get(
-                    "retention_days", settings.get("retention_days", 2555)
-                ),
-                "base_path": archive_conf.get(
-                    "base_path",
-                    settings.get("archive_base_path", "/mnt/archive/ingestion"),
-                ),
-                "type": archive_service_details.get("type", "s3"),
-                "config": archive_service_details,
+                "enabled": get_val("archive.enable_archival", True),
+                "retention_days": get_val("archive.retention_days", 2555),
+                "base_path": get_val("archive.base_path", "/mnt/archive"),
+                "type": archive_type,
+                "config": archive_svc,
             },
         }
 
+        # Validate via msgspec
+        return msgspec.json.decode(msgspec.json.encode(ctx_data), type=JobContext)
         return msgspec.json.decode(msgspec.json.encode(ctx_data), type=JobContext)

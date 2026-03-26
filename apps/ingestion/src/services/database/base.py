@@ -79,6 +79,19 @@ class DatabaseSource(DatabaseService, SourceMixin):
         # All DBs use the client's load strategy (e.g., ORA_HASH, ctid)
         return self.client.get_load_strategy(target, num_partitions, filter_sql)
 
+    @protect_service(breaker)
+    def fetch_data(self, unit: str) -> pl.DataFrame:
+        """
+        Implementation of SourceMixin.fetch_data for Databases.
+        Consumes the generator from the client and returns a single DataFrame.
+        """
+        # We iterate through the client's generator. If a connection error occurs
+        # during streaming, the @protect_service decorator will catch it.
+        batches = list(self.client.fetch_df(unit))
+        if not batches:
+            return pl.DataFrame()
+        return pl.concat(batches)
+
 
 class DatabaseSink(DatabaseService, SinkMixin):
     @abstractmethod

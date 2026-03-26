@@ -2,26 +2,24 @@
 
 # ── Job-level defaults (apply to all datasets in this job) ──────────────────
 default:
-  source:
-    type: "flat_file"
-    config:
-    
-  sink:
-    service_ref: clickhouse
-
-  num_partitions: 1
-
-  archive:
-    enable_archival: true
-    service_ref: "standard_archive"
+  job:
+    extract:
+      service_ref: "file"
+    transform:
+      type: default
+    load:
+      service_ref: clickhouse
+    num_partitions: 1
+    archive:
+      enable_archival: true
+      service_ref: "standard_archive"
 
   # ── Datasets (each key = dataset_id, values override job defaults) ─────────
   datasets:
     orders:
       num_partitions: 1          # overrides job-level num_partitions if different
       extract:
-        load_mode: "snapshot"
-        source_identifier: "samples/sample_orders.csv"
+        load_mode: "snapshot"    
         source_params:
           filter_sql: ""         # e.g. "WHERE order_date = {{run_date}}"
           bind_params: {}
@@ -35,16 +33,18 @@ default:
           #   total_amount: 8
           #   status: 16
       load:
-        sink_identifier: "orders"
+        sink_identifier: default.orders
+        service_ref: "clickhouse"
       partition_value: "2023-10-27"
       archive:
         enable_archival: true    # per-dataset archival override
 
 # ── Local env overrides ──────────────────────────────────────────────────────
-# local:
-#   source:
-#     config:
-#       url: "file:///Users/main/Documents/Code/Github/data-ops-toolkit/apps/ingestion"
+local:
+  job:
+  datasets:
+    orders:
+      source_identifier: "samples/sample_orders.csv"
 
 # production:
 #   source:

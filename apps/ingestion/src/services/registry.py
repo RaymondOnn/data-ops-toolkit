@@ -5,7 +5,6 @@ from typing import Any, ClassVar
 
 import diskcache
 import structlog
-
 from apps.ingestion.src.utils.constants import DISKCACHE_FILE_PATH
 from libs.resilience.circuit_breaker import (
     CircuitBreaker,
@@ -31,7 +30,8 @@ class ServiceRegistry:
             cls._cache = diskcache.Cache(
                 cache_path,
                 timeout=10,
-                settings={"sqlite_journal_mode": "wal"},
+                sqlite_journal_mode="wal",  # Pass directly
+                sqlite_synchronous=1        # Pass directly
             )
 
     @classmethod
