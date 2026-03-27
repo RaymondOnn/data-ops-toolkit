@@ -8,9 +8,9 @@ import ray
 import structlog
 from filelock import FileLock
 
-from apps.ingestion.src.core.contexts import ExecutionContext
+from apps.ingestion.src.core.contexts import ExecutionContext, RayMode
 from apps.ingestion.src.core.models.job import Job, JobManifest, JobStatus
-from apps.ingestion.src.core.models.steps.enums import STEP_ORDER
+from apps.ingestion.src.core.models.steps.enums import STEP_ORDER, JobSteps
 from apps.ingestion.src.services.registry import ServiceRegistry
 from apps.ingestion.src.utils.common import find_path
 from apps.ingestion.src.utils.constants import DISKCACHE_FILE_PATH
@@ -39,7 +39,7 @@ class Worker:
         # Share the same cache path with ServiceRegistry so that circuit-breaker
         # state (written by workers) is visible to the Orchestrator's registry.
         ServiceRegistry.configure(self.exec_ctx.workspace_dir)
-        self.lock = FileLock(self.exec_ctx.workspace_dir / "orchestrator.lock")
+        self.lock = FileLock(self.exec_ctx.lock_file)
 
         # Initialize logging for the worker process.
         # Using 'platform.jsonl' for workers as they are shared across runs.
@@ -97,11 +97,12 @@ class Worker:
                     return
 
                 if next_step.casefold() != "finish":
+                    identifier = f"{meta.job_id}:{meta.dataset_id}:{meta.run_date}"
                     meta.current_step = next_step
                     meta.status = (
                         JobStatus.PENDING.value
                     )  # Ready for the next worker pool
-                    new_key = f"{next_step}:{meta.job_id}:{meta.dataset_id}:{meta.run_date}:{meta.run_id}"
+                    new_key = f"{next_step}:{identifier}:{meta.run_id}"
                     self.cache[new_key] = meta
                     log.info(
                         "Step complete. Job returned to queue.", next_step=next_step
@@ -111,13 +112,11 @@ class Worker:
                     # Remove the job from the active queue entirely
                     self.cache.pop(key, None)
                     # Cleanup lookup key used by Orchestrator
-                    lookup_key = (
-                        f"active_run:{meta.job_id}:{meta.dataset_id}:{meta.run_date}"
-                    )
+                    lookup_key = f"active_run:{identifier}"
                     self.cache.pop(lookup_key, None)
 
         except Exception as e:
-            log.exception("Worker failed processing step")
+            log.error("Worker failed processing step", error=str(e))
             with self.lock:
                 meta.status = JobStatus.FAILED.value
                 self.cache[key] = meta
@@ -138,26 +137,31 @@ class IngestionEngine:
         cache_path = (self.exec_ctx.workspace_dir / DISKCACHE_FILE_PATH).resolve()
 
         self.cache = diskcache.Cache(cache_path)
-        self.lock = FileLock(self.exec_ctx.workspace_dir / "orchestrator.lock")
+        self.lock = FileLock(self.exec_ctx.lock_file)
 
         if not ray.is_initialized():
-            ray.init(ignore_reinit_error=True)
+            local_mode = self.exec_ctx.ray_mode == RayMode.LOCAL
+            ray.init(ignore_reinit_error=True, local_mode=local_mode)
 
         # Configuration for stage limits
-        self.stage_limits: dict[str, dict[str, Any]] = {
-            "start": {"limit": 5, "pool": "io"},
-            "extract": {"limit": 10, "pool": "io"},
-            "transform": {"limit": 4, "pool": "cpu"},  # CPU-Heavy
-            "audit": {"limit": 4, "pool": "io"},
-            "load": {"limit": 1, "pool": "io"},  # Sequential
+        self.stage_limits: dict[JobSteps, dict[str, Any]] = {
+            JobSteps.START: {"limit": 5, "pool": "io"},
+            JobSteps.EXTRACT: {"limit": 10, "pool": "io"},
+            JobSteps.TRANSFORM: {"limit": 4, "pool": "cpu"},  # CPU-Heavy
+            JobSteps.WRITE: {"limit": 5, "pool": "io"},
+            JobSteps.AUDIT: {"limit": 4, "pool": "io"},
+            JobSteps.PUBLISH: {"limit": 1, "pool": "io"},  # Sequential promotion
+            JobSteps.COMPLETE: {"limit": 5, "pool": "io"},
         }
 
         # Initialize specialized pools
         self.io_pool: list[ray.actor.ActorHandle] = [
-            Worker.remote(f"io_{i}", self.exec_ctx) for i in range(15)  # type: ignore
+            Worker.remote(f"io_{i}", self.exec_ctx)
+            for i in range(15)  # type: ignore
         ]
         self.cpu_pool: list[ray.actor.ActorHandle] = [
-            Worker.remote(f"cpu_{i}", self.exec_ctx) for i in range(4)  # type: ignore
+            Worker.remote(f"cpu_{i}", self.exec_ctx)
+            for i in range(4)  # type: ignore
         ]
 
         # Local tracker for active Ray tasks to avoid blocking RPC calls
@@ -173,17 +177,16 @@ class IngestionEngine:
 
     def queue_jobs(
         self,
-        composite_key: str,
+        identifier: str,
         run_id: str,
         config_file_path: str,
-        run_date: str,
         current_step: str | None = None,
     ) -> None:
         """Checks config, creates jobs if not in cache, and submits them."""
         # Always start in the 'start' queue
         current_step = current_step or "start"
-        queue_key = f"{current_step}:{composite_key}:{run_date}:{run_id}"
-        job_id, dataset_id = composite_key.split(":", 1)
+        queue_key = f"{current_step}:{identifier}:{run_id}"
+        job_id, dataset_id, run_date = identifier.split(":")
 
         # Logic to determine if this is a snapshot (e.g., based on
         # job naming convention)
@@ -210,7 +213,7 @@ class IngestionEngine:
                 )
                 self.cache[queue_key] = meta
                 # Set the lookup key so Orchestrator can find the run_id for this date
-                self.cache[f"active_run:{job_id}:{dataset_id}:{run_date}"] = run_id
+                self.cache[f"active_run:{identifier}"] = run_id
 
             LOG.info(
                 "Queued Job",
@@ -231,26 +234,30 @@ class IngestionEngine:
                 if not isinstance(key, str) or ":" not in key:
                     continue
 
-                step = key.split(":", 1)[0]
-                if step not in self.stage_limits:
+                # Convert the string label from the cache key to a JobSteps enum
+                step_label = key.split(":", 1)[0]
+                try:
+                    step_enum = JobSteps[step_label.upper()]
+                except (KeyError, ValueError):
                     continue
 
-                # Use isinstance to narrow the type for the linter and
-                # ensure runtime safety
+                if step_enum not in self.stage_limits:
+                    continue
+
                 raw_meta = self.cache[key]
                 if not isinstance(raw_meta, JobMetadata):
                     continue
                 job_meta: JobMetadata = raw_meta
 
                 if job_meta.status == JobStatus.PENDING.value:
-                    limit = self.stage_limits[step]["limit"]
+                    limit = self.stage_limits[step_enum]["limit"]
                     # 2. Check if the specific stage has room
-                    if current_occupancy[step] < limit:
+                    if current_occupancy[step_enum] < limit:
                         # 2. Select the correct Worker Pool
                         # 3. Find a free Ray worker
                         pool = (
                             self.cpu_pool
-                            if self.stage_limits[step]["pool"] == "cpu"
+                            if self.stage_limits[step_enum]["pool"] == "cpu"
                             else self.io_pool
                         )
                         if worker := self._get_idle_worker_from_pool(pool):
@@ -259,19 +266,24 @@ class IngestionEngine:
                             self.cache[key] = job_meta
 
                             # Update local occupancy count
-                            current_occupancy[step] += 1
+                            current_occupancy[step_enum] += 1
 
                             # Dispatch non-blocking and track the reference
                             ref = worker.process_step.remote(key, job_meta.config_file)
                             self._active_tasks[ref] = worker
 
-    def _get_current_occupancy(self) -> dict[str, int]:
+    def _get_current_occupancy(self) -> dict[JobSteps, int]:
         """Counts how many workers are active in each stage."""
         counts = dict.fromkeys(self.stage_limits, 0)
         for key in list(self.cache.iterkeys()):
             if isinstance(key, str) and ":" in key:
-                step = key.split(":", 1)[0]
-                if step not in self.stage_limits:
+                step_label = key.split(":", 1)[0]
+                try:
+                    step_enum = JobSteps[step_label.upper()]
+                except (KeyError, ValueError):
+                    continue
+
+                if step_enum not in self.stage_limits:
                     continue
 
                 meta = self.cache[key]
@@ -279,7 +291,7 @@ class IngestionEngine:
                     isinstance(meta, JobMetadata)
                     and meta.status == JobStatus.RUNNING.value
                 ):
-                    counts[step] += 1
+                    counts[step_enum] += 1
         return counts
 
     def _get_idle_worker_from_pool(
@@ -297,8 +309,8 @@ class IngestionEngine:
                     # Retrieve the result to re-raise any remote exceptions
                     # into the Orchestrator's context.
                     ray.get(ref)
-                except Exception:
-                    LOG.exception("Ray worker task failed")
+                except Exception as e:
+                    LOG.error("Ray worker task failed", error=str(e))
                 self._active_tasks.pop(ref, None)
 
         # 2. Find a worker that isn't currently assigned a task
@@ -317,8 +329,13 @@ class IngestionEngine:
                 if ":" not in key_str:
                     continue
 
-                step, rest = key_str.split(":", 1)
-                if step not in self.stage_limits:
+                step_label, rest = key_str.split(":", 1)
+                try:
+                    step_enum = JobSteps[step_label.upper()]
+                except (KeyError, ValueError):
+                    continue
+
+                if step_enum not in self.stage_limits:
                     continue
 
                 raw_meta = self.cache[key]
@@ -333,7 +350,7 @@ class IngestionEngine:
                     and time.time() - meta.last_hb > 300
                 ):
                     LOG.warning("Zombie job detected", key=key_str)
-                    self._recover_job(step, rest)
+                    self._recover_job(step_label, rest)
 
     def _recover_job(self, step_name: str, rest_of_key: str) -> None:
         """

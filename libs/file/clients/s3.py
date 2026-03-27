@@ -34,7 +34,22 @@ class S3Client(FileSystemClient):
             if "password" in self.opts:
                 self.opts["secret"] = self.opts.pop("password")
 
+            # Abstracting Mocking logic:
+            # If an endpoint_url is provided (Moto server or internal mock),
+            # ensure the filesystem is configured for it.
+            if "endpoint_url" in self.opts:
+                self.opts.setdefault("use_ssl", False)
+                self.opts.setdefault("anon", False)
+
             self._fs: S3FileSystem = fsspec.filesystem("s3", **self.opts)
+
+            # If we are mocking, ensure the bucket exists (Moto starts empty)
+            if self.opts.get("use_mock"):
+                bucket = self.url.split("://")[-1].split("/")[0]
+                if not self._fs.exists(bucket):
+                    LOG.debug("Moto/Mock detected: Pre-creating bucket", bucket=bucket)
+                    self._fs.mkdir(bucket)
+
         return self._fs
 
     def reconnect(self, max_retries: int = 3) -> None:

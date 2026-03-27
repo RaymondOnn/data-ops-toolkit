@@ -25,22 +25,27 @@ class FormatHandler(ABC):
         self.opts = storage_options or {}
 
     @abstractmethod
-    def to_df(self, input_file: Path | str, **kwargs: Any) -> pl.LazyFrame:
+    def discover(self, input_path: Path | str) -> list[str]:
+        """Expands a path into a list of Parquet files."""
+        pass
+
+    @abstractmethod
+    def to_df(self, input_path: Path | str, **kwargs: Any) -> pl.LazyFrame:
         """High-level: Streaming/Repair -> LazyFrame"""
         pass
 
     @abstractmethod
-    def from_df(self, df: pl.LazyFrame | pl.DataFrame, output_file: Path | str) -> None:
+    def from_df(self, df: pl.LazyFrame | pl.DataFrame, output_path: Path | str) -> None:
         """High-level: LazyFrame -> File (Streaming)"""
         pass
 
     @abstractmethod
-    def read_mem(self, input_file: Path | str, **kwargs: Any) -> io.BytesIO:
+    def read_file(self, input_path: Path | str, **kwargs: Any) -> io.BytesIO:
         """Low-level: Read + Repair -> Memory Buffer"""
         pass
 
     @abstractmethod
-    def write_file(self, data: bytes, output_file: Path | str) -> None:
+    def write_file(self, data: bytes, output_path: Path | str) -> None:
         """Low-level: Raw Bytes -> Storage"""
         pass
 

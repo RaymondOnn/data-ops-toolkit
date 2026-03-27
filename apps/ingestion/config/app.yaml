@@ -1,5 +1,14 @@
 version: "1.0"
 
+# --- Configuration Templates ---
+x-moto-base: &moto_base
+  endpoint_url: "http://localhost:5000" # Matches the port of your moto_server
+  key: "testing"
+  secret: "testing"
+  use_ssl: false
+  client_kwargs:
+    region_name: "us-east-1"
+
 # Dynaconf environments=True format:
 #   - 'default' keys apply to all environments
 #   - named env keys (local, production, etc.) override defaults
@@ -20,9 +29,31 @@ local:
     file:
       type: flat_file
       url: "."
-    clickhouse:
-      type: chdb
-      path: "./.local_db" 
+    clickhouse: # Now pointing to a Docker container
+      type: "clickhouse_db"
+      host: "localhost"
+      port: 8123
+      user: "default"
+      secret_key: "CLICKHOUSE_PASSWORD"
+    mock_s3:
+      type: data_lake
+      url: "s3://landing-zone"
+      storage_options:
+        <<: *moto_base
+        use_mock: true # This flag triggers the bucket creation
+    moto_server_s3:
+      type: data_lake
+      url: "s3://landing-zone"
+      storage_options:
+        <<: *moto_base
+        use_mock: false # Set to true if you want the client to auto-create the bucket on the server
+    moto_archive: # Specific archive configuration for the 'local' environment
+      type: standard_archive
+      url: "s3://landing-zone"
+      storage_options:
+        <<: *moto_base
+        # These options will be passed to the StandardArchiveService's S3Client
+        use_mock: true # Auto-create bucket on Moto server
 
 dev:
   services:

@@ -47,6 +47,7 @@ class Job:
             / self.run_id
         )
         self._manifest_path = self._folder / "manifest.json"
+
     @classmethod
     def from_folder(
         cls,
@@ -95,7 +96,10 @@ class Job:
             # Decision: The manifest in the active root is the 'Single Source of Truth'
             # for the Orchestrator to monitor progress.
             # We check size to avoid decoding truncated files during lazy init
-            if not self._manifest_path.exists() or self._manifest_path.stat().st_size == 0:
+            if (
+                not self._manifest_path.exists()
+                or self._manifest_path.stat().st_size == 0
+            ):
                 data = {
                     "job_id": self.id,
                     "run_id": self.run_id,
@@ -108,7 +112,7 @@ class Job:
 
             # Move file into job folder
             job_cfg_file = f"{self.id}:{self.dataset_id}_{self.run_id}_config.json"
-            source_path = self.exec_ctx.workspace_dir / "active" / job_cfg_file
+            source_path = self.exec_ctx.active_path / job_cfg_file
             dest_path = folder / job_cfg_file
             shutil.move(str(source_path), str(dest_path))
 
@@ -237,7 +241,7 @@ class Job:
         """
         # 2. Define the signal path
         # Path: /data/signals/{run_id}.step_name.bitmask.sync
-        signal_dir = self.exec_ctx.workspace_dir / "signals"
+        signal_dir = self.exec_ctx.signal_path
         signal_dir.mkdir(parents=True, exist_ok=True)
 
         # 2. Drop the Breadcrumb

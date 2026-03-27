@@ -39,6 +39,7 @@ class BasePayload(msgspec.Struct, kw_only=True):
         default_factory=lambda: datetime.now().astimezone().isoformat()
     )
 
+
 class ExtractPayload(BasePayload, kw_only=True):
     file_count: int  # Number of files detected
     files: list[FileInfo] = []  # List of file metadata

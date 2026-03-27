@@ -1,9 +1,7 @@
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import polars as pl
 import structlog
-
-from libs.file.formats import FormatFactory
 
 from .base import TransformContext, Transformer
 from .factory import TransformFactory
@@ -13,31 +11,11 @@ LOG = structlog.getLogger(__name__)
 
 @TransformFactory.register("skip")
 class NoOpTransformer(Transformer):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+
     def apply(self, lf: pl.LazyFrame, ctx: TransformContext) -> pl.LazyFrame:
-        ctx.destination_dir.mkdir(parents=True, exist_ok=True)
-
-        # Check if format matches source format
-        src_fmt: set[str] = set()
-        for file in ctx.source_dir.iterdir():
-            src_fmt.add(file.suffix)
-
-        if len(src_fmt) > 1:
-            raise ValueError("Source directory contains multiple formats")
-
-        if src_fmt != set(ctx.output_format):
-            writer = FormatFactory.get_handler(ctx.output_format)
-            for file in ctx.source_dir.iterdir():
-                filename = file.stem
-                output_file = ctx.destination_dir / f"{filename}.{ctx.output_format}"
-                writer.from_df(lf, output_file)
-        else:
-            raise ValueError(f"Unsupported format: {ctx.output_format}")
-
-        # return {
-        #     "rows": lf.collect().height,  # Total rows preserved
-        #     "valid_schema": True,
-        #     "schema": {k: str(v) for k, v in lf.schema.items()}
-        # }
+        """Simply returns the LazyFrame as is."""
         return lf
 
 
@@ -47,6 +25,9 @@ class DefaultTransformer(Transformer):
     Standard normalization layer for all datasets.
     Ensures structural consistency and uniqueness before the load stage.
     """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
 
     def apply(self, lf: pl.LazyFrame, ctx: TransformContext) -> pl.LazyFrame:
         # 1. STANDARDIZE: Column naming (snake_case)
@@ -59,11 +40,8 @@ class DefaultTransformer(Transformer):
         # 3. NULL CONVERSION: Convert empty strings ('') to NULL
         # Critical for DB integrity so that whitespace-only values don't
         # become blank entries
-        lf = lf.with_columns(
-            pl.col(pl.Utf8).map_elements(
-                lambda s: None if s == "" else s, return_dtype=pl.Utf8
-            )
-        )
+        # Using .replace preserves column names and is more concise
+        lf = lf.with_columns(pl.col(pl.Utf8).replace("", None))
 
         # 4. DEDUPLICATE: Global uniqueness via metadata hash
         if "_row_hash" in lf.columns:
@@ -75,11 +53,12 @@ class DefaultTransformer(Transformer):
 
     def _standardize_column_names(self, lf: pl.LazyFrame) -> pl.LazyFrame:
         """Forces snake_case and removes special characters."""
-        mapping = {
-            col: col.lower().strip().replace(" ", "_").replace("-", "_")
-            for col in lf.columns
-        }
-        return lf.rename(mapping)
+        # Use map_alias to rename columns without resolving the schema
+        return lf.select(
+            pl.all().map_alias(
+                lambda col: col.lower().strip().replace(" ", "_").replace("-", "_")
+            )
+        )
 
     def _empty_strings_to_nulls(self, lf: pl.LazyFrame) -> pl.LazyFrame:
         """
@@ -115,6 +94,9 @@ class BitmaskTransformer(Transformer):
         128: "ROUND_2",
         256: "DIGITS_ONLY",
     }
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
 
     def apply(self, lf: pl.LazyFrame, ctx: TransformContext) -> pl.LazyFrame:
         # STAGE 1: Decipher and Reorganize into Per-Operation Buckets

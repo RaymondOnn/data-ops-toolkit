@@ -41,7 +41,9 @@ class StartStep(JobStep):
             # 5. Finalize (using the generic helper we discussed)
             # Note: Pass the Struct directly if finalize() handles to_builtins
             self.finalize(job, results=ctx)
-            LOG.info("Job initialized", job_id=job.id, run_id=job.run_id)
+            LOG.info(
+                "Job initialized", step=self.name, job_id=job.job_id, run_id=job.run_id
+            )
             return str(self._transit(job))
         except Exception as e:
             # Ensure we capture the traceback in the manifest

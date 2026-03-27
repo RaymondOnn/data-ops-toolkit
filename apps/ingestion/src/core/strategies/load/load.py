@@ -1,8 +1,8 @@
 from pathlib import Path
 
 import structlog
-from apps.ingestion.src.services.base import SinkMixin
 from msgspec import Struct
+from apps.ingestion.src.services.base import SinkMixin
 
 LOG = structlog.getLogger(__name__)
 
@@ -27,14 +27,22 @@ class Loader:
     """
 
     def load(
-        self, service: SinkMixin, source_dir: Path, target_table: str
+        self,
+        service: SinkMixin,
+        source_dir: Path,
+        target_table: str,
+        partition_col: str,
+        partition_val: str,
+        file_ext: str = "parquet",
     ) -> tuple[str, int]:
         """
         Phase 1: Moves data from Silver (Parquet) to a temporary 'Staging' area.
         Returns metadata about the staged data (staging_artifact, rows_loaded).
         """
         LOG.info("staging_started", table=target_table)
-        return service.stage_data(source_dir, target_table)
+        return service.stage_data(
+            source_dir, target_table, partition_col, partition_val, file_ext
+        )
 
     def promote(
         self, service: SinkMixin, staging_identifier: str, write_ctx: WriteContext

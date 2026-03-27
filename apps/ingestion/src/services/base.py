@@ -31,7 +31,14 @@ class SourceMixin(ABC):
 
 class SinkMixin(ABC):
     @abstractmethod
-    def stage_data(self, source_dir: Any, target_table: str) -> tuple[str, int]:
+    def stage_data(
+        self,
+        source_dir: Any,
+        target_table: str,
+        partition_col: str,
+        partition_val: str,
+        file_ext: str = "parquet",
+    ) -> tuple[str, int]:
         """
         Phase 1: Returns the name of the temporary staging table/folder
         and rows loaded.

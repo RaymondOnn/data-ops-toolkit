@@ -58,7 +58,6 @@ class BaseStorageService(Service):
             config["password"] = secret.resolve(sanitize=True) if secret else {}
 
         # 2. Merge Credentials with Storage Options
-        # Patch: Create a new dict instead of using .update() which returns None
         merged_opts = {**self.opts, **config}
 
         return create_fs_client(
@@ -76,8 +75,20 @@ class StorageSource(BaseStorageService, SourceMixin):
         if not getattr(self.client, "fs", None):
             raise RuntimeError("Filesystem client is not initialized")
 
-        # Use the discovery utility to handle file vs folder automatically
-        files = list(self.client.walk_paths(target))
+        # 1. Determine format from target or look for the first file to select handler
+        # This allows the handler to use its own glob pattern (e.g. *.csv)
+        # If target is a directory, we peek at one file to get the extension
+        peek = next(self.client.walk_paths(target), None)
+        if not peek:
+            return []
+
+        ext = Path(peek).suffix.lstrip(".").lower()
+        handler: FormatHandler = FormatFactory.get_handler(
+            ext, self.client.fs, self.opts
+        )
+
+        # 2. Use Handler-specific discovery (e.g. CSVHandler knows to find .csv and .txt)
+        files = list(handler.discover(target))
 
         LOG.debug(
             "Generating work units",
@@ -88,12 +99,12 @@ class StorageSource(BaseStorageService, SourceMixin):
         return [{"files": files[i::num_partitions]} for i in range(num_partitions)]
 
     @protect_service(breaker)
-    def fetch_data(self, unit: list[str] | str) -> pl.DataFrame:
+    def fetch_data(self, unit: list[str] | str) -> pl.DataFrame | pl.LazyFrame:
         """
         Reads a list of files (the work unit) into a single Polars DataFrame.
         Supports Parquet, CSV, and JSON formats.
         """
-        if not unit:
+        if unit is None or len(unit) == 0:  # No Truthy values in Ray
             return pl.DataFrame()
 
         # Handle both single path strings and lists of paths
@@ -109,12 +120,13 @@ class StorageSource(BaseStorageService, SourceMixin):
         )
 
         # 2. Iterate and fetch individually (supports per-file repairs/cleaning)
-        dfs = [handler.to_df(p) for p in resolved_paths]
+        # This aligns with the requirement that handlers accept a single Path.
+        lfs = [handler.to_df(p) for p in resolved_paths]
 
-        if not dfs:
+        if not lfs:
             return pl.DataFrame()
 
-        return pl.concat(dfs)
+        return pl.concat(lfs)
 
 
 class StorageSink(BaseStorageService, SinkMixin):

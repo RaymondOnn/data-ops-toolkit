@@ -54,7 +54,7 @@ class LifecycleManager:
 
                 # 3. Construct the composite key for the Engine
                 # Line 313 fix: composite_key = "job_id:table"
-                composite_key = f"{job.id}:{job.context.dataset_id}"
+                composite_key = f"{job.job_id}:{job.context.dataset_id}"
                 LOG.info(
                     "Recovering job", run_id=job.run_id, step=job.manifest.current_step
                 )

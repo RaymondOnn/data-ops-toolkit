@@ -60,7 +60,7 @@ class JobStep(ABC):
         base_dir = Path(job.exec_ctx.workspace_dir)
 
         # Target: base/HOLD/job_id/run_id
-        new_path = base_dir / category / f"{job.id}_{job.run_id}"
+        new_path = base_dir / category / f"{job.job_id}_{job.run_id}"
 
         # Ensure parent structure exists
         new_path.parent.mkdir(parents=True, exist_ok=True)
@@ -94,6 +94,18 @@ class JobStep(ABC):
         results = results or {}
         data = msgspec.to_builtins(job.manifest)
 
+        # 4. SYMLINK (Pointer to immutable data)
+        if data_folder:
+            active_link = job.folder / self.name
+            if active_link.exists() or active_link.is_symlink():
+                active_link.unlink()
+
+            # Pointer: active/job_id/run_id/step -> ../../../data/step/folder
+            relative_target = (
+                Path("..") / ".." / ".." / "data" / self.name / data_folder.name
+            )
+            active_link.symlink_to(relative_target)
+
         # 2. MUTATE (same as before)
         if exception:
             # Create the error payload
@@ -121,6 +133,10 @@ class JobStep(ABC):
                 FailedState(job).on_enter(data=error)
                 target_category = "FAILED"
 
+            # 2.5 Signal change BEFORE moving the folder to avoid timing bugs
+            # where the Orchestrator looks in 'active' while the move is in progress.
+            job.request_status_sync(deep_sync=True)
+
             self.move_to_folder(job, target_category)
         else:
             # Update the bitmask
@@ -138,26 +154,22 @@ class JobStep(ABC):
                     }
                 )
                 LOG.info(
-                    "Job reached target state", job_id=job.id, target=job.target_step
+                    "Job reached target state",
+                    job_id=job.job_id,
+                    target=job.target_step,
                 )
+            else:
+                # Persist step results and bitmask for intermediate steps
+                job.update_manifest({self.name: results, "bitmask": new_mask.value})
 
             # Continue the chain (The Orchestrator will pick this up in the next scan)
             if next_step:
                 LOG.info(
-                    "Job progressing to next step", job_id=job.id, next=next_step.label
+                    "Job progressing to next step",
+                    step=self.name,
+                    job_id=job.job_id,
+                    next=next_step.label,
                 )
 
-        # 4. SYMLINK (Pointer to immutable data)
-        if data_folder:
-            active_link = job.folder / self.name
-            if active_link.exists() or active_link.is_symlink():
-                active_link.unlink()
-
-            # Pointer: active/job_id/run_id/step -> ../../../data/step/folder
-            relative_target = (
-                Path("..") / ".." / ".." / "data" / self.name / data_folder.name
-            )
-            active_link.symlink_to(relative_target)
-
-        # 5. ATOMIC SWAP
-        job.request_status_sync()
+            # 5. ATOMIC SWAP (Success Case)
+            job.request_status_sync()

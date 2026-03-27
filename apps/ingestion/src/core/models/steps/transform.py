@@ -1,15 +1,16 @@
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 import polars as pl
+import ray
 import structlog
+
 from apps.ingestion.src.core.models.job.manifest import TransformPayload
 from apps.ingestion.src.core.strategies.transform import (
     TransformContext,
     TransformFactory,
 )
-from libs.file.formats import ParquetHandler
 
 from .base import JobStep
 from .enums import JobSteps
@@ -34,77 +35,112 @@ class TransformStep(JobStep):
         to know the specific physical timestamped folder.
         """
         start_ts = datetime.now().astimezone().isoformat()
-        LOG.info("Starting transformation", type=job.context.transform.transform_type)
+        LOG.info(
+            "Starting transformation",
+            step=self.name,
+            type=job.context.transform.transform_type,
+        )
         try:
-            with ParquetHandler() as handler:
-                ctx = TransformContext(
-                    options=job.context.transform.transform_params,
-                    source_dir=(job.folder / "extract" / "part_*.parquet").resolve(),
-                    destination_dir=job.folder / "transform",
-                    output_format=APP_TRANSFORM_OUTPUT_EXT,
-                    type=job.context.transform.transform_type,
+            # 1. Guard: Skip transformation if no files were extracted
+            extract_payload = job.manifest.extract
+            if not extract_payload or extract_payload.file_count == 0:
+                LOG.info(
+                    "No data extracted in previous step. Skipping transformation.",
+                    step=self.name,
                 )
-                # 1. Initialize the LazyFrame (Logical Plan)
-                # Decision: Use the 'active' symlink path.
-                # Polars scans the metadata of all part_*.parquet files instantly.
-                extract_path = (job.folder / "extract" / "part_*.parquet").resolve()
-                lf = handler.to_df(extract_path)
 
-                # 2. Apply Business Logic (Transformers)
-                # These add to the 'Plan' but do not execute yet.
-                # Decision: Use the factory to apply bitmasking and custom logic.
-                transformer = TransformFactory.get_transformer(
-                    job.context.transform.transform_type,
-                    dataset_id=job.context.dataset_id,
-                    job_id=job.id,
+                payload = TransformPayload(
+                    logic_version="1.0.0",
+                    transform_type=job.context.transform.transform_type,
+                    artifact_folder="",
+                    output_row_count=0,
+                    schema_validation_pass=True,
+                    refined_schema={},
+                    start_timestamp_utc=start_ts,
                 )
-                tr_lf = transformer.apply(lf, ctx)
 
-                # 3. Stream to Physical Storage
-                # Decision: Use sink_parquet via our handler's logic.
-                # This triggers the Polars Rust engine to stream chunks.
-                data_store = (
-                    job.exec_ctx.workspace_dir
-                    / "data"
-                    / self.name
-                    / f"{job.id}_{int(datetime.now().astimezone().timestamp())}"
-                )
-                data_store.mkdir(parents=True, exist_ok=True)
+                self.finalize(job, payload_data=msgspec.to_builtins(payload))
+                return str(self._transit(job))
 
-                # 4. Decision: Use a partitioned sink.
-                # This creates part-0.parquet, part-1.parquet, etc., in the data_store folder.
-                # This is much safer for 2GB RAM as it flushes buffers more frequently.
-                handler.from_df(tr_lf, data_store.resolve())
+            # 1. Setup Context and Data Store
+            extract_path = (job.folder / "extract").resolve()
+            data_store = (
+                job.exec_ctx.workspace_dir
+                / "data"
+                / self.name
+                / f"{job.job_id}_{int(datetime.now().astimezone().timestamp())}"
+            )
+            data_store.mkdir(parents=True, exist_ok=True)
 
-            # 5. DECISION: Get accurate stats after the stream is closed
-            # scan_parquet + select(len) on the OUTPUT directory reads only the
-            # file footers. This is near-instant even for 50M rows.
-            stats = (
-                pl.scan_parquet(str(data_store / "*.parquet"))
-                .select(
-                    count=pl.len(),
-                    schema=pl.lit(str(tr_lf.schema)),
-                )
-                .collect()  # This is safe because it's only 1 row of metadata
+            ctx = TransformContext(
+                options=job.context.transform.transform_params,
+                source_dir=(job.folder / "extract" / "part_*.parquet").resolve(),
+                destination_dir=job.folder / "transform",
+                output_format=APP_TRANSFORM_OUTPUT_EXT,
+                type=job.context.transform.transform_type,
             )
 
-            # Polars' InProcessQuery object support
-            if hasattr(stats, "fetch_blocking"):
-                stats = cast("Any", stats).fetch_blocking()
+            # 2. Parallel Transformation via Ray Data
+            # This reads all part_*.parquet files from the extract step into a distributed dataset
+            ds = ray.data.read_parquet(str(extract_path))
+
+            # 3. Define the Distributed Task
+            # We capture the transformer type and params to recreate it on the workers
+            transform_type = job.context.transform.transform_type
+            dataset_id = job.context.dataset_id
+            job_id = job.job_id
+
+            def transform_batch(batch: Any) -> Any:
+                # Re-initialize the transformer on the worker node
+                # Ray provides pyarrow.Table when batch_format is "pyarrow"
+                df = pl.from_arrow(batch)
+                worker_transformer = TransformFactory.get_transformer(
+                    transform_type,
+                    dataset_id=dataset_id,
+                    job_id=job_id,
+                )
+                # Apply transformation logic to this specific chunk
+                # Ray 2.5+ requires a supported batch format (PyArrow, Pandas, etc.)
+                # Converting to Arrow is zero-copy and satisfies the requirement.
+                processed_df = worker_transformer.apply(df.lazy(), ctx).collect()
+                return processed_df.to_arrow()
+
+            # 4. Execute the Map and Write
+            # map_batches handles the parallelism; write_parquet produces multiple files automatically
+            transformed_ds = ds.map_batches(transform_batch, batch_format="pyarrow")
+
+            # Ray will write one file per task/partition (e.g., part_000.parquet, part_001.parquet)
+            transformed_ds.write_parquet(str(data_store))
+
+            # Re-initialize a local transformer just for metadata/versioning info
+            transformer = TransformFactory.get_transformer(
+                transform_type, dataset_id=dataset_id, job_id=job_id
+            )
+
+            # 5. DECISION: Get accurate stats after the stream is closed
+            # We scan the generated output to get the final row count and schema
+            output_glob = str(data_store / "*.parquet")
+            stats = pl.scan_parquet(output_glob).select(count=pl.len()).collect()
 
             output_rows = int(stats["count"][0])
+
+            # 6. Extract final schema info from the generated artifacts
+            sample_file = next(data_store.glob("*.parquet"))
+            final_schema_dict = pl.read_parquet_schema(sample_file)
+
             payload = TransformPayload(
                 logic_version=getattr(transformer, "version", "1.0.0"),
                 transform_type=job.context.transform.transform_type,
                 artifact_folder=str(data_store),
                 output_row_count=output_rows,
                 schema_validation_pass=True,
-                refined_schema={k: str(v) for k, v in tr_lf.schema.items()},
+                refined_schema={k: str(v) for k, v in final_schema_dict.items()},
                 start_timestamp_utc=start_ts,
             )
 
             LOG.info(
                 "Transformation complete",
+                step=self.name,
                 output_rows=output_rows,
                 output_folder=str(data_store.name),
             )
@@ -112,7 +148,9 @@ class TransformStep(JobStep):
             # 4. Finalize & Flip the Link
             # Decision: Create active/{job_id}/transform -> ../../data/transform/{dir}
             # This makes the transformed data available for the WriteStep.
-            self.finalize(job, results=msgspec.to_builtins(payload))
+            self.finalize(
+                job, data_folder=data_store, results=msgspec.to_builtins(payload)
+            )
             return str(self._transit(job))
 
         except Exception as e:

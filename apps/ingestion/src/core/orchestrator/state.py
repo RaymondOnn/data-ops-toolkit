@@ -7,7 +7,6 @@ from typing import Any
 import msgspec
 import polars as pl
 import structlog
-
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
 from apps.ingestion.src.core.contexts.job import JobContext
 from apps.ingestion.src.core.models.job import JobManifest, JobStatus
@@ -23,7 +22,8 @@ CURRENT_EXECUTION_TBL = "CURRENT_EXECUTION"
 class StateStore:
     def __init__(self, db_service: DatabaseSink, exec_ctx: ExecutionContext) -> None:
         self.db: DatabaseSink = db_service
-        self.workspace_dir = Path(exec_ctx.workspace_dir) / "state"
+        self.exec_ctx = exec_ctx
+        self.workspace_dir = self.exec_ctx.state_path
         self.stage_dir = self.workspace_dir / "stage"
         self.archive_dir = self.workspace_dir / "archive"
         # Attribute to store the queried records (The Hot Cache)
@@ -62,7 +62,9 @@ class StateStore:
         """
         try:
             raw_records = self.db.fetch(sql)
-            self._active_records = {r["RUN_ID"]: r for r in raw_records}
+            for r in raw_records:
+                identifier = f"{r['JOB_ID']}:{r['DATASET_ID']}:{r['RUN_DATE']}"
+                self._active_records[identifier] = r
         except Exception as e:
             LOG.error("Failed to refresh active records", error=str(e))
             # Fallback to empty dict to avoid NoneType errors in Orchestrator loop
@@ -70,6 +72,22 @@ class StateStore:
 
         return self._active_records
 
+    def create_record(self, job_id: str, dataset_id: str, run_date: str):
+        from apps.ingestion.src.utils.common import find_path
+
+        # Use existing find_path utility to locate the directory anywhere in the workspace
+        identifier = f"{job_id}:{dataset_id}:{run_date}"
+        active_path = find_path(self.exec_ctx.workspace_dir, identifier)
+
+        if active_path and active_path.exists():
+            # Minimal record to satisfy the sync requirements
+            self.active_records[identifier] = {
+                "JOB_ID": job_id,
+                "DATASET_ID": dataset_id,
+                "RUN_DATE": run_date,
+            }
+
+    # TODO:
     def update_status(self, job_id: str, status: str) -> None:
         """
         Updates the status of a job in the database.
@@ -79,6 +97,7 @@ class StateStore:
         # or execute a direct DB update here.
         # For now, we log it to ensure observability of the intent.
 
+    # TODO:
     def update_run(self, run_id: str, updates: dict[str, Any]) -> None:
         """
         Updates a specific run's metadata.
@@ -86,6 +105,7 @@ class StateStore:
         LOG.info("Updating run state", run_id=run_id, updates=updates)
         # This serves as a hook for the LifecycleManager to flag expired runs.
 
+    # TODO:
     def skip_misfired_run(self, job_id: str) -> None:
         LOG.warning("Skipping misfired run", job_id=job_id)
         # Update DB next_run_time logic would go here
@@ -205,8 +225,8 @@ class StateStore:
         Low latency, disk-persistent.
         """
         metadata = metadata or {}
-        run_id = manifest.run_id if manifest else "UNKNOWN"
-        record = self.active_records.get(run_id, {})
+        identifier = f"{manifest.job_id}:{manifest.dataset_id}:{context.run_date}"
+        record = self.active_records.get(identifier, {})
 
         # Align keys with your execution_log.sql columns
         incoming_update = {
@@ -243,7 +263,7 @@ class StateStore:
         event = dict(ChainMap(incoming_update, record))
 
         # 3. Update the Hot Cache so the next call sees the combined state
-        self._active_records[run_id] = event
+        self._active_records[identifier] = event
 
         line = msgspec.json.encode(event) + b"\n"
         with self.stream_path.open("ab") as f:

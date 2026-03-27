@@ -10,6 +10,11 @@ class ExecutionMode(StrEnum):
     TEST = "test"
 
 
+class RayMode(StrEnum):
+    LOCAL = "local"
+    CLUSTER = "cluster"
+
+
 class ExecutionContext(msgspec.Struct):
     """
     Holds global application settings that are resolved at runtime.
@@ -18,6 +23,7 @@ class ExecutionContext(msgspec.Struct):
 
     workspace_dir: Path
     execution_mode: ExecutionMode = ExecutionMode.NORMAL
+    ray_mode: RayMode = RayMode.CLUSTER
 
     @property
     def active_path(self) -> Path:
@@ -26,6 +32,10 @@ class ExecutionContext(msgspec.Struct):
     @property
     def signal_path(self) -> Path:
         return self.workspace_dir / "signals"
+
+    @property
+    def state_path(self) -> Path:
+        return self.workspace_dir / "state"
 
     @property
     def data_path(self) -> Path:
@@ -38,6 +48,10 @@ class ExecutionContext(msgspec.Struct):
     @property
     def failed_path(self) -> Path:
         return self.workspace_dir / "FAILED"
+
+    @property
+    def lock_file(self) -> Path:
+        return self.workspace_dir / "orchestrator.lock"
 
     def is_debug(self) -> bool:
         return self.execution_mode == ExecutionMode.DEBUG

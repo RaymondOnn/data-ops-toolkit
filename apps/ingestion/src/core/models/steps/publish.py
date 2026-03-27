@@ -53,6 +53,7 @@ class PublishStep(JobStep):
 
             LOG.info(
                 "Promoting to production",
+                step=self.name,
                 target=job_ctx.load.sink_identifier,
                 staging=write_meta.staging_artifact,
             )
@@ -78,7 +79,9 @@ class PublishStep(JobStep):
             )
 
             self.finalize(job, results=msgspec.to_builtins(payload))
-            LOG.info("Publish complete", table=job_ctx.load.sink_identifier)
+            LOG.info(
+                "Publish complete", step=self.name, table=job_ctx.load.sink_identifier
+            )
             return str(self._transit(job))
 
         except Exception as e:

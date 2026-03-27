@@ -31,7 +31,7 @@ class ServiceRegistry:
                 cache_path,
                 timeout=10,
                 sqlite_journal_mode="wal",  # Pass directly
-                sqlite_synchronous=1        # Pass directly
+                sqlite_synchronous=1,  # Pass directly
             )
 
     @classmethod

@@ -29,6 +29,12 @@ class WriteStep(JobStep):
             # 1. Resolve logical input (The partitioned parquet files)
             source_dir = (job.folder / "transform").resolve()
 
+            # Verify source_dir actually contains files before proceeding
+            if not any(source_dir.glob("*.parquet")):
+                raise FileNotFoundError(
+                    f"No parquet files found in transformed data directory: {source_dir}"
+                )
+
             # 1. Get the Service (Securely initialized on Ray worker via ServiceFactory)
             service = ServiceFactory.get_sink(
                 job_ctx.load.sink_type, **job_ctx.load.sink_config
@@ -36,6 +42,7 @@ class WriteStep(JobStep):
 
             LOG.info(
                 "Starting load",
+                step=self.name,
                 sink_type=job_ctx.load.sink_type,
                 target=job_ctx.load.sink_identifier,
             )
@@ -48,6 +55,8 @@ class WriteStep(JobStep):
                 service=service,
                 source_dir=source_dir,
                 target_table=job_ctx.load.sink_identifier,
+                partition_col=job_ctx.load.partition_col,
+                partition_val=job_ctx.load.partition_value,
             )
 
             # 3. Finalize Manifest
@@ -64,6 +73,7 @@ class WriteStep(JobStep):
             self.finalize(job, results=msgspec.to_builtins(payload))
             LOG.info(
                 "Load complete",
+                step=self.name,
                 rows=int(rows_loaded),
                 staging_artifact=staging_artifact,
             )

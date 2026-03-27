@@ -1,4 +1,5 @@
 import io
+import logging
 from pathlib import Path
 from typing import IO, Any, cast
 
@@ -6,22 +7,61 @@ import polars as pl
 
 from libs.file.formats.base import FormatHandler
 
+LOG = logging.getLogger(__name__)
+
 
 class ParquetHandler(FormatHandler):
-    def read_mem(self, input_file: Path | str, **kwargs: Any) -> io.BytesIO:
-        """Parquet is binary; read directly into buffer."""
-        with self.fs.open(input_file, "rb") as f:
-            data = f.read()
-            if isinstance(data, str):
-                data = data.encode(kwargs.get("encoding", "utf-8"))
-            return io.BytesIO(data)
+    def discover(self, input_path: Path | str) -> list[str]:
+        """Expands a path into a list of Parquet files."""
+        path_str = str(input_path)
 
-    def to_df(self, input_file: Path | str, **kwargs: Any) -> pl.LazyFrame:
+        # If the path already contains a wildcard, expand it directly
+        if "*" in path_str:
+            return [
+                str(self.fs.unstrip_protocol(p))
+                for p in self.fs.glob(path_str)
+                if self.fs.isfile(p)
+            ]
+
+        if self.fs.isfile(path_str):
+            return [path_str]
+
+        pattern = f"{path_str.rstrip('/')}/**/*.parquet"
+        return [
+            str(self.fs.unstrip_protocol(p))
+            for p in self.fs.glob(pattern)
+            if self.fs.isfile(p)
+        ]
+
+    def read_file(self, input_path: Path | str, **kwargs: Any) -> io.BytesIO:
+        """Parquet is binary; read directly into buffer."""
+        paths = self.discover(input_path)
+        if not paths:
+            LOG.warning(f"No files discovered for path: {input_path}")
+            return io.BytesIO(b"")
+
+        combined = b""
+        for p in paths:
+            with self.fs.open(p, "rb") as f:
+                data = f.read()
+                if isinstance(data, str):
+                    data = data.encode(kwargs.get("encoding", "utf-8"))
+                combined += data
+        return io.BytesIO(combined)
+
+    def to_df(self, input_path: Path | str, **kwargs: Any) -> pl.LazyFrame:
         """
         Decision: Always use scan_parquet for 50M row performance.
         Returns a LazyFrame to allow for predicate pushdown and streaming.
         """
-        return pl.scan_parquet(input_file, storage_options=self.opts)
+        paths = self.discover(input_path)
+        if not paths:
+            LOG.warning(f"No files discovered for path: {input_path}")
+            return pl.LazyFrame()
+
+        LOG.debug(f"ParquetHandler scanning paths. Found {len(paths)} files.")
+        # Polars scan_parquet handles list of paths natively and efficiently
+        return pl.scan_parquet(paths, storage_options=self.opts)
 
     def from_df(self, df: pl.LazyFrame | pl.DataFrame, output_file: Path | str) -> None:
         """

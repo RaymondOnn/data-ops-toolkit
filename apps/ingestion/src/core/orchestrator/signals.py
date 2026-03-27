@@ -1,15 +1,15 @@
 from collections.abc import Callable
-from pathlib import Path
 
 import structlog
-
 from apps.ingestion.src.core.contexts import ExecutionContext
 from apps.ingestion.src.core.orchestrator.engine import IngestionEngine
 from apps.ingestion.src.core.orchestrator.state import StateStore
+from apps.ingestion.src.utils.common import find_path
 
 LOG = structlog.getLogger(__name__)
 
 
+# TODO: Stray signals
 class SignalProcessor:
     def __init__(
         self,
@@ -26,7 +26,7 @@ class SignalProcessor:
         """Registers a method to be called when a .cmd file appears."""
         self._command_registry[cmd_name] = callback
 
-    def _process_worker_signals(self) -> None:
+    def _process_worker_signals(self, run_ids: set[str] ) -> None:
         """
         Scans the flat signals directory for any {run_id}.signal files.
 
@@ -46,35 +46,54 @@ class SignalProcessor:
         # This glob automatically ignores files starting with "."
         for pattern, is_deep_sync in signals.items():
             for signal in signal_dir.glob(pattern):
-                run_id = None
+                identifier = None
                 try:
                     # 1. Parse metadata from filename
                     # Example: 20240101-abc.transform.3.sync
-                    run_id = signal.stem.split(".")[0]
-                    record = self.state_store.active_records.get(run_id)
+                    full_identifier = signal.stem.split(".")[0]
+                    job_id, dataset_id, run_date, run_id_from_file = full_identifier.split(":")
+                    
+                    # If we are filtering (Dumb Mode), skip signals not belonging to our triggered run(s)
+                    if run_ids and run_id_from_file not in run_ids:
+                        continue
+                    
+                    identifier = f"{job_id}:{dataset_id}:{run_date}"
+                    record = self.state_store.active_records.get(identifier)
 
                     # If not in cache, leave it for the next iteration.
                     # This handles the gap between worker start and DB flush.
                     if not record:
-                        LOG.debug("Signal for unknown run_id, deferring", run_id=run_id)
+                        LOG.info(
+                            "Creating job record",
+                            job_id=job_id,
+                            dataset_id=dataset_id,
+                            run_date=run_date,
+                        )
+
+                        self.state_store.create_record(
+                            job_id=job_id,
+                            dataset_id=dataset_id,
+                            run_date=run_date,
+                        )
+
+                    # 2. Resolve the path dynamically
+                    # The folder might have been moved to FAILED/ or HOLD/ by the worker
+                    # just before/after dropping the signal.
+                    # We search the whole workspace.
+                    job_dir = find_path(self.exec_ctx.workspace_dir, run_id_from_file)
+
+                    if not job_dir or not job_dir.exists():
+                        LOG.warning(
+                            "Signal received but job directory not found", run_id=run_id_from_file
+                        )
                         continue
 
-                    # Resolve the path using our new utility
-                    job_dir = (
-                        self.exec_ctx.workspace_dir
-                        / "active"
-                        / f"{record['JOB_ID']}:{record['DATASET_ID']}_{record['RUN_DATE']}"
-                        / record["RUN_ID"]
-                    )
-
                     # 3. Sync manifest -> DB
-                    self.state_store.sync_from_folder(
-                        Path(job_dir), deep_sync=is_deep_sync
-                    )
+                    self.state_store.sync_from_folder(job_dir, deep_sync=is_deep_sync)
 
                     # 4. Remove the signal
                     signal.unlink(missing_ok=True)
-                    LOG.debug("Signal processed", run_id=run_id)
+                    LOG.debug("Signal processed", path=signal.name)
 
                 except (OSError, ValueError) as e:
                     LOG.error(

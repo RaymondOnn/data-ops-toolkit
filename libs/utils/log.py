@@ -11,7 +11,10 @@ if TYPE_CHECKING:
 
 
 def setup_logging(
-    log_dir: Path, is_prod: bool = False, filename: str = "platform.jsonl"
+    log_dir: Path,
+    is_prod: bool = False,
+    is_debug: bool = False,
+    filename: str = "platform.jsonl",
 ):
     # Ensure the log directory exists before initializing handlers
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -26,7 +29,7 @@ def setup_logging(
 
     # 2. The Console Handler
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(logging.DEBUG if is_debug else logging.INFO)
 
     # 3. Define the Shared Processors
     # These run for BOTH the console and the file
@@ -76,3 +79,6 @@ def setup_logging(
 
     root.handlers = [file_handler, console_handler]
     root.setLevel(logging.DEBUG)
+
+    # 5. Suppress noisy third-party libraries
+    logging.getLogger("filelock").setLevel(logging.WARNING)

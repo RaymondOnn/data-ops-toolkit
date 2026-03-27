@@ -18,7 +18,7 @@ LOG = structlog.get_logger(__name__)
 class ClickHouseService(DatabaseSource, DatabaseSink):
     def _init_client(self, **config: Any) -> ClickhouseClient:
         print(config)
-        
+
         secret: Secret = config["password"]
         return ClickhouseClient(
             host=config.get("host", "localhost"),

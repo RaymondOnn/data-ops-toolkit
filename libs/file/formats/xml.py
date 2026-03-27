@@ -1,4 +1,5 @@
 import io
+import logging
 import re
 from pathlib import Path
 from typing import IO, Any, cast
@@ -8,22 +9,77 @@ import xmltodict
 
 from libs.file.formats.base import FormatHandler
 
+LOG = logging.getLogger(__name__)
+
 
 class XMLHandler(FormatHandler):
-    def read_mem(self, input_file: Path | str, **kwargs: Any) -> io.BytesIO:
-        """Removes illegal ASCII control characters."""
+    def discover(self, input_path: Path | str) -> list[str]:
+        """Expands a path into a list of XML files."""
+        path_str = str(input_path)
+
+        # If the path already contains a wildcard, expand it directly
+        if "*" in path_str:
+            return [
+                str(self.fs.unstrip_protocol(p))
+                for p in self.fs.glob(path_str)
+                if self.fs.isfile(p)
+            ]
+
+        if self.fs.isfile(path_str):
+            return [path_str]
+
+        pattern = f"{path_str.rstrip('/')}/**/*.xml"
+        return [
+            str(self.fs.unstrip_protocol(p))
+            for p in self.fs.glob(pattern)
+            if self.fs.isfile(p)
+        ]
+
+    def _sanitize(self, path: str, **kwargs: Any):
         encoding = kwargs.get("encoding", "utf-8")
-        with self.fs.open(input_file, "rb") as f:
+        with self.fs.open(path, "rb") as f:
             raw = f.read().decode(encoding, errors="ignore")
             # Regex Repair: Strip chars 0-31 except \t, \n, \r
             clean = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", raw)
-            return io.BytesIO(clean.encode("utf-8"))
+            if len(clean) != len(raw):
+                LOG.info(
+                    f"Sanitized XML string: {path!s}",
+                )
+            return clean.encode("utf-8")
 
-    def to_df(self, input_file: Path | str, **kwargs: Any) -> pl.LazyFrame:
-        buffer = self.read_mem(input_file, **kwargs)
-        # XML to Polars bridge
-        data = xmltodict.parse(buffer.read())
-        return pl.DataFrame(data).lazy()
+    def read_file(self, input_path: Path | str, **kwargs: Any) -> io.BytesIO:
+        """Removes illegal ASCII control characters."""
+        paths = self.discover(input_path)
+        if not paths:
+            LOG.warning(f"No files discovered for path: {input_path}")
+            return io.BytesIO(b"")
+
+        combined = b""
+        for p in paths:
+            combined += self._sanitize(p, **kwargs)
+        return io.BytesIO(combined)
+
+    def to_df(self, input_path: Path | str, **kwargs: Any) -> pl.LazyFrame:
+        """Reads XML files into a unified LazyFrame."""
+        paths = self.discover(input_path)
+        if not paths:
+            LOG.warning(f"No files discovered for path: {input_path}")
+            return pl.LazyFrame()
+
+        lfs = []
+        for p in paths:
+            LOG.debug(f"Reading XML file: {p!s}")
+            try:
+                buffer = self.read_file(p, **kwargs)
+                # XML to Polars bridge
+                data = xmltodict.parse(buffer.read())
+                # Note: This creates an in-memory DataFrame per file
+                lfs.append(pl.DataFrame(data).lazy())
+            except Exception as e:
+                LOG.error(f"Failed to parse XML: {e}", extra={"path": str(p)})
+                raise
+
+        return pl.concat(lfs) if lfs else pl.LazyFrame()
 
     def from_df(self, df: pl.LazyFrame | pl.DataFrame, output_file: Path | str) -> None:
         raise NotImplementedError("Streaming XML write is not supported by Polars.")

@@ -9,6 +9,7 @@ from .enums import JobSteps
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.job import Job
 
+
 class AuditStep(JobStep):
     name = JobSteps.AUDIT.label
     manifest: AuditPayload
@@ -36,7 +37,7 @@ class AuditStep(JobStep):
             # cmd = [
             #     "validation-app",
             #     "--source", write_meta.staging_artifact,
-            #     "--job-id", job.id,
+            #     "--job-id", job.job_id,
             #     "--run-id", job.run_id
             # ]
 
@@ -65,7 +66,7 @@ class AuditStep(JobStep):
             # If validation fails, we stop the pipeline here!
             if not payload.validation_passed:
                 raise ValueError(
-                    f"Audit failed for Job {job.id}. See manifest for details."
+                    f"Audit failed for Job {job.job_id}. See manifest for details."
                 )
 
             return self._transit(job)

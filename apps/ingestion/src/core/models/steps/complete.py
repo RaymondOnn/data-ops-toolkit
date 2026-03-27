@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 
 import msgspec
 import structlog
+
 from apps.ingestion.src.core.models.job import Job
 from apps.ingestion.src.core.models.job.manifest import CompletePayload
 from apps.ingestion.src.services.base import ArchiveMixin
@@ -74,7 +75,11 @@ class CompleteStep(JobStep):
 
             # 4. Final Finalize (Post-Purge)
             # We don't use a symlink here; we just record SUCCESS in the DB/State Store
-            LOG.info("Job lifecycle complete. Workspace purged.", job_id=job.id)
+            LOG.info(
+                "Job lifecycle complete. Workspace purged.",
+                step=self.name,
+                job_id=job.job_id,
+            )
 
             # This marks the final state of the manifest
             return "FINISH"
@@ -88,7 +93,7 @@ class CompleteStep(JobStep):
         Decision: Move files to the Archive location defined in the Context.
         Standardizing on: archive/{job_id}/{run_id}/{step}/
         """
-        archive_root = f"{job.context.archive.base_path}/{job.id}/{job.run_id}"
+        archive_root = f"{job.context.archive.base_path}/{job.job_id}/{job.run_id}"
 
         # We loop through the steps we want to keep
         for step in ["extract", "transform"]:

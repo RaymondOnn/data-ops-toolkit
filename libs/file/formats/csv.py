@@ -1,49 +1,94 @@
 import io
+import logging
 from pathlib import Path
 from typing import IO, Any, BinaryIO, cast
 
 import polars as pl
 
-from libs.file.base import FileSystemClient
-
 from .base import FormatHandler
+
+LOG = logging.getLogger(__name__)
 
 
 class CSVHandler(FormatHandler):
-    def discover(self, client: FileSystemClient, target: str):
-        # The handler knows it only wants .csv or .txt
-        return client.walk_paths(target, pattern="*.[ct][sx][vt]") 
-    
-    def read_mem(self, input_file: Path | str, **kwargs: Any) -> io.BytesIO:
+    def discover(self, input_path: Path | str) -> list[str]:
+        """Expands a path into a list of CSV/Text files."""
+        path_str = str(input_path)
+
+        # If the path already contains a wildcard, expand it directly
+        if "*" in path_str:
+            return [
+                str(self.fs.unstrip_protocol(p))
+                for p in self.fs.glob(path_str)
+                if self.fs.isfile(p)
+            ]
+
+        if self.fs.isfile(path_str):
+            return [path_str]
+
+        # Matches .csv, .txt, .tsv
+        pattern = f"{path_str.rstrip('/')}/**/*.[ct][sx][vt]"
+        return [
+            str(self.fs.unstrip_protocol(p))
+            for p in self.fs.glob(pattern)
+            if self.fs.isfile(p)
+        ]
+
+    def read_file(self, input_path: Path | str, **kwargs: Any) -> io.BytesIO:
         """Strips BOM and handles encoding-safe reading."""
         encoding = kwargs.get("encoding", "utf-8")
-        with cast("BinaryIO", self.fs.open(input_file, "rb")) as f:
-            raw_data = f.read()
+        paths = self.discover(input_path)
+        if not paths:
+            LOG.warning(f"No files discovered for path: {input_path}")
+            return io.BytesIO(b"")
 
-            # Strip BOM if it exists
-            if raw_data.startswith(b"\xef\xbb\xbf"):
-                raw_data = raw_data[3:]
+        combined = b""
+        for p in paths:
+            with cast("BinaryIO", self.fs.open(p, "rb")) as f:
+                raw_data = f.read()
 
-            # If encoding isn't UTF-8, we normalize it here to avoid
-            # Polars' 'Invalid UTF-8' errors during read_csv
-            if encoding.lower() != "utf-8":
-                content = raw_data.decode(encoding, errors="ignore").encode("utf-8")
-                return io.BytesIO(content)
+                # Strip BOM if it exists
+                if raw_data.startswith(b"\xef\xbb\xbf"):
+                    LOG.info(
+                        "Self-healing: Stripping BOM from CSV", extra={"path": str(p)}
+                    )
+                    raw_data = raw_data[3:]
 
-            return io.BytesIO(raw_data)
+                # Normalize encoding to UTF-8 per file
+                if encoding.lower() != "utf-8":
+                    raw_data = raw_data.decode(encoding, errors="ignore").encode(
+                        "utf-8"
+                    )
+                combined += raw_data
+        return io.BytesIO(combined)
 
-    def to_df(self, input_file: Path | str, **kwargs: Any) -> pl.LazyFrame:
-        size = self.fs.size(input_file)
-        # Performance: Use scan_csv for files > 2GB to avoid OOM
-        if size and size > (2 * 1024**3) and not kwargs.get("force_repair"):
-            return pl.scan_csv(
-                input_file,
-                storage_options=self.opts,
-                encoding=kwargs.get("encoding", "utf-8"),
+    def to_df(self, input_path: Path | str, **kwargs: Any) -> pl.LazyFrame:
+        """Reads one or more CSV files into a unified LazyFrame."""
+        paths = self.discover(input_path)
+        if not paths:
+            LOG.warning(f"No files discovered for path: {input_path}")
+            return pl.LazyFrame()
+
+        lfs = []
+        for p in paths:
+            size = self.fs.size(p)
+            # Performance: Use scan_csv for files > 2GB to avoid OOM
+            if size and size > (2 * 1024**3) and not kwargs.get("force_repair"):
+                lfs.append(
+                    pl.scan_csv(
+                        p,
+                        storage_options=self.opts,
+                        encoding=kwargs.get("encoding", "utf-8"),
+                    )
+                )
+                continue
+
+            buffer = self.read_file(p, **kwargs)
+            lfs.append(
+                pl.read_csv(buffer, encoding=kwargs.get("encoding", "utf-8")).lazy()
             )
 
-        buffer = self.read_mem(input_file, **kwargs)
-        return pl.read_csv(buffer, encoding=kwargs.get("encoding", "utf-8")).lazy()
+        return pl.concat(lfs) if lfs else pl.LazyFrame()
 
     def from_df(self, df: pl.LazyFrame | pl.DataFrame, output_file: Path | str) -> None:
         """Streaming write for 50M rows."""

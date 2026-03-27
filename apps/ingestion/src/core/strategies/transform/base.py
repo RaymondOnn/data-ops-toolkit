@@ -19,6 +19,12 @@ class Transformer(ABC):
     The 'Contract' for all transformation logic.
     """
 
+    def __init__(self, **kwargs: Any):
+        # Store metadata for use in logging or logic
+        self.job_id = kwargs.get("job_id")
+        self.dataset_id = kwargs.get("dataset_id")
+        self.kwargs = kwargs
+
     @abstractmethod
     def apply(self, lf: pl.LazyFrame, ctx: TransformContext) -> pl.LazyFrame:
         """

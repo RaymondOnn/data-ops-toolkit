@@ -36,6 +36,12 @@ class DataReader(Reader):
         # 1. Slice the work into parts (e.g., ORA_HASH queries)
         work_units = self.get_work_units(service, context)
 
+        LOG.info(
+            "Slicing extraction into work units",
+            count=len(work_units),
+            source=context.source_identifier,
+        )
+
         import msgspec
 
         # 2. Package the metadata for the workers.
@@ -43,8 +49,8 @@ class DataReader(Reader):
         task_payloads = [
             {
                 "unit": unit,
-                "context": msgspec.to_builtins(context),
-                "config": msgspec.to_builtins(service.config),  # Connection params
+                "context": msgspec.json.encode(context),
+                "config": msgspec.json.encode(service.config),  # Connection params
             }
             for unit in work_units
         ]
@@ -53,22 +59,23 @@ class DataReader(Reader):
         ds = ray.data.from_items(task_payloads)
 
         # 3. Define the extraction task (Runs in parallel on Ray Workers)
-        def fetch_task(batch: dict[str, list[Any]]) -> pl.DataFrame:
+        def fetch_task(batch: dict[str, list[Any]]) -> Any:
             """This function runs on the Ray Worker (K8S Pod)."""
             from pathlib import Path
 
             import msgspec
+
             from apps.ingestion.src.core.schema import apply_schema_contract
             from apps.ingestion.src.core.strategies.extract.base import ReaderContext
             from apps.ingestion.src.services.factory import ServiceFactory
             from apps.ingestion.src.services.registry import ServiceRegistry
 
+            log = structlog.get_logger()
+
             # map_batches receives a batch (dict of lists). With batch_size=1,
             # we extract our single task payload from the first index.
-            ctx_dict = batch["context"][0]
-            context = msgspec.convert(ctx_dict, type=ReaderContext)
-
-            config = batch["config"][0]
+            context = msgspec.json.decode(batch["context"][0], type=ReaderContext)
+            config = msgspec.json.decode(batch["config"][0], type=dict)
             unit = batch["unit"][0]
 
             # Initialize the ServiceRegistry for this Ray worker process
@@ -76,6 +83,8 @@ class DataReader(Reader):
                 ServiceRegistry.configure(Path(context.workspace_dir))
 
             service = ServiceFactory.get_source(context.source_type, **config)
+
+            log.info("Ray worker starting extraction task", unit=unit)
 
             # 1. Extraction
             # Support both DB query string and File list dict
@@ -87,8 +96,16 @@ class DataReader(Reader):
             # Convert LazyFrame to DataFrame for Ray compatibility
             df = result.collect() if isinstance(result, pl.LazyFrame) else result
 
+            log.info(
+                "Ray worker completed extraction task",
+                rows=len(df),
+            )
+
             # 2. Guarding (Function Call)
-            return apply_schema_contract(df, context)
+            # Ray 2.5+ requires a supported batch format (PyArrow, Pandas, etc.)
+            # Converting to Arrow is zero-copy and satisfies the requirement.
+            processed_df = apply_schema_contract(df, context)
+            return processed_df.to_arrow()
 
         # 4. Map the task across the cluster
         # Use map_batches instead of map because fetch_task returns a Polars
@@ -114,12 +131,14 @@ class DataReader(Reader):
 
         for i, df in enumerate(generator):
             if df.is_empty():
+                LOG.debug("Skipping empty DataFrame chunk", chunk_index=i)
                 continue
 
             file_path = destination / f"part_{i:04d}.parquet"
 
             # Write with snappy compression for a good balance of speed/size
             df.write_parquet(file_path, compression="snappy")
+            LOG.info("Exported parquet chunk", path=str(file_path), rows=len(df))
 
             # Capture metadata for the ExtractStep to process
             metadata_list.append(

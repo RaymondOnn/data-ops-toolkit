@@ -57,7 +57,7 @@ class ExtractStep(JobStep):
                 schema_items=job_ctx.extract.schema_items,
                 run_id=job.run_id,
                 run_date=job_ctx.run_date,
-                job_id=job.id,
+                job_id=job.job_id,
                 workspace_dir=str(job.exec_ctx.workspace_dir),
                 options=options,
             )
@@ -71,6 +71,7 @@ class ExtractStep(JobStep):
             reader: Reader = ReaderFactory.get_reader(ctx.source_type)
             LOG.info(
                 "Executing ingestion strategy",
+                step=self.name,
                 strategy=ctx.source_type,
                 source=ctx.source_identifier,
             )
@@ -80,7 +81,7 @@ class ExtractStep(JobStep):
                 job.exec_ctx.workspace_dir
                 / "data"
                 / self.name
-                / f"{job.id}_{int(time.time())}"
+                / f"{job.job_id}_{int(time.time())}"
             )
             data_store.mkdir(parents=True, exist_ok=True)
 
@@ -96,6 +97,15 @@ class ExtractStep(JobStep):
                 target_folder=data_store,
                 context=ctx,
             )
+
+            if not extracted_files:
+                LOG.warning(
+                    "Ingestion returned no data",
+                    step=self.name,
+                    source=ctx.source_identifier,
+                    job_id=job.job_id,
+                    run_id=job.run_id,
+                )
 
             file_infos = []
             total_rows = 0
@@ -140,9 +150,12 @@ class ExtractStep(JobStep):
                 schema_signature={k: str(v) for k, v in final_schema_dict.items()},
             )
 
-            self.finalize(job, results=msgspec.to_builtins(payload))
+            self.finalize(
+                job, data_folder=data_store, results=msgspec.to_builtins(payload)
+            )
             LOG.info(
                 "Reader completed",
+                step=self.name,
                 file_count=len(file_infos),
                 total_rows=total_rows,
             )
@@ -150,13 +163,13 @@ class ExtractStep(JobStep):
             # 4. State Transition
             return str(self._transit(job))
         except ClientCantConnect as ccc:
-            LOG.error("Halt by client connection.", error=str(ccc))
+            LOG.error("Halt by client connection.", step=self.name, error=str(ccc))
             raise JobBlocked(str(ccc)) from ccc
         except CircuitBreakerTripped as cb:
-            LOG.error("Halt by circuit breaker.", error=str(cb))
+            LOG.error("Halt by circuit breaker.", step=self.name, error=str(cb))
             raise
         except Exception as e:
-            LOG.error("Extract Step failed", error=str(e))
+            LOG.error("Extract Step failed", step=self.name, error=str(e))
             self.finalize(job, exception=e)
             raise
 
@@ -165,7 +178,7 @@ class ExtractStep(JobStep):
         Calculate the MD5 checksum of a file.
         Important to ensure data integrity and can be used for deduplication
         """
-        LOG.debug("Calculating checksum", file=str(path))
+        LOG.debug("Calculating checksum", step=self.name, file=str(path))
         hash_md5 = hashlib.md5()
         with path.open("rb") as f:
             for chunk in iter(lambda: f.read(4096), b""):
@@ -177,7 +190,11 @@ class ExtractStep(JobStep):
         Unions all schemas found in the source files to create a
         master schema for the Transform step.
         """
-        LOG.debug("Merging schemas from extracted files", file_count=len(schemas))
+        LOG.debug(
+            "Merging schemas from extracted files",
+            step=self.name,
+            file_count=len(schemas),
+        )
         merged = {}
         for schema in schemas:
             for col, dtype in schema.items():

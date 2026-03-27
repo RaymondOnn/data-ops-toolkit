@@ -1,7 +1,5 @@
-
 import msgspec
 import time
-
 
 
 class JobMetadata(msgspec.Struct):

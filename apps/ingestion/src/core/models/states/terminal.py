@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
+
 from apps.ingestion.src.core.models.job.status import JobStatus
 from apps.ingestion.src.services.registry import ServiceRegistry
 
@@ -45,7 +46,7 @@ class HoldState(LifecycleState):
             }
         )
         # Note: The move_to_folder call happens in the finalize() or manager
-        LOG.warning("Job entered HOLD", job_id=self.job.id, reason=str(data))
+        LOG.warning("Job entered HOLD", job_id=self.job.job_id, reason=str(data))
 
     # TODO: Need to straighten out the logic
     def can_recover(self) -> bool:
@@ -63,7 +64,7 @@ class HoldState(LifecycleState):
             dt_error = dt_error.replace(tzinfo=UTC)
         hold_duration = datetime.now().astimezone() - dt_error
         if hold_duration.total_seconds() > (self.MAX_HOLD_TIME_HOURS * 3600):
-            LOG.error("Job expired in HOLD, moving to FAILED", job_id=self.job.id)
+            LOG.error("Job expired in HOLD, moving to FAILED", job_id=self.job.job_id)
             self.job.update_manifest({"job_status": JobStatus.EXPIRED})
             self.job.move_to_folder("FAILED")  # Self-escalation
             self.job.request_status_sync()
@@ -86,7 +87,7 @@ class FailedState(LifecycleState):
                 "error": data,
             }
         )
-        LOG.error("Job FAILED", job_id=self.job.id)
+        LOG.error("Job FAILED", job_id=self.job.job_id)
 
     def can_recover(self) -> bool:
         """Manual intervention required."""
@@ -103,7 +104,9 @@ class SuccessState(LifecycleState):
         2. Deletes the physical data files (50M rows).
         3. Cleans up the metadata folder.
         """
-        LOG.info("Starting final cleanup", job_id=self.job.id, run_id=self.job.run_id)
+        LOG.info(
+            "Starting final cleanup", job_id=self.job.job_id, run_id=self.job.run_id
+        )
 
         try:
             # 1. Iterate through files in the job folder to find symlinks
@@ -135,7 +138,7 @@ class SuccessState(LifecycleState):
 
             LOG.info(
                 "Job lifecycle complete. Resources released.",
-                job_id=self.job.id,
+                job_id=self.job.job_id,
                 run_id=self.job.run_id,
             )
 

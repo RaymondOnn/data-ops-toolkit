@@ -5,10 +5,11 @@ from typing import Any
 
 import msgspec
 import structlog
+from dynaconf import Dynaconf
+
 from apps.ingestion.src.core.contexts.execution import ExecutionContext, ExecutionMode
 from apps.ingestion.src.core.contexts.job import JobContext
 from apps.ingestion.src.utils.constants import APP_CONFIG_ROOT, APP_CURRENT_ENV
-from dynaconf import Dynaconf
 
 LOG = structlog.get_logger()
 APP_DEFAULT_CONFIG = APP_CONFIG_ROOT / "app.yaml"
@@ -88,7 +89,9 @@ class JobContextBuilder:
         # --- DEBUG INSTRUMENTATION ---
         LOG.debug(f"DEBUG: Config Path Absolute: {Path(self.app_cfg_path).resolve()}")
         LOG.debug(f"DEBUG: File Exists: {Path(self.app_cfg_path).exists()}")
-        LOG.debug(f"DEBUG: Loaded Keys: {list(self.app_settings.keys())}")
+        LOG.debug(
+            f"DEBUG: Loaded Keys: {', '.join(filter(lambda x: 'DYNACONF' not in x, list(self.app_settings.keys())))}"
+        )
 
         try:
             LOG.info("Resolved App Config", config=self.app_settings.to_dict())
@@ -114,9 +117,7 @@ class JobContextBuilder:
         self, mode: ExecutionMode = ExecutionMode.NORMAL
     ) -> ExecutionContext:
         """Resolves the global app settings into a typed context."""
-        workspace = Path(
-            self.app_settings.get("workspace_dir", "~/.ingestion/data/")
-        ).expanduser()
+        workspace = Path(self.app_settings.get("workspace_dir")).expanduser()
 
         # Ensure the base workspace directory exists so lock files
         # and subdirectories can be created safely.
@@ -124,6 +125,7 @@ class JobContextBuilder:
 
         return ExecutionContext(workspace_dir=workspace, execution_mode=mode)
 
+    # TODO: Skip archive if enable_archival = False
     def _resolve_service(
         self, settings: Dynaconf, ref_key: str, dataset_id: str
     ) -> dict:
@@ -138,19 +140,47 @@ class JobContextBuilder:
             or settings.from_env("default").get(f"job.{ref_key}.service_ref")
         )
 
+        LOG.debug(
+            "Resolving service reference",
+            ref_key=ref_key,
+            ref=ref,
+            dataset_id=dataset_id,
+        )
+
         if ref:
             # 1. Try Global app.yaml (Active env, then fallback to default)
             global_def = self.app_settings.get(
                 f"services.{ref}"
             ) or self.app_settings.from_env("default").get(f"services.{ref}")
+
             if global_def:
-                return dict(global_def)
+                svc_dict = global_def.to_dict()
+                LOG.debug(
+                    "Found service definition in global app.yaml",
+                    ref=ref,
+                    env=self.app_settings.current_env,
+                    config=svc_dict,
+                )
+                return svc_dict
 
             # 2. Try Job-level config.yaml services block
             job_level_def = settings.get(f"services.{ref}") or settings.from_env(
                 "default"
             ).get(f"services.{ref}")
-            return dict(job_level_def or {})
+
+            if job_level_def:
+                svc_dict = job_level_def.to_dict()
+                LOG.debug(
+                    "Found service definition in job config.yaml",
+                    ref=ref,
+                    config=svc_dict,
+                )
+                return svc_dict
+
+            LOG.warning(
+                f"Service reference '{ref}' found, but no definition exists in services block.",
+                ref_key=ref_key,
+            )
 
         # Fallback to inline config block:
         # Dataset (Active -> Default) > Job (Active -> Default)
@@ -280,9 +310,36 @@ class JobContextBuilder:
         archive_svc = self._resolve_service(settings, "archive", dataset_id)
 
         # 2. Extract specific 'type' and leave residual as 'config'
-        source_type = source_svc.pop("type", get_val("source.type", "flat_file"))
-        sink_type = sink_svc.pop("type", get_val("sink.type", "clickhouse"))
-        archive_type = archive_svc.pop("type", get_val("archive.type", "s3"))
+        # 2. Validate 'type' presence and extract it
+        for label, svc_dict in [
+            ("source", source_svc),
+            ("sink", sink_svc),
+            ("archive", archive_svc),
+        ]:
+            if svc_dict is not None and "type" not in svc_dict:
+                LOG.warning(
+                    f"Service dictionary for {label} is missing the required 'type' key. "
+                    "Factory initialization will likely fail.",
+                    dataset_id=dataset_id,
+                    config=svc_dict,
+                )
+
+        # pop() with fallback to hierarchical config lookup
+        source_type = (
+            source_svc.pop("type", get_val("source.type"))
+            if source_svc
+            else get_val("source.type")
+        )
+        sink_type = (
+            sink_svc.pop("type", get_val("sink.type"))
+            if sink_svc
+            else get_val("sink.type")
+        )
+        archive_type = (
+            archive_svc.pop("type", get_val("archive.type"))
+            if archive_svc
+            else get_val("archive.type")
+        )
 
         ctx_data = {
             "job_id": job_id,

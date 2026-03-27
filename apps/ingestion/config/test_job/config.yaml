@@ -38,13 +38,15 @@ default:
       partition_value: "2023-10-27"
       archive:
         enable_archival: true    # per-dataset archival override
+        service_ref: "moto_archive"
+
 
 # ── Local env overrides ──────────────────────────────────────────────────────
 local:
   job:
   datasets:
     orders:
-      source_identifier: "samples/sample_orders.csv"
+      source_identifier: "apps/ingestion/samples/sample_orders.csv"
 
 # production:
 #   source:

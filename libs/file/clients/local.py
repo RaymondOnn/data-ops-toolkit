@@ -3,7 +3,6 @@ from typing import Any
 
 import fsspec
 from fsspec.implementations.local import LocalFileSystem
-
 from libs.file.base import FileSystemClient
 
 LOG = logging.getLogger(__name__)
