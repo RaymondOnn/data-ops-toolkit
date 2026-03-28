@@ -13,8 +13,8 @@ jobs:
     name: Plan Deployment
     runs-on: ubuntu-latest
     outputs:
-      release_id: ${{ steps.gen_id.outputs.release_id }}
-    steps:
+      release_id: ${{ stages.gen_id.outputs.release_id }}
+    stages:
       - uses: actions/checkout@v4
 
       - name: Download Artifacts
@@ -36,7 +36,7 @@ jobs:
 
       - name: Dry Run Rsync
         env:
-          TARGET_DIR: /opt/apps/my-app/releases/${{ steps.gen_id.outputs.release_id }}
+          TARGET_DIR: /opt/apps/my-app/releases/${{ stages.gen_id.outputs.release_id }}
         run: |
           echo "🚧 Dry Run: Syncing to $TARGET_DIR"
           # -a: archive, -v: verbose, -n: dry-run
@@ -47,7 +47,7 @@ jobs:
     needs: plan
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }} # 🛑 Approval Gate triggers here
-    steps:
+    stages:
       - uses: actions/checkout@v4
 
       - name: Download Artifacts

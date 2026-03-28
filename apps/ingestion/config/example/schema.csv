@@ -3,7 +3,6 @@ None,_ingested_at,None,Datetime,0,0,0,0,None,True
 None,_partition,None,String,20,0,20,0,None,True
 None,_source_host,None,String,100,0,100,0,None,True
 None,_run_id,None,String,50,0,50,0,None,True
-None,_row_hash,None,String,64,0,64,0,None,True
 id,order_id,Int64,Int64,19,0,19,0,None,False
 cust_id,customer_id,String,Int64,50,0,19,0,None,False
 ordered_at,order_ts,Datetime,Datetime,0,0,0,0,None,False

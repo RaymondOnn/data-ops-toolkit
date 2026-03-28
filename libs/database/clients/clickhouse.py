@@ -3,7 +3,6 @@ from typing import Any
 
 import polars as pl
 from clickhouse_connect.driver.client import Client
-
 from libs.database.clients.base import DBClient
 
 
@@ -17,7 +16,7 @@ class ClickhouseClient(DBClient):
             return self._connection
 
         try:
-            self._connection = clickhouse_connect.get_client(
+            self._connection: Client = clickhouse_connect.get_client(
                 host=str(self.config.get("host", "localhost")),
                 port=int(self.config.get("port", 8123)),
                 username=str(self.config.get("user")),
@@ -37,16 +36,16 @@ class ClickhouseClient(DBClient):
         table_name: str,
         num_partitions: int = 5,
         filter_sql: str | None = None,
-    ) -> list[str]:
+    ) -> set[str]:
         filter_sql = filter_sql.replace("WHERE", "") if filter_sql else ""
-        return [
+        return {
             f"""
             SELECT * FROM {table_name} 
             WHERE {filter_sql} 
             AND cityHash64(*) % {num_partitions} = {i}
             """
             for i in range(num_partitions)
-        ]
+        }
 
     def sql(self, query: str) -> list[Sequence[Any]]:
         # Returns a list of tuples by default

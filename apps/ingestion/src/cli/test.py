@@ -1,7 +1,7 @@
 import structlog
 import typer
 
-from apps.ingestion.src.core.contexts.builder import JobContextBuilder
+from apps.ingestion.src.core.contexts.builder import TaskContextBuilder
 from apps.ingestion.src.features.regression.regression import run_comparison
 
 LOG = structlog.get_logger(__name__)
@@ -11,7 +11,7 @@ test_app = typer.Typer(help="Testing and validation utilities.")
 
 def get_ctx(job_id: str, dataset: str):
     """One place to handle all config resolution for test commands."""
-    return JobContextBuilder().build(job_id=job_id, dataset_id=dataset)
+    return TaskContextBuilder().build(job_id=job_id, dataset_id=dataset)
 
 
 @test_app.command(name="compare")
@@ -133,15 +133,16 @@ def test(
     dataset: str = typer.Option(
         ..., "--dataset", "-d", help="Dataset identifier (e.g., 'sales_data')"
     ),
-    from_step: Optional[JobSteps] = typer.Option(
-        None, "--from", help="Force start from this step"
+    from_stage: Optional[ExecutionStage] = typer.Option(
+        None, "--from", help="Force start from this stage"
     ),
-    to_step: Optional[JobSteps] = typer.Option(
-        None, "--to", help="Stop execution after this step"
+    to_stage: Optional[ExecutionStage] = typer.Option(
+        None, "--to", help="Stop execution after this stage"
     ),
     force: bool = typer.Option(True, "--force", help="Defaults to True for testing"),
 ) -> None:
     """Developer test mode. Allows slicing the pipeline."""
     _execute_pipeline(
-        run_date, job_id, dataset, from_step=from_step, to_step=to_step, force=force
+        run_date, job_id, dataset, from_stage=from_stage, to_stage=to_stage, force=force
+    )
     )

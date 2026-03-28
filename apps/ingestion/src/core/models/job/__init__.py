@@ -1,18 +1,18 @@
-from .status import JobStatus
-from .base import Job
+from .base import Task
 from .manifest import (
-    JobManifest,
+    AuditPayload,
+    CompletePayload,
     ErrorPayload,
     ExtractPayload,
+    PublishPayload,
+    TaskManifest,
     TransformPayload,
     WritePayload,
-    AuditPayload,
-    PublishPayload,
-    CompletePayload,
 )
+from .status import ExecutionStatus
 
 __all__ = [
-    "Job",
-    "JobManifest",
-    "JobStatus",
+    "ExecutionStatus",
+    "Task",
+    "TaskManifest",
 ]

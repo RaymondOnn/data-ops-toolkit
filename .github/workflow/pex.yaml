@@ -2,8 +2,8 @@ jobs:
   list-apps:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-    steps:
+      matrix: ${{ stages.set-matrix.outputs.matrix }}
+    stages:
       - id: set-matrix
         run: |
           APPS=$(ls .deploy/ | sed 's/\.yaml//' | jq -R -s -c 'split("\n")[:-1]')
@@ -14,7 +14,7 @@ jobs:
     strategy:
       matrix:
         app: ${{ fromJson(needs.list-apps.outputs.matrix) }}
-    steps:
+    stages:
       - name: Build PEX for ${{ matrix.app }}
         run: |
           uv export --format requirements.txt > requirements.txt
@@ -32,7 +32,7 @@ on:
 jobs:
   build-pex:
     runs-on: ubuntu-latest
-    steps:
+    stages:
       - uses: actions/checkout@v4
 
       - name: Install uv and pex
@@ -44,7 +44,7 @@ jobs:
       - name: Download dependencies with uv
         # We install dependencies into a local folder first.
         # This leverages uv's speed for resolution and downloading.
-        # We exclude the local 'core-utils' from this step to ensure it goes into code.pex, not deps.pex.
+        # We exclude the local 'core-utils' from this stage to ensure it goes into code.pex, not deps.pex.
         run: |
           sed -i '/core-utils/d' requirements.txt
           mkdir -p .deps

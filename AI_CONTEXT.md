@@ -41,4 +41,4 @@ This file serves as persistent context for AI coding assistants to understand th
 ## 7. Trigger Patterns
 - **CLI**: Primary entry point (`main.py ingest`) for orchestrators (Airflow/Dagster).
 - **File Watcher**: `watchdog` process that spawns CLI commands upon file arrival. Decoupled design.
-- **Internal/Retry**: Jobs are idempotent. `main.py resume` reloads state from checkpoints.
+- **Internal/Retry**: Tasks are idempotent. `main.py resume` reloads state from checkpoints.

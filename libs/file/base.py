@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Generator
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import fsspec
 
@@ -51,9 +51,11 @@ class FileSystemClient(BaseIOClient, ABC):
         """The fsspec equivalent of Path.resolve()."""
         if "://" in path and self.fs:
             stripped = self.fs._strip_protocol(path)
+            # Ensure stripped is a string (fsspec can return a list for some protocols)
+            path_str = stripped[0] if isinstance(stripped, list) else stripped
             # Normalize slashes and remove internal '.' or '..'
             normalized = "/".join(
-                [p for p in stripped.split("/") if p not in (".", "")]
+                [p for p in path_str.split("/") if p not in (".", "")]
             )
             return str(self.fs.unstrip_protocol(normalized))
         return str(Path(path).resolve())
@@ -81,7 +83,8 @@ class FileSystemClient(BaseIOClient, ABC):
             for p in self.fs.glob(search_pattern):
                 # glob() often returns directories; we strictly yield files
                 if self.fs.isfile(p):
-                    yield str(self.fs.unstrip_protocol(p))
+                    path_str = p[0] if isinstance(p, list) else p
+                    yield str(self.fs.unstrip_protocol(path_str))
 
     def smart_transfer(self, local_source: str, remote_dest: str) -> None:
         """Handles local-to-cloud or cloud-to-cloud transfers safely."""
@@ -136,7 +139,7 @@ class FileSystemSkills(Enum):
 
 def create_fs_client(
     url: str,
-    capabilities: list[FileSystemSkills],
+    capabilities: set[FileSystemSkills],
     storage_options: dict[str, Any] | None = None,
 ) -> FileSystemClient:
     """
@@ -156,10 +159,10 @@ def create_fs_client(
     }
 
     # Default to LocalClient if no cloud protocol is detected
-    base_class = LocalClient
+    base_class = cast("type[FileSystemClient]", LocalClient)
     for prefix, cls in protocol_map.items():
         if url.startswith(prefix):
-            base_class = cls
+            base_class = cast("type[FileSystemClient]", cls)
             break
 
     # 2. Collect Mixins from Enum
@@ -172,4 +175,6 @@ def create_fs_client(
     ManagedClientClass = type(class_name, tuple(bases), {})
 
     # 4. Instantiate (triggers super().__init__ and fsspec setup)
-    return ManagedClientClass(url=url, storage_options=storage_options)
+    return cast(
+        "FileSystemClient", ManagedClientClass(url=url, storage_options=storage_options)
+    )

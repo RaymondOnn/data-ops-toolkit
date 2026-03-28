@@ -3,18 +3,18 @@ from typing import TYPE_CHECKING, Any
 
 from apps.ingestion.src.core.models.job.manifest import AuditPayload
 
-from .base import JobStep
-from .enums import JobSteps
+from .base import ExecutionStage
+from .enums import StageName
 
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.models.job import Job
+    from apps.ingestion.src.core.models.job import Task
 
 
-class AuditStep(JobStep):
-    name = JobSteps.AUDIT.label
+class AuditStep(ExecutionStage):
+    name = StageName.AUDIT.label
     manifest: AuditPayload
 
-    def execute(self, job: "Job") -> str:
+    def execute(self, job: "Task") -> str:
         start_time = time.perf_counter()
 
         try:
@@ -66,7 +66,7 @@ class AuditStep(JobStep):
             # If validation fails, we stop the pipeline here!
             if not payload.validation_passed:
                 raise ValueError(
-                    f"Audit failed for Job {job.job_id}. See manifest for details."
+                    f"Audit failed for Task {job.job_id}. See manifest for details."
                 )
 
             return self._transit(job)
@@ -76,7 +76,7 @@ class AuditStep(JobStep):
             raise
 
     def _run_internal_checks(
-        self, job: "Job", write_meta: AuditPayload
+        self, job: "Task", write_meta: AuditPayload
     ) -> dict[str, Any]:
         """Simple baseline checks while the real app is under construction."""
         # Example: Check if rows_affected is 0

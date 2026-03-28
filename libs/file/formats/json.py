@@ -15,28 +15,28 @@ LOG = logging.getLogger(__name__)
 class JSONHandler(FormatHandler):
     fs: AbstractFileSystem
 
-    def discover(self, input_path: Path | str) -> list[str]:
+    def discover(self, input_path: Path | str) -> set[str]:
         """Expands a path into a list of JSON files."""
         path_str = str(input_path)
 
         # If the path already contains a wildcard, expand it directly
         if "*" in path_str:
-            return [
-                str(self.fs.unstrip_protocol(p))
+            return {
+                str(self.fs.unstrip_protocol(str(p)))
                 for p in self.fs.glob(path_str)
                 if self.fs.isfile(p)
-            ]
+            }
 
         if self.fs.isfile(path_str):
-            return [path_str]
+            return {path_str}
 
         # Matches .json, .jsonl, .ndjson
         pattern = f"{path_str.rstrip('/')}/**/*.json*"
-        return [
-            str(self.fs.unstrip_protocol(p))
+        return {
+            str(self.fs.unstrip_protocol(str(p)))
             for p in self.fs.glob(pattern)
             if self.fs.isfile(p)
-        ]
+        }
 
     def read_file(self, input_path: Path | str, **kwargs: Any) -> io.BytesIO:
         """Handles 'Trailing Comma' repairs for standard JSON."""
@@ -85,7 +85,7 @@ class JSONHandler(FormatHandler):
 
         # For simplicity, we determine the mode based on the first file in the batch.
         # Usually, a batch of work units shares the same format.
-        first_file = paths[0]
+        first_file = next(iter(paths))
         is_ndjson = any(str(first_file).endswith(ext) for ext in [".ndjson", ".jsonl"])
 
         if not is_ndjson:
@@ -105,7 +105,7 @@ class JSONHandler(FormatHandler):
 
         if is_ndjson:
             return pl.scan_ndjson(
-                paths,
+                list(paths),
                 storage_options=self.opts,
                 ignore_errors=kwargs.get("ignore_errors", True),
             )

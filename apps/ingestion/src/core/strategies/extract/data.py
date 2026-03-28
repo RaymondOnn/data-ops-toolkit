@@ -3,6 +3,7 @@ from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
+import msgspec
 import polars as pl
 import ray
 import structlog
@@ -42,7 +43,6 @@ class DataReader(Reader):
             source=context.source_identifier,
         )
 
-        import msgspec
 
         # 2. Package the metadata for the workers.
         # We don't send the 'service' object; we send the 'config' to recreate it.
@@ -64,7 +64,6 @@ class DataReader(Reader):
             from pathlib import Path
 
             import msgspec
-
             from apps.ingestion.src.core.schema import apply_schema_contract
             from apps.ingestion.src.core.strategies.extract.base import ReaderContext
             from apps.ingestion.src.services.factory import ServiceFactory
@@ -148,13 +147,13 @@ class DataReader(Reader):
         return metadata_list
 
     @abstractmethod
-    def get_work_units(self, client: Any, context: ReaderContext) -> list[Any]:
+    def get_work_units(self, client: Any, context: ReaderContext) -> set[Any]:
         pass
 
 
 @ReaderFactory.register("flat_file")
 class FileDataReader(DataReader):
-    def get_work_units(self, client: Any, context: ReaderContext) -> list[Any]:
+    def get_work_units(self, client: Any, context: ReaderContext) -> set[Any]:
         if not context.source_identifier:
             raise ValueError("source_path is required for FileDataReader")
 

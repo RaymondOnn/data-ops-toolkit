@@ -38,17 +38,17 @@ class PostgresClient(DBClient):
         table_name: str,
         num_partitions: int = 10,
         filter_sql: str | None = None,
-    ) -> list[str]:
+    ) -> set[str]:
         # Physical partitioning using Postgres hidden ctid column
         filter_sql = filter_sql.replace("WHERE", "") if filter_sql else ""
-        return [
+        return {
             f"""
             SELECT * FROM {table_name} 
             WHERE {filter_sql} 
             AND abs(hashint4(ctid::text::hashint4)) % {num_partitions} = {i}
             """
             for i in range(num_partitions)
-        ]
+        }
 
     def sql(self, query: str) -> list[Sequence[Any]]:
         """

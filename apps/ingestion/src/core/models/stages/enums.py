@@ -2,9 +2,9 @@ from enum import IntEnum, IntFlag, auto
 from typing import Self
 
 
-class JobBitmask(IntFlag):
+class StageBitmask(IntFlag):
     """
-    Class representing the bitmask for job steps.
+    Class representing the bitmask for job stages.
     """
 
     NONE = 0
@@ -17,7 +17,7 @@ class JobBitmask(IntFlag):
     COMPLETE = auto()
 
     @classmethod
-    def ALL_DONE(cls) -> "JobBitmask":
+    def ALL_DONE(cls) -> "StageBitmask":
         """
         Dynamically calculates the sum of all flags.
         Useful for checking if the 50M row pipeline is 100% complete.
@@ -32,7 +32,7 @@ class JobBitmask(IntFlag):
         return self == self.ALL_DONE()
 
 
-class JobSteps(IntEnum):
+class StageName(IntEnum):
     START = 0
     EXTRACT = 1
     TRANSFORM = 2
@@ -46,22 +46,22 @@ class JobSteps(IntEnum):
         return self.name.casefold()
 
     @property
-    def bitmask(self) -> JobBitmask:
-        # Map the step to the IntFlag
+    def bitmask(self) -> StageBitmask:
+        # Map the stage to the IntFlag
         mapping = {
-            JobSteps.START: JobBitmask.START,
-            JobSteps.EXTRACT: JobBitmask.EXTRACT,
-            JobSteps.TRANSFORM: JobBitmask.TRANSFORM,
-            JobSteps.WRITE: JobBitmask.WRITE,
-            JobSteps.AUDIT: JobBitmask.AUDIT,
-            JobSteps.PUBLISH: JobBitmask.PUBLISH,
-            JobSteps.COMPLETE: JobBitmask.COMPLETE,
+            StageName.START: StageBitmask.START,
+            StageName.EXTRACT: StageBitmask.EXTRACT,
+            StageName.TRANSFORM: StageBitmask.TRANSFORM,
+            StageName.WRITE: StageBitmask.WRITE,
+            StageName.AUDIT: StageBitmask.AUDIT,
+            StageName.PUBLISH: StageBitmask.PUBLISH,
+            StageName.COMPLETE: StageBitmask.COMPLETE,
         }
         return mapping[self]
 
     @classmethod
-    def next_step(cls, current_label: str) -> Self | None:
-        """Finds the next step in the sequence based on a string label."""
+    def next(cls, current_label: str) -> Self | None:
+        """Finds the next stage in the sequence based on a string label."""
         current_enum = cls[current_label.upper()]
         try:
             return cls(current_enum.value + 1)
@@ -69,8 +69,8 @@ class JobSteps(IntEnum):
             return None  # We have reached the end of the pipeline
 
     @classmethod
-    def prev_step(cls, current_label: str) -> Self | None:
-        """Finds the next step in the sequence based on a string label."""
+    def prev_stage(cls, current_label: str) -> Self | None:
+        """Finds the next stage in the sequence based on a string label."""
         current_enum = cls[current_label.upper()]
         try:
             return cls(current_enum.value - 1)
@@ -78,12 +78,12 @@ class JobSteps(IntEnum):
             return None  # We have reached the start of the pipeline
 
     @classmethod
-    def first_step(cls) -> Self:
+    def first(cls) -> Self:
         return cls(0)
 
     @classmethod
-    def last_step(cls) -> Self:
+    def last(cls) -> Self:
         return cls(len(cls) - 1)
 
 
-STEP_ORDER = [step.label for step in sorted(JobSteps)]
+EXEC_STAGES = [stage.label for stage in sorted(StageName)]

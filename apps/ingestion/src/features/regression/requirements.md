@@ -2,7 +2,7 @@
 2. Regression test can involve one or more datasets
 3. Ability to figure out which datasets are affected by the changes
 4. Regression test is conducted via GitHub Actions
-5. We will need to get the JobContext first before we can proceed to cloning or comparing results
+5. We will need to get the TaskContext first before we can proceed to cloning or comparing results
 6. For cloning, we only need to clone the skeleton/schema, not the actual data
 7. For comparing results,
     - For data ingestion, we compare and ensure the data is the same

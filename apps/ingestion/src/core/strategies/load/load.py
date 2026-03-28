@@ -40,9 +40,7 @@ class Loader:
         Returns metadata about the staged data (staging_artifact, rows_loaded).
         """
         LOG.info("staging_started", table=target_table)
-        return service.stage_data(
-            source_dir, target_table, partition_col, partition_val, file_ext
-        )
+        return service.stage_data(source_dir, target_table, file_ext)
 
     def promote(
         self, service: SinkMixin, staging_identifier: str, write_ctx: WriteContext

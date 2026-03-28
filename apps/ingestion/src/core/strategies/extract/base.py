@@ -3,10 +3,11 @@ from pathlib import Path
 from typing import Any
 
 import msgspec
+
 from apps.ingestion.src.services.base import SourceMixin
 
 
-class ReaderContext(msgspec.Struct):
+class ReaderContext(msgspec.Struct, frozen=True):
     """
     Type-safe container for all ingestion parameters.
     Serializable for Ray worker distribution.
@@ -32,5 +33,6 @@ class Reader(ABC):
     @abstractmethod
     def fetch(
         self, service: SourceMixin, context: ReaderContext, target_folder: Path
-    ) -> list[dict[str, Any]]:
+    ) -> set[dict[str, Any]]:
         raise NotImplementedError("Subclasses must implement this method")
+

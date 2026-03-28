@@ -4,8 +4,8 @@ from pathlib import Path
 import msgspec
 import structlog
 
-from apps.ingestion.src.core.contexts import ExecutionContext, JobContext
-from apps.ingestion.src.core.models.job import Job, JobStatus
+from apps.ingestion.src.core.contexts import ExecutionContext, TaskContext
+from apps.ingestion.src.core.models.job import ExecutionStatus, Task
 from apps.ingestion.src.core.models.states.terminal import HoldState
 from apps.ingestion.src.core.orchestrator.engine import IngestionEngine
 from apps.ingestion.src.core.orchestrator.state import StateStore
@@ -40,9 +40,9 @@ class LifecycleManager:
         # rglob finds all manifests regardless of how deep the job/run IDs are nested
         for manifest_path in hold_base.rglob("manifest.json"):
             try:
-                # 1. Rehydrate the Job object from the folder metadata
+                # 1. Rehydrate the Task object from the folder metadata
                 # Line 204 fix: Using the new classmethod
-                job = Job.from_folder(manifest_path.parent, exec_ctx=self.exec_ctx)
+                job = Task.from_folder(manifest_path.parent, exec_ctx=self.exec_ctx)
                 state = HoldState(job)
 
                 # 2. Logic check: Should this job be resumed?
@@ -56,7 +56,9 @@ class LifecycleManager:
                 # Line 313 fix: composite_key = "job_id:table"
                 composite_key = f"{job.job_id}:{job.context.dataset_id}"
                 LOG.info(
-                    "Recovering job", run_id=job.run_id, step=job.manifest.current_step
+                    "Recovering job",
+                    run_id=job.run_id,
+                    stage=job.manifest.current_stage,
                 )
 
                 # 4. Re-queue into the Ingestion Engine
@@ -65,7 +67,7 @@ class LifecycleManager:
                     composite_key=composite_key,
                     run_id=job.run_id,
                     config_file_path=str(next(job.folder.glob("*_config.json"))),
-                    current_step=job.manifest.current_step,
+                    current_stage=job.manifest.current_stage,
                 )
 
                 # 5. Sync the StateStore mirror so the UI reflects the move
@@ -94,7 +96,7 @@ class LifecycleManager:
 
         for data in runs_to_check:
             # We only expire jobs that are stuck in a non-terminal state
-            if data["status"] in JobStatus.active_statuses():
+            if data["status"] in ExecutionStatus.active_statuses():
                 try:
                     # Use get_context to check expiry without a full manifest parse
                     job_path = Path(data["folder_path"])
@@ -106,7 +108,7 @@ class LifecycleManager:
 
                     if is_expired(ctx.expires_at):
                         LOG.warning(
-                            "Job TTL reached. Initiating purge.",
+                            "Task TTL reached. Initiating purge.",
                             job_id=data["job_id"],
                             run_id=data["run_id"],
                         )
@@ -117,7 +119,7 @@ class LifecycleManager:
                         # 2. Update State Store to terminal status
                         self.state_store.update_run(
                             data["run_id"],
-                            {"status": JobStatus.EXPIRED, "step": "cleanup"},
+                            {"status": ExecutionStatus.EXPIRED, "stage": "cleanup"},
                         )
 
                 except (OSError, msgspec.DecodeError) as e:
@@ -134,9 +136,9 @@ class LifecycleManager:
 
         self.state_store.flush()
 
-    def get_context_from_path(self, folder: Path) -> "JobContext":
+    def get_context_from_path(self, folder: Path) -> "TaskContext":
         """
-        Helper to load the JobContext from the active workspace.
+        Helper to load the TaskContext from the active workspace.
         Standardized to look for 'config.json' directly.
         """
 
@@ -148,8 +150,8 @@ class LifecycleManager:
             raise FileNotFoundError(f"Missing config.json in {folder}")
 
         with config_path.open(mode="rb") as f:
-            # msgspec handles the mapping to JobContext class automatically
-            return msgspec.json.decode(f.read(), type=JobContext)
+            # msgspec handles the mapping to TaskContext class automatically
+            return msgspec.json.decode(f.read(), type=TaskContext)
 
     def _cleanup_workspace(self, run_id: str) -> None:
         """
@@ -169,7 +171,12 @@ class LifecycleManager:
         # 2. Remove physical data vaults (extract, transform, etc)
         # Search data/ folders for {job_id}_*
         data_root = self.exec_ctx.data_path
-        for step_dir in data_root.iterdir():
-            if step_dir.is_dir():
-                for physical_folder in step_dir.glob(f"{job_id}_*"):
+        for stage_dir in data_root.iterdir():
+            if stage_dir.is_dir():
+                for physical_folder in stage_dir.glob(f"{job_id}_*"):
+                    shutil.rmtree(physical_folder)
+                    shutil.rmtree(physical_folder)
+                    shutil.rmtree(physical_folder)
+                    shutil.rmtree(physical_folder)
+                    shutil.rmtree(physical_folder)
                     shutil.rmtree(physical_folder)

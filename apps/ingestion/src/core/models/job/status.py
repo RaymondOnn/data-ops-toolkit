@@ -1,11 +1,11 @@
 from enum import StrEnum
 
 
-class JobStatus(StrEnum):
+class ExecutionStatus(StrEnum):
     """
     Shows the current health of the job.
 
-    Independent of Job Step for easier maintenance
+    Independent of Task Step for easier maintenance
     """
 
     # Initial State
@@ -14,10 +14,10 @@ class JobStatus(StrEnum):
 
     # Active States
     PROVISIONING = "PROVISIONING"  # Worker initialized, manifest created
-    RUNNING = "RUNNING"  # Actively processing a step
+    RUNNING = "RUNNING"  # Actively processing a stage
 
     # Terminal States (End of the road)
-    SUCCESS = "SUCCESS"  # Fully finished (Complete step passed)
+    SUCCESS = "SUCCESS"  # Fully finished (Complete stage passed)
     FAILED = "FAILED"  # Hard stop, requires manual intervention
     CANCELLED = "CANCELLED"  # Manual kill
     EXPIRED = "EXPIRED"  # TTL reached, data purged, no recovery needed
@@ -29,9 +29,9 @@ class JobStatus(StrEnum):
     UNKNOWN = "UNKNOWN"
 
     @classmethod
-    def active_statuses(cls) -> set["JobStatus"]:
+    def active_statuses(cls) -> set["ExecutionStatus"]:
         return {cls.QUEUED, cls.PENDING, cls.RUNNING, cls.PROVISIONING}
 
     @classmethod
-    def terminal_statuses(cls) -> set["JobStatus"]:
+    def terminal_statuses(cls) -> set["ExecutionStatus"]:
         return {cls.SUCCESS, cls.FAILED, cls.CANCELLED}

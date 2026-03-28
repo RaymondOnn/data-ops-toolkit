@@ -637,34 +637,6 @@ wheels = [
 ]
 
 [[package]]
-name = "chdb"
-version = "4.1.6"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "chdb-core" },
-    { name = "pandas" },
-    { name = "pyarrow" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/61/8b/b7ec9eff8795a87f462c4b304e82391ecd6e4b238607f130557294a9ae6f/chdb-4.1.6-py3-none-any.whl", hash = "sha256:9acf64920697a9a88608c2c740d5ad5c650d1f75a47af089bd78ae5b6fe40f30", size = 1444649, upload-time = "2026-03-19T15:27:04.271Z" },
-]
-
-[[package]]
-name = "chdb-core"
-version = "26.1.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pandas" },
-    { name = "pyarrow" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e3/43/31e699cb602b8348531b2e36a57c70b7ad9238f6aaeed01dc38242524b34/chdb_core-26.1.0-cp39-abi3-macosx_10_15_x86_64.whl", hash = "sha256:7dd4fc1d008e60e1fb54440bc9a7c41996413f5f164c324acc790d47043264a5", size = 105204496, upload-time = "2026-03-02T13:20:46.813Z" },
-    { url = "https://files.pythonhosted.org/packages/b1/6a/872464cbffb7f345643751c4f670d0844aef16b2e82ae3f5ceb95790399e/chdb_core-26.1.0-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:73be929393fd33136e550e99a5101e3068fc7812dfbb93eacbba9603b9a8e77a", size = 87764655, upload-time = "2026-03-02T12:45:07.585Z" },
-    { url = "https://files.pythonhosted.org/packages/11/a9/649b956846bac60b91052583f84077a97bd9cc7dfb164178a4222f92b997/chdb_core-26.1.0-cp39-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:a62b85061ec81ca64b74f418edf4eaee6ff82aa915b0d537c7ccb3a3e2ed0e9d", size = 118355514, upload-time = "2026-03-02T13:23:53.088Z" },
-    { url = "https://files.pythonhosted.org/packages/aa/b1/266c91ca0cd9c5259dfb8f18efd507ba53611bab10bffc10083b97ff66bf/chdb_core-26.1.0-cp39-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:ff3559d024c10a31c5041ab4387e0b7d6a3b5d5bbf6dda884c5a36d4dc50ce47", size = 158111115, upload-time = "2026-03-02T13:16:14.098Z" },
-]
-
-[[package]]
 name = "click"
 version = "8.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1355,7 +1327,6 @@ source = { editable = "apps/ingestion" }
 dependencies = [
     { name = "auth" },
     { name = "boto3" },
-    { name = "chdb" },
     { name = "clients" },
     { name = "database" },
     { name = "diskcache" },
@@ -1365,6 +1336,7 @@ dependencies = [
     { name = "moto", extra = ["server"] },
     { name = "msgspec" },
     { name = "nanoid" },
+    { name = "pandas" },
     { name = "polars" },
     { name = "pyarrow" },
     { name = "ray" },
@@ -1378,7 +1350,6 @@ dependencies = [
 requires-dist = [
     { name = "auth", editable = "libs/auth" },
     { name = "boto3" },
-    { name = "chdb" },
     { name = "clients", editable = "libs/clients" },
     { name = "database", editable = "libs/database" },
     { name = "diskcache" },
@@ -1388,6 +1359,7 @@ requires-dist = [
     { name = "moto", extras = ["server"] },
     { name = "msgspec" },
     { name = "nanoid" },
+    { name = "pandas" },
     { name = "polars" },
     { name = "pyarrow" },
     { name = "ray", specifier = ">=2.39.0" },

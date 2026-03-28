@@ -7,9 +7,10 @@ from typing import Any
 import msgspec
 import polars as pl
 import structlog
+
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
-from apps.ingestion.src.core.contexts.job import JobContext
-from apps.ingestion.src.core.models.job import JobManifest, JobStatus
+from apps.ingestion.src.core.contexts.job import TaskContext
+from apps.ingestion.src.core.models.job import ExecutionStatus, TaskManifest
 from apps.ingestion.src.services.database import DatabaseSink
 from apps.ingestion.src.utils.constants import ALWAYS_ON_MODE
 
@@ -53,7 +54,7 @@ class StateStore:
             LOG.info("Refreshing active records from database view")
 
         # We only care about jobs that are not SUCCESS, FAILED, or EXPIRED
-        active_statuses = [f"'{s.value}'" for s in JobStatus.active_statuses()]
+        active_statuses = [f"'{s.value}'" for s in ExecutionStatus.active_statuses()]
         status_filter = ", ".join(active_statuses)
 
         sql = f"""
@@ -63,7 +64,9 @@ class StateStore:
         try:
             raw_records = self.db.fetch(sql)
             for r in raw_records:
-                identifier = f"{r['JOB_ID']}:{r['DATASET_ID']}:{r['RUN_DATE']}"
+                identifier = self.exec_ctx.get_task_identifier(
+                    r["JOB_ID"], r["DATASET_ID"], str(r["RUN_DATE"])
+                )
                 self._active_records[identifier] = r
         except Exception as e:
             LOG.error("Failed to refresh active records", error=str(e))
@@ -76,7 +79,7 @@ class StateStore:
         from apps.ingestion.src.utils.common import find_path
 
         # Use existing find_path utility to locate the directory anywhere in the workspace
-        identifier = f"{job_id}:{dataset_id}:{run_date}"
+        identifier = self.exec_ctx.get_task_identifier(job_id, dataset_id, run_date)
         active_path = find_path(self.exec_ctx.workspace_dir, identifier)
 
         if active_path and active_path.exists():
@@ -129,10 +132,10 @@ class StateStore:
         try:
             # 1. Fast decode using msgspec
             with manifest_file.open("rb") as f:
-                manifest = msgspec.json.decode(f.read(), type=JobManifest)
+                manifest = msgspec.json.decode(f.read(), type=TaskManifest)
 
             with config_file.open("rb") as f:
-                ctx = msgspec.yaml.decode(f.read(), type=JobContext)
+                ctx = msgspec.yaml.decode(f.read(), type=TaskContext)
 
             # 2. Emit to the local stream immediately
             # We flag this as a 'SYNC' event in metadata if needed
@@ -145,7 +148,7 @@ class StateStore:
             LOG.debug(
                 "Synced manifest from disk",
                 run_id=manifest.run_id,
-                status=manifest.job_status,
+                status=manifest.status,
             )
 
         except (msgspec.DecodeError, msgspec.ValidationError) as e:
@@ -215,8 +218,8 @@ class StateStore:
 
     def emit_state(
         self,
-        manifest: JobManifest | None = None,
-        context: JobContext | None = None,
+        manifest: TaskManifest | None = None,
+        context: TaskContext | None = None,
         metadata: dict[str, Any] | None = None,
         deep_sync: bool = False,
     ) -> None:
@@ -225,7 +228,9 @@ class StateStore:
         Low latency, disk-persistent.
         """
         metadata = metadata or {}
-        identifier = f"{manifest.job_id}:{manifest.dataset_id}:{context.run_date}"
+        identifier = self.exec_ctx.get_task_identifier(
+            manifest.job_id, manifest.dataset_id, context.run_date
+        )
         record = self.active_records.get(identifier, {})
 
         # Align keys with your execution_log.sql columns
@@ -242,8 +247,8 @@ class StateStore:
                 manifest.complete.end_timestamp_utc if manifest.complete else None
             ),
             "LAST_UPDATED_AT_TS": datetime.now().astimezone().isoformat(),
-            "JOB_STATUS": str(metadata.get("JOB_STATUS", manifest.job_status)).upper(),
-            "CURRENT_STEP": manifest.current_step.upper(),
+            "JOB_STATUS": str(metadata.get("JOB_STATUS", manifest.status)).upper(),
+            "CURRENT_STEP": manifest.current_stage.upper(),
             "JOB_BITMASK": manifest.bitmask,
             "WATCH_FILE_PATH": record.get("WATCH_FILE_PATH", None),
             "RUNTIME_OVERRIDES": context.custom_overrides,
@@ -267,4 +272,12 @@ class StateStore:
 
         line = msgspec.json.encode(event) + b"\n"
         with self.stream_path.open("ab") as f:
+            f.write(line)
+            f.write(line)
+            f.write(line)
+            f.write(line)
+            f.write(line)
+            f.write(line)
+            f.write(line)
+            f.write(line)
             f.write(line)

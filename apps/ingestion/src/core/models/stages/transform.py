@@ -12,22 +12,22 @@ from apps.ingestion.src.core.strategies.transform import (
     TransformFactory,
 )
 
-from .base import JobStep
-from .enums import JobSteps
+from .base import ExecutionStage
+from .enums import StageName
 
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.models.job import Job
+    from apps.ingestion.src.core.models.job import Task
 
 
 LOG = structlog.getLogger(__name__)
 APP_TRANSFORM_OUTPUT_EXT = "parquet"
 
 
-class TransformStep(JobStep):
-    name = JobSteps.TRANSFORM.label
+class TransformStep(ExecutionStage):
+    name = StageName.TRANSFORM.label
     manifest: TransformPayload
 
-    def execute(self, job: "Job") -> str:
+    def execute(self, job: "Task") -> str:
         """
         Decision: Use LazyFrame Streaming for 50M rows.
         By reading from the 'active/extract' symlink, we ensure we are
@@ -37,7 +37,7 @@ class TransformStep(JobStep):
         start_ts = datetime.now().astimezone().isoformat()
         LOG.info(
             "Starting transformation",
-            step=self.name,
+            stage=self.name,
             type=job.context.transform.transform_type,
         )
         try:
@@ -45,8 +45,8 @@ class TransformStep(JobStep):
             extract_payload = job.manifest.extract
             if not extract_payload or extract_payload.file_count == 0:
                 LOG.info(
-                    "No data extracted in previous step. Skipping transformation.",
-                    step=self.name,
+                    "No data extracted in previous stage. Skipping transformation.",
+                    stage=self.name,
                 )
 
                 payload = TransformPayload(
@@ -59,7 +59,7 @@ class TransformStep(JobStep):
                     start_timestamp_utc=start_ts,
                 )
 
-                self.finalize(job, payload_data=msgspec.to_builtins(payload))
+                self.finalize(job, results=msgspec.to_builtins(payload))
                 return str(self._transit(job))
 
             # 1. Setup Context and Data Store
@@ -81,7 +81,7 @@ class TransformStep(JobStep):
             )
 
             # 2. Parallel Transformation via Ray Data
-            # This reads all part_*.parquet files from the extract step into a distributed dataset
+            # This reads all part_*.parquet files from the extract stage into a distributed dataset
             ds = ray.data.read_parquet(str(extract_path))
 
             # 3. Define the Distributed Task
@@ -106,10 +106,12 @@ class TransformStep(JobStep):
                 return processed_df.to_arrow()
 
             # 4. Execute the Map and Write
-            # map_batches handles the parallelism; write_parquet produces multiple files automatically
+            # map_batches handles the parallelism;
+            # write_parquet produces multiple files automatically
             transformed_ds = ds.map_batches(transform_batch, batch_format="pyarrow")
 
-            # Ray will write one file per task/partition (e.g., part_000.parquet, part_001.parquet)
+            # Ray will write one file per task/partition
+            # (e.g., part_000.parquet, part_001.parquet)
             transformed_ds.write_parquet(str(data_store))
 
             # Re-initialize a local transformer just for metadata/versioning info
@@ -140,7 +142,7 @@ class TransformStep(JobStep):
 
             LOG.info(
                 "Transformation complete",
-                step=self.name,
+                stage=self.name,
                 output_rows=output_rows,
                 output_folder=str(data_store.name),
             )
@@ -155,4 +157,5 @@ class TransformStep(JobStep):
 
         except Exception as e:
             self.finalize(job=job, exception=e)
+            raise
             raise

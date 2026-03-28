@@ -1,8 +1,8 @@
-import time
 import functools
-from typing import Callable, Any
-
+import time
+from collections.abc import Callable
 from enum import StrEnum
+from typing import Any
 
 
 class CircuitBreakerTripped(Exception):

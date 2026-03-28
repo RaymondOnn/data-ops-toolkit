@@ -27,7 +27,10 @@ class PostgresService(DatabaseSource, DatabaseSink):
         )
 
     def stage_data(
-        self, source_dir: Path, target_table: str, file_ext: str = "parquet"
+        self,
+        source_dir: Path,
+        target_table: str,
+        file_ext: str = "parquet",
     ) -> tuple[str, int]:
         staging_table = f"stg_{target_table}_{int(time.time())}"
         self.client.sql(f"CREATE UNLOGGED TABLE {staging_table} (LIKE {target_table})")
@@ -99,9 +102,9 @@ class PostgresService(DatabaseSource, DatabaseSink):
         self,
         reference: Path,
         other: Path,
-        exclude_columns: list[str] | None = None,
+        exclude_columns: set[str] | None = None,
     ) -> bool:
-        exclude_columns = exclude_columns or []
+        exclude_columns = exclude_columns or set()
         exclude_str = (
             f"EXCEPT ({', '.join(exclude_columns)})" if exclude_columns else ""
         )
@@ -129,5 +132,7 @@ class PostgresService(DatabaseSource, DatabaseSink):
             WHERE 1 = 0
         """
         LOG.info("Cloning table structure", source=reference, destination=other)
+        self.client.sql(sql)
+        self.client.sql(sql)
         self.client.sql(sql)
         self.client.sql(sql)

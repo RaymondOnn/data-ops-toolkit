@@ -11,7 +11,7 @@ The Ingestion Engine is built as a state-driven pipeline that moves data through
 1.  **Checkpoint-Driven State Machine**: 
     -   The workflow transitions through distinct states: `Start -> Raw -> Transform -> Audit -> Load -> Complete`.
     -   Data is persisted as **Parquet** files at each stage, creating immutable checkpoints.
-    -   **Resilience**: If a step fails, the orchestrator resumes from the last successful checkpoint, preventing redundant processing of upstream tasks.
+    -   **Resilience**: If a stage fails, the orchestrator resumes from the last successful checkpoint, preventing redundant processing of upstream tasks.
 
 2.  **Distributed Compute with Ray**:
     -   Leverages **Ray Actors** for parallel processing.
@@ -47,7 +47,7 @@ graph LR
 
 -   **Circuit Breakers**: Implemented via a shared `ServiceRegistry` backed by **Diskcache**. This prevents cascading failures when external services (DBs, APIs) are down.
 -   **Atomic Handoffs**: Ray workers perform atomic updates to the job state, ensuring that half-finished tasks are never mistakenly marked as complete.
--   **Zombie Job Recovery**: The orchestrator automatically detects stalled workers (via heartbeats) and re-queues them for retry.
+-   **Zombie Task Recovery**: The orchestrator automatically detects stalled workers (via heartbeats) and re-queues them for retry.
 -   **Signal-Based Syncing**: Uses signal files (`.sync`, `.done`) for inter-process communication, ensuring portability across filesystems.
 
 ## 🛠️ Technology Stack
@@ -105,4 +105,4 @@ python apps/ingestion/src/main.py ingest \
 
 ## 📈 Monitoring & Observability
 
-Jobs can be monitored via the generated `manifest.json` in the `storage/active/{job_id}_{run_id}` directory. This manifest provides real-time insights into the current step, status, and any error payloads.
+Tasks can be monitored via the generated `manifest.json` in the `storage/active/{job_id}_{run_id}` directory. This manifest provides real-time insights into the current stage, status, and any error payloads.

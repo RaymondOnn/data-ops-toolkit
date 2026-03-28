@@ -1,12 +1,12 @@
 import hashlib
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import msgspec
 import polars as pl
 import structlog
-
 from apps.ingestion.src.core.models.job.manifest import ExtractPayload, FileInfo
 from apps.ingestion.src.core.strategies.extract import (
     Reader,
@@ -14,28 +14,28 @@ from apps.ingestion.src.core.strategies.extract import (
     ReaderFactory,
 )
 from apps.ingestion.src.services.factory import ServiceFactory
-from apps.ingestion.src.utils.exceptions import JobBlocked
+from apps.ingestion.src.utils.exceptions import TaskBlocked
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreakerTripped
 
-from .base import JobStep
-from .enums import JobSteps
+from .base import ExecutionStage
+from .enums import StageName
 
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.models.job import Job
+    from apps.ingestion.src.core.models.job import Task
 
 
 LOG = structlog.getLogger(__name__)
 
 
-class ExtractStep(JobStep):
-    name = JobSteps.EXTRACT.label
+class ExtractStep(ExecutionStage):
+    name = StageName.EXTRACT.label
     manifest: ExtractPayload
 
-    def execute(self, job: "Job") -> str:
+    def execute(self, task: "Task") -> str:
 
-        job_ctx = job.context
-
+        task_ctx = task.context
+        start_ts = datetime.now().astimezone().isoformat()
         try:
             # 1. Prepare Reader Context
             # This object is serialized and sent to Ray workers.
@@ -43,22 +43,22 @@ class ExtractStep(JobStep):
             # are 'Contract-Aware'
 
             # Resolve partition_date in filter_sql
-            options = job_ctx.extract.source_params.copy()
+            options = task_ctx.extract.source_params.copy()
             if "filter_sql" in options:
                 # Suggestion: {partition_date} replaces {run_date}
                 options["filter_sql"] = options["filter_sql"].replace(
-                    "{partition_date}", job_ctx.run_date
+                    "{partition_date}", task_ctx.run_date
                 )
 
             ctx = ReaderContext(
-                source_type=job_ctx.extract.source_type,
-                source_identifier=job_ctx.extract.source_identifier,
-                num_partitions=job_ctx.extract.num_partitions or 10,
-                schema_items=job_ctx.extract.schema_items,
-                run_id=job.run_id,
-                run_date=job_ctx.run_date,
-                job_id=job.job_id,
-                workspace_dir=str(job.exec_ctx.workspace_dir),
+                source_type=task_ctx.extract.source_type,
+                source_identifier=task_ctx.extract.source_identifier,
+                num_partitions=task_ctx.extract.num_partitions or 10,
+                schema_items=task_ctx.extract.schema_items,
+                run_id=task.run_id,
+                run_date=task_ctx.run_date,
+                job_id=task.job_id,
+                workspace_dir=str(task.exec_ctx.workspace_dir),
                 options=options,
             )
 
@@ -66,22 +66,22 @@ class ExtractStep(JobStep):
             # Decision: DataReader.fetch uses the functional apply_schema_contract
             # inside the Ray workers to prevent double-handling.
             service = ServiceFactory.get_source(
-                job_ctx.extract.source_type, **job_ctx.extract.source_config
+                task_ctx.extract.source_type, **task_ctx.extract.source_config
             )
             reader: Reader = ReaderFactory.get_reader(ctx.source_type)
             LOG.info(
                 "Executing ingestion strategy",
-                step=self.name,
+                stage=self.name,
                 strategy=ctx.source_type,
                 source=ctx.source_identifier,
             )
 
             # 3. We create a temporary physical folder in 'data'
             data_store = (
-                job.exec_ctx.workspace_dir
+                task.exec_ctx.workspace_dir
                 / "data"
                 / self.name
-                / f"{job.job_id}_{int(time.time())}"
+                / f"{task.job_id}_{int(time.time())}"
             )
             data_store.mkdir(parents=True, exist_ok=True)
 
@@ -101,10 +101,10 @@ class ExtractStep(JobStep):
             if not extracted_files:
                 LOG.warning(
                     "Ingestion returned no data",
-                    step=self.name,
+                    stage=self.name,
                     source=ctx.source_identifier,
-                    job_id=job.job_id,
-                    run_id=job.run_id,
+                    job_id=task.job_id,
+                    run_id=task.run_id,
                 )
 
             file_infos = []
@@ -148,29 +148,30 @@ class ExtractStep(JobStep):
                 source_row_count=total_rows,
                 # Grab schema from the last file processed
                 schema_signature={k: str(v) for k, v in final_schema_dict.items()},
+                start_timestamp_utc=start_ts,
             )
 
             self.finalize(
-                job, data_folder=data_store, results=msgspec.to_builtins(payload)
+                task, data_folder=data_store, results=msgspec.to_builtins(payload)
             )
             LOG.info(
                 "Reader completed",
-                step=self.name,
+                stage=self.name,
                 file_count=len(file_infos),
                 total_rows=total_rows,
             )
 
             # 4. State Transition
-            return str(self._transit(job))
+            return str(self._transit(task))
         except ClientCantConnect as ccc:
-            LOG.error("Halt by client connection.", step=self.name, error=str(ccc))
-            raise JobBlocked(str(ccc)) from ccc
+            LOG.error("Halt by client connection.", stage=self.name, error=str(ccc))
+            raise TaskBlocked(str(ccc)) from ccc
         except CircuitBreakerTripped as cb:
-            LOG.error("Halt by circuit breaker.", step=self.name, error=str(cb))
+            LOG.error("Halt by circuit breaker.", stage=self.name, error=str(cb))
             raise
         except Exception as e:
-            LOG.error("Extract Step failed", step=self.name, error=str(e))
-            self.finalize(job, exception=e)
+            LOG.error("Extract Step failed", stage=self.name, error=str(e))
+            self.finalize(task, exception=e)
             raise
 
     def _calculate_checksum(self, path: Path) -> str:
@@ -178,21 +179,21 @@ class ExtractStep(JobStep):
         Calculate the MD5 checksum of a file.
         Important to ensure data integrity and can be used for deduplication
         """
-        LOG.debug("Calculating checksum", step=self.name, file=str(path))
+        LOG.debug("Calculating checksum", stage=self.name, file=str(path))
         hash_md5 = hashlib.md5()
         with path.open("rb") as f:
             for chunk in iter(lambda: f.read(4096), b""):
                 hash_md5.update(chunk)
         return hash_md5.hexdigest()
 
-    def _merge_schemas(self, schemas: list[dict[str, str]]) -> dict[str, str]:
+    def _merge_schemas(self, schemas: set[dict[str, str]]) -> dict[str, str]:
         """
         Unions all schemas found in the source files to create a
-        master schema for the Transform step.
+        master schema for the Transform stage.
         """
         LOG.debug(
             "Merging schemas from extracted files",
-            step=self.name,
+            stage=self.name,
             file_count=len(schemas),
         )
         merged = {}
@@ -201,4 +202,13 @@ class ExtractStep(JobStep):
                 # In a real engine, you might add logic to handle
                 # type conflicts (e.g., Float vs Int)
                 merged[col] = str(dtype)
+        return merged
+        return merged
+        return merged
+        return merged
+        return merged
+        return merged
+        return merged
+        return merged
+        return merged
         return merged

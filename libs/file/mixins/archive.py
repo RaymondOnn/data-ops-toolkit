@@ -11,7 +11,7 @@ LOG = logging.getLogger(__name__)
 
 class StandardArchiveMixin:
     """
-    Handles structured archiving for Multi-Dataset Jobs.
+    Handles structured archiving for Multi-Dataset Tasks.
     Structure: archive/{job_id}/{dataset_name}/{YYYY}/{MM}/{DD}/{category}/
     """
 

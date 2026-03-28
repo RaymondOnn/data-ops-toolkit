@@ -3,22 +3,22 @@ from pathlib import Path
 import msgspec
 import structlog
 
-from apps.ingestion.src.core.contexts import JobContext, JobContextBuilder
+from apps.ingestion.src.core.contexts import TaskContext, TaskContextBuilder
 from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.utils.constants import APP_CONFIG_ROOT
 
 LOG = structlog.getLogger(__name__)
 
 
-def get_job_ctx(job_id: str, dataset_id: str) -> JobContext:
-    builder = JobContextBuilder()
-    return builder.build(job_id=job_id, dataset_id=dataset_id)
+def get_task_ctx(job_id: str, dataset_id: str) -> TaskContext:
+    builder = TaskContextBuilder()
+    return next(iter(builder.build(job_id=job_id, dataset_id=dataset_id)))
 
 
 def run_skeleton_clone(job_id: str, dataset_id: str, target_path: str):
     """Execution logic for cloning."""
 
-    ctx = get_job_ctx(job_id, dataset_id)
+    ctx = get_task_ctx(job_id, dataset_id)
 
     # The factory uses the config ALREADY loaded in ctx
     cloned_identifier = f"{ctx.load.sink_identifier}_clone"
@@ -27,11 +27,11 @@ def run_skeleton_clone(job_id: str, dataset_id: str, target_path: str):
 
 
 def run_comparison(
-    job_id: str, dataset_id: str, feature_path: str, ignore_cols: list[str]
+    job_id: str, dataset_id: str, feature_path: str, ignore_cols: set[str]
 ) -> bool:
     """Execution logic for equality check."""
 
-    ctx = get_job_ctx(job_id, dataset_id)
+    ctx = get_task_ctx(job_id, dataset_id)
 
     cloned_identifier = f"{ctx.load.sink_identifier}_clone"
     service = ServiceFactory.get_sink(ctx.load.sink_type, **ctx.load.sink_config)
@@ -54,7 +54,7 @@ class DatasetSpec(msgspec.Struct, rename="lower"):
     transform: TransformSpec | None = None
 
 
-class JobSpec(msgspec.Struct, rename="lower"):
+class TaskSpec(msgspec.Struct, rename="lower"):
     default: DatasetSpec | None = None
     datasets: dict[str, DatasetSpec] = {}
 
@@ -62,7 +62,7 @@ class JobSpec(msgspec.Struct, rename="lower"):
 def find_affected_peers(
     target_job: str, target_ds: str, config_root: Path = APP_CONFIG_ROOT
 ):
-    builder = JobContextBuilder()
+    builder = TaskContextBuilder()
 
     # 1. Resolve Target Identity via Builder
     target_ctx = builder.build(job_id=target_job, dataset_id=target_ds)
@@ -83,8 +83,8 @@ def find_affected_peers(
                 continue
 
             # 3. Schema-constrained Decode
-            # msgspec ignores keys not defined in JobConfig
-            cfg = msgspec.yaml.decode(raw_data, type=JobSpec)
+            # msgspec ignores keys not defined in TaskConfig
+            cfg = msgspec.yaml.decode(raw_data, type=TaskSpec)
 
             job_id = config_path.parent.name
 
@@ -115,4 +115,8 @@ def find_affected_peers(
         except Exception:
             continue
 
+    return peers
+    return peers
+    return peers
+    return peers
     return peers

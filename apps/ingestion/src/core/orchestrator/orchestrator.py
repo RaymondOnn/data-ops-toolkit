@@ -1,33 +1,35 @@
 import sys
 import time
+from collections import Counter
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 import structlog
 from nanoid import generate
 
-from apps.ingestion.src.core.contexts import JobContextBuilder
-from apps.ingestion.src.core.models.job import Job, JobStatus
-from apps.ingestion.src.core.models.steps.enums import JobSteps
-from apps.ingestion.src.core.orchestrator.engine import IngestionEngine
-from apps.ingestion.src.core.orchestrator.lifecycle import LifecycleManager
-from apps.ingestion.src.core.orchestrator.signals import SignalProcessor
-from apps.ingestion.src.core.orchestrator.state import StateStore
-from apps.ingestion.src.core.orchestrator.trigger import (
-    FileTriggerEvent,
-    TimeTriggerEvent,
-    TriggerEvent,
-)
+from apps.ingestion.src.core.contexts import TaskContextBuilder
+from apps.ingestion.src.core.models.job import ExecutionStatus, Task
+from apps.ingestion.src.core.models.stages.enums import StageName
 from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.utils.constants import ALWAYS_ON_MODE
 from libs.resilience.heartbeat import Heartbeat
 
+from .engine import IngestionEngine
+from .lifecycle import LifecycleManager
+from .signals import SignalProcessor
+from .state import StateStore
+from .trigger import FileTriggerEvent, TimeTriggerEvent, TriggerEvent
+
+if TYPE_CHECKING:
+    from .enums import TaskMetadata
+
 LOG = structlog.getLogger(__name__)
 PID_FILE = Path(".daemon.pid")
 MISFIRE_GRACE_PERIOD_SECS = 3600
+DEFAULT_SYNC_TIMEOUT_SECS = 1800  # 1 Hour default
 
 
 def generate_run_id() -> str:
@@ -45,11 +47,11 @@ def generate_run_id() -> str:
 # TODO: Backfill Runs
 # TODO: Regression Testing
 # TODO: Feature Toggles
-# TODO: Cancel Job
+# TODO: Cancel Task
 
 
 class Orchestrator:
-    def __init__(self, builder: JobContextBuilder):
+    def __init__(self, builder: TaskContextBuilder):
         self.builder = builder
         self.exec_ctx = builder.get_execution_context()
 
@@ -129,7 +131,7 @@ class Orchestrator:
                     active_definitions = self.state_store.get_latest_state(
                         force_refresh=True
                     )
-                    self._evaluate_triggers(list(active_definitions.values()))
+                    self._evaluate_triggers(set(active_definitions.values()))
                     self.timers["db_poll"] = int(now)
 
                 # 2. NEW: Sync the StateStore to Postgres
@@ -138,7 +140,7 @@ class Orchestrator:
                     self.state_store.flush()
                     self.timers["state_sync"] = int(now)
 
-                # # --- 3. Job Triggering (Every 10s) ---
+                # # --- 3. Task Triggering (Every 10s) ---
                 # if now - self.last_job_trigger > 10:
                 #     self.last_job_trigger = now
 
@@ -166,10 +168,11 @@ class Orchestrator:
         dataset_id: str,
         run_date_str: str | None = None,
         overrides: dict[str, Any] | None = None,
+        timeout: int = DEFAULT_SYNC_TIMEOUT_SECS,
     ) -> None:
         """The Dumb Trigger Mode logic"""
         if not overrides:
-            raise ValueError("Dumb mode requires a valid JobConfig.")
+            raise ValueError("Dumb mode requires a valid TaskConfig.")
 
         run_ids: set[str] = self._trigger_job(
             job_id,
@@ -185,59 +188,78 @@ class Orchestrator:
         # 2. Block until this specific job is finished
         LOG.info("Monitoring job until completion", job_id=job_id)
 
+        start_time = time.time()
+
         while True:
             # Run the engine cycle to drive the job forward
             self.engine._process_jobs()
             self.signals._process_worker_signals(run_ids)
-            
-            # Check if all triggered run_ids are finished
-            finished_count = 0
+
+            # Check for global timeout
+            if time.time() - start_time > timeout:
+                LOG.critical(
+                    "Synchronous task timed out", job_id=job_id, timeout_sec=timeout
+                )
+                raise TimeoutError(f"Task {job_id} exceeded sync timeout of {timeout}s")
+
+            # 3. Categorize the status of all triggered runs
+            run_stats = Counter()
             for rid in run_ids:
-                if self.is_job_finished(job_id, dataset_id, run_date_str, rid):
-                    finished_count += 1
-            if finished_count == len(run_ids):
-                LOG.info("All triggered units finished successfully", job_id=job_id)
+                status = self._get_run_status(job_id, dataset_id, run_date_str, rid)
+                run_stats[status] += 1
+
+            # 4. Exit condition: Total Terminal (Success + Failure) == Total Triggered
+            terminal_count = run_stats["success"] + run_stats["failed"]
+            if terminal_count == len(run_ids):
+                LOG.info(
+                    "Synchronous monitoring loop exited",
+                    job_id=job_id,
+                    total=len(run_ids),
+                    success=run_stats["success"],
+                    failed=run_stats["failed"],
+                )
                 break
-            
+
             print(
                 f"Waiting for job to finish: {datetime.now().astimezone().isoformat()}"
             )
             time.sleep(2)
 
-    def is_job_finished(
+    def _get_run_status(
         self,
         job_id: str,
         dataset_id: str,
         run_date: str | None,
         run_id: str | None = None,
-    ) -> bool:
+    ) -> str:
         """
-        Checks if a specific job run is still active in the engine's cache.
-        In dumb trigger mode, this is the primary source of truth for job completion.
+        Determines the detailed runtime status of a specific run.
+        Returns: 'active' | 'success' | 'failed'
         """
         if not run_id:
-            LOG.warning(
-                "is_job_finished called without a specific run_id. "
-                "Cannot determine status precisely."
-            )
-            return True  # Assume finished if we can't track it.
+            return "success"  # Unknown/Missing treated as done
 
-        # Construct the possible keys for the job in the cache
-        # The key format is "{step}:{job_id}:{dataset_id}:{run_date}:{run_id}"
-        # We need to check if ANY step for this specific run_id is still in the cache.
-        for step_enum in JobSteps:
-            key = f"{step_enum.label}:{job_id}:{dataset_id}:{run_date}:{run_id}"
-            if key in self.engine.cache:
-                # If any step for this run_id is still in the cache, it's not finished.
-                return False
+        identifier = self.exec_ctx.get_task_identifier(
+            job_id, dataset_id, run_date or ""
+        )
+        for stage_enum in StageName:
+            key = f"{stage_enum.label}:{identifier}:{run_id}"
 
-        # If no keys for this run_id are found in the cache, it's finished.
-        LOG.debug("Job run not found in cache, assuming finished.", run_id=run_id)
-        return True
+            meta: TaskMetadata = self.engine.cache.get(key)
+            if meta:
+                if hasattr(meta, "status") and meta.status in [
+                    ExecutionStatus.FAILED.value,
+                    ExecutionStatus.EXPIRED.value,
+                ]:
+                    return "failed"
+                return "active"
+
+        # If not found in cache at all, it was successfully popped/finished
+        return "success"
 
     def _evaluate_triggers(
         self,
-        job_records: list[dict[str, Any]],
+        job_records: set[dict[str, Any]],
     ) -> None:
         """
         Evaluates each job against its trigger type and
@@ -346,20 +368,24 @@ class Orchestrator:
         log = LOG.bind(job_id=job_id, dataset_id=dataset_id)
         run_ids = set()
 
-        log.debug("Building job contexts", run_date=run_date_str)
-        # 1. Get the list of dataset configurations for this Job ID
+        log.debug("Building task contexts", run_date=run_date_str)
+        # 1. Get the list of dataset configurations for this Task ID
         # Uses the injected builder which already has app_settings loaded
-        job_contexts = self.builder.build(
+        task_contexts = self.builder.build(
             job_id=job_id,
             dataset_id=dataset_id,
             run_date_str=run_date_str,
             overrides=overrides,
         )
 
-        for job_ctx in job_contexts:
+        for task_ctx in task_contexts:
             # B. Generate the Unique Identity for this Run
             run_id = generate_run_id()
-            identifier = f"{job_ctx.job_id}:{job_ctx.dataset_id}:{run_date_str}"
+            identifier = self.exec_ctx.get_task_identifier(
+                job_id=task_ctx.job_id,
+                dataset_id=task_ctx.dataset_id,
+                run_date=run_date_str or "",
+            )
             prefix = f"{identifier}:{run_id}"
 
             # C. Create the Folder Structure (Composite Key + Run ID)
@@ -367,16 +393,16 @@ class Orchestrator:
                 "Provisioning new run",
                 run_id=run_id,
                 identifier=identifier,
-                from_step=job_ctx.from_step,
+                from_stage=task_ctx.from_stage,
             )
             # Path: storage/active/
             active_root = self.exec_ctx.active_path
             active_root.mkdir(parents=True, exist_ok=True)
 
-            # E. Freeze the Job Context (The instructions for the workers)
+            # E. Freeze the Task Context (The instructions for the workers)
             config_path = active_root / f"{prefix}_config.json"
             with config_path.open("wb") as f:
-                f.write(msgspec.json.encode(job_ctx))
+                f.write(msgspec.json.encode(task_ctx))
 
             # 4. Queue to Engine (Immediate move to DiskCache)
             self.engine.queue_jobs(
@@ -386,40 +412,40 @@ class Orchestrator:
             )
 
             # 5. Optional: Update DB so it doesn't trigger again immediately
-            self.state_store.update_status(job_id, JobStatus.QUEUED)
+            self.state_store.update_status(job_id, ExecutionStatus.QUEUED)
             self.timers["job_trigger"] = time.time()
             run_ids.add(run_id)
 
         return run_ids
 
     def _terminate_job(
-        self, job: Job, status: JobStatus, reason: str | None = None
+        self, task: Task, status: ExecutionStatus, reason: str | None = None
     ) -> None:
         """
         Controlled Crash Handler.
-        Uses the Job's internal status updater to ensure consistency.
+        Uses the Task's internal status updater to ensure consistency.
         """
-        LOG.error("Terminating job", job_id=job.job_id, status=status, reason=reason)
+        LOG.error("Terminating job", job_id=task.job_id, status=status, reason=reason)
 
-        # 1. Update the Job state
+        # 1. Update the Task state
         # We pass the reason as the payload so it gets serialized into the manifest
         # update_manifest handles the msgspec encoding and file write internally
-        job.update_manifest(
+        task.update_manifest(
             {
-                "job_status": status,
-                "current_step": JobStatus.CANCELLED,
+                "status": status,
+                "current_stage": ExecutionStatus.CANCELLED,
             }
         )
-        job.request_status_sync(deep_sync=True)
+        task.request_status_sync(deep_sync=True)
 
-        # 2. Sync the StateStore
+        # jo 2. Sync the StateStore
         # Since request_status_sync created the .done file, we tell the StateStore
         # to perform its final deep sync to pull the failure details into the DB.
-        self.state_store.sync_from_folder(job.job_id, job.run_id)
+        self.state_store.sync_from_folder(task.job_id, task.run_id)
 
         # 3. Cleanup logic (Optional: move to failed or delete)
-        if status == JobStatus.EXPIRED:
-            self.lifecycle._cleanup_workspace(job.run_id)
+        if status == ExecutionStatus.EXPIRED:
+            self.lifecycle._cleanup_workspace(task.run_id)
 
 
 def create_orchestrator(app_cfg_path: str | None = None) -> Orchestrator:
@@ -428,7 +454,10 @@ def create_orchestrator(app_cfg_path: str | None = None) -> Orchestrator:
     Resolves configuration first to properly initialize services.
     """
     # 1. Initialize Builder (loads global app.yaml)
-    builder = JobContextBuilder(app_cfg_path=app_cfg_path)
+    builder = TaskContextBuilder(app_cfg_path=app_cfg_path)
 
     # 2. Return fully wired Orchestrator (It will resolve its own services)
+    return Orchestrator(builder=builder)
+    return Orchestrator(builder=builder)
+    return Orchestrator(builder=builder)
     return Orchestrator(builder=builder)

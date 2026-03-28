@@ -3,7 +3,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
-
 from apps.ingestion.src.services.database.base import DatabaseSink, DatabaseSource
 from apps.ingestion.src.services.factory import ServiceFactory
 from libs.database.clients.clickhouse import ClickhouseClient
@@ -28,7 +27,10 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         )
 
     def stage_data(
-        self, source_dir: Path, target_table: str, file_ext: str = "parquet"
+        self,
+        source_dir: Path,
+        target_table: str,
+        file_ext: str = "parquet",
     ) -> tuple[str, int]:
         staging_table = f"stg_{target_table}_{int(time.time())}"
         try:
@@ -88,9 +90,9 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         self,
         reference: Path,
         other: Path,
-        exclude_columns: list[str] | None = None,
+        exclude_columns: set[str] | None = None,
     ) -> bool:
-        exclude_columns = exclude_columns or []
+        exclude_columns = exclude_columns or set()
         exclude_str = (
             f"EXCEPT ({', '.join(exclude_columns)})" if exclude_columns else ""
         )

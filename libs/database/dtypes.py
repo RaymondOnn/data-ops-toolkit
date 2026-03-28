@@ -72,4 +72,4 @@ class TypeResolver:
         system_map = cls._REGISTRY.get(source_system.lower(), {})
         group = system_map.get(db_type)
         # Default to Utf8 if type is unknown
-        return cls._TO_POLARS.get(group, pl.Utf8)
+        return cls._TO_POLARS.get(group)

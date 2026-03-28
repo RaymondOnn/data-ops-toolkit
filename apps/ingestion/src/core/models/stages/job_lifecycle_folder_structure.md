@@ -1,4 +1,4 @@
-# Job Lifecycle Folder Structure & Process
+# Task Lifecycle Folder Structure & Process
 
 This document outlines the folder-based state management that powers the job lifecycle inside the ingestion orchestrator. The pipeline uses the file system as a definitive source of truth to manage running jobs, recover from crashes, and signal progress.
 
@@ -9,15 +9,15 @@ The core ingestion engine relies on a standardized `workspace_dir` (configured b
 ```text
 workspace_dir/
 ├── active/        # In-flight jobs and their single-source-of-truth metadata.
-├── data/          # Persistent/physical data vaults for staging data between steps.
+├── data/          # Persistent/physical data vaults for staging data between stages.
 ├── signals/       # Zero-byte files acting as event notifications.
-├── HOLD/          # Jobs intentionally paused (e.g., waiting for external locks).
-└── FAILED/        # Jobs that have crashed and await manual intervention or automatic retries.
+├── HOLD/          # Tasks intentionally paused (e.g., waiting for external locks).
+└── FAILED/        # Tasks that have crashed and await manual intervention or automatic retries.
 ```
 
 ---
 
-## 1. Job Initialization
+## 1. Task Initialization
 
 When a new ingestion job is triggered, the engine provisions a dedicated isolated space for its metadata in the `active/` directory. 
 
@@ -25,46 +25,46 @@ When a new ingestion job is triggered, the engine provisions a dedicated isolate
 `active/{job_id}:{dataset_id}_{run_date}/{run_id}/`
 
 **Initial Files Created:**
-1. `manifest.json`: Single source of truth tracking the current state, step, and status. It is atomically updated throughout the job.
+1. `manifest.json`: Single source of truth tracking the current state, stage, and status. It is atomically updated throughout the job.
 2. `*_config.json`: The specific runtime configuration for the job is moved from the active root into this dedicated run folder.
 
 ---
 
 ## 2. Execution and State Transitions
 
-Jobs progress sequentially through an expected order of steps (e.g., `START` → `EXTRACT` → `TRANSFORM` → `LOAD` → `AUDIT` → `COMPLETE`).
+Tasks progress sequentially through an expected order of stages (e.g., `START` → `EXTRACT` → `TRANSFORM` → `LOAD` → `AUDIT` → `COMPLETE`).
 
-During each step execution:
-1. **Check-In (`job.check_in`):** The orchestrator atomically overwrites `manifest.json` setting `status: "RUNNING"` and the `current_step`.
+During each stage execution:
+1. **Check-In (`job.check_in`):** The orchestrator atomically overwrites `manifest.json` setting `status: "RUNNING"` and the `current_stage`.
 2. **Data Storage:** Data processing produces physical files. These large files are strictly stored in the `data/` vault to keep the metadata directories lightweight.
    **Data Folder Naming Convention:**
-   `data/{step_name}/{job_id}_{unix_timestamp}/`
+   `data/{stage_name}/{job_id}_{unix_timestamp}/`
    *Example:* `data/extract/my_job_1710990200/` or `data/transform/my_job_1710990250/`
-3. **Completion Marker:** As soon as a step cleanly finishes, the system creates a symlink or subdirectory marker in the active folder named identically to the step (e.g. `active/.../{run_id}/extract`) pointing to the physical data vault. The Engine checks for the existence of this localized marker when recovering from orchestrator crashes to guarantee a step formally reached the finish line.
+3. **Completion Marker:** As soon as a stage cleanly finishes, the system creates a symlink or subdirectory marker in the active folder named identically to the stage (e.g. `active/.../{run_id}/extract`) pointing to the physical data vault. The Engine checks for the existence of this localized marker when recovering from orchestrator crashes to guarantee a stage formally reached the finish line.
 4. **Signals:** The job drops zero-byte files inside `signals/{run_id}.sync` or `{run_id}.done` to loosely ping observers about the state change.
 
 ```mermaid
 sequenceDiagram
     participant O as Orchestrator / Worker
     participant AR as Active Root (active/)
-    participant AJ as Job Folder (active/{job_id...}/)
+    participant AJ as Task Folder (active/{job_id...}/)
     participant S as Signals (signals/)
     participant D as Data Vault (data/)
 
     Note over O,AR: Phase 1: Provisioning
     O->>AR: Seed {job_id}_{run_id}_config.json
     
-    Note over O,AJ: Phase 2: Job Initialization (Lazy Folder Creation)
+    Note over O,AJ: Phase 2: Task Initialization (Lazy Folder Creation)
     O->>AJ: Create Folder active/{job_id}:{dataset}_{date}/{run_id}
     O->>AJ: Create / Seed manifest.json (status=RUNNING)
     O->>AR: Move config.json -> AJ: {job_id}_{run_id}_config.json
     
     loop For Every Step (Extract, Transform, Load...)
         Note over O,AJ: Step Check-in
-        O->>AJ: Update manifest.json (current_step=NAME, status=RUNNING)
+        O->>AJ: Update manifest.json (current_stage=NAME, status=RUNNING)
         
         Note over O,D: Processing Stage Logic...
-        O->>D: Write payload to data/step_dir/
+        O->>D: Write payload to data/stage_dir/
         
         Note over O,AJ: Step Sign-off (Atomic Write)
         O->>AJ: Write directory marker (e.g., /extract)
@@ -87,7 +87,7 @@ When the continuous forward progression breaks or ceases, the job folder relocat
 
 ### Interruption (Hold and Failure)
 
-If a step results in an unhandled exception or encounters an intentional barrier (e.g., hitting rate limits, locked dependency), the active job folder is physically relocated into a corresponding root:
+If a stage results in an unhandled exception or encounters an intentional barrier (e.g., hitting rate limits, locked dependency), the active job folder is physically relocated into a corresponding root:
 
 * **HOLD:** `HOLD/{job_id}/{run_id}/`
 * **FAILED:** `FAILED/{job_id}/{run_id}/`
@@ -104,7 +104,7 @@ If a job reaches `COMPLETE`, or has stagnated beyond its TTL (Time-To-Live), the
 
 ## 4. End of Lifecycle: The `CompleteStep`
 
-Assuming a job runs successfully through the entire pipeline and finishes its final step (`CompleteStep`), the system reaches a "Zero-Footprint" (or minimized footprint) state for that run. 
+Assuming a job runs successfully through the entire pipeline and finishes its final stage (`CompleteStep`), the system reaches a "Zero-Footprint" (or minimized footprint) state for that run. 
 
 **What you will see on disk immediately after `CompleteStep`:**
 
@@ -137,12 +137,12 @@ workspace_dir/
 
 ```mermaid
 graph TD
-    Trigger((Job Triggered)) --> Queue[Diskcache: PENDING]
+    Trigger((Task Triggered)) --> Queue[Diskcache: PENDING]
     
     subgraph "Execution (active/)"
         Queue --> Worker[Worker Picks Up: PROVISIONING]
-        Worker --> Init[Job.from_folder: Rehydrate]
-        Init --> Process[Job.execute: RUNNING]
+        Worker --> Init[Task.from_folder: Rehydrate]
+        Init --> Process[Task.execute: RUNNING]
         Process --> Mark[Marker + Update Manifest: SUCCESS]
     end
 

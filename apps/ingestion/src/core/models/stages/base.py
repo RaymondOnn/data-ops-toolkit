@@ -6,34 +6,35 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 import structlog
+
 from apps.ingestion.src.core.models.job.manifest import ErrorPayload
-from apps.ingestion.src.core.models.steps.enums import STEP_ORDER, JobSteps
+from apps.ingestion.src.core.models.stages.enums import EXEC_STAGES, StageName
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreakerTripped
 
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.models.job import Job
+    from apps.ingestion.src.core.models.job import Task
 
 LOG = structlog.getLogger(__name__)
 
 
-class JobStep(ABC):
-    """Base class for JobStage classes."""
+class ExecutionStage(ABC):
+    """Base class for TaskStage classes."""
 
-    def __init__(self, step: JobSteps) -> None:
-        self.name = step.label
-        self.bitmask = step.bitmask
+    def __init__(self, stage: StageName) -> None:
+        self.name = stage.label
+        self.bitmask = stage.bitmask
 
-    def get_step(self, offset: int) -> str:
-        idx = STEP_ORDER.index(self.name)
-        if 0 <= idx + offset < len(STEP_ORDER):
-            return STEP_ORDER[idx + offset]
+    def get_stage(self, offset: int) -> str:
+        idx = EXEC_STAGES.index(self.name)
+        if 0 <= idx + offset < len(EXEC_STAGES):
+            return EXEC_STAGES[idx + offset]
 
         raise ValueError(f"Invalid offset: {offset}")
 
     @abstractmethod
-    def execute(self, job: "Job") -> str:
-        """Execute the current JobStage with the given engine and dataframe.
+    def execute(self, job: "Task") -> str:
+        """Execute the current TaskStage with the given engine and dataframe.
 
         :param engine: The IngestionEngine instance.
         :type engine: IngestionEngine
@@ -42,25 +43,25 @@ class JobStep(ABC):
         """
         raise NotImplementedError
 
-    def _transit(self, job: "Job") -> str:
-        """Transit the Job instance to the next stage."""
-        from apps.ingestion.src.core.models.steps.utils import get_step_class_by_name
+    def _transit(self, job: "Task") -> str:
+        """Transit the Task instance to the next stage."""
+        from apps.ingestion.src.core.models.stages.utils import get_stage_class_by_name
 
-        next_step = JobSteps.next_step(self.name)
-        if next_step:
-            job.set_step(get_step_class_by_name(next_step.label))
-            return next_step.label
+        next_stage = StageName.next(self.name)
+        if next_stage:
+            job.set_stage(get_stage_class_by_name(next_stage.label))
+            return next_stage.label
         return "FINISH"
 
-    def move_to_folder(self, job: "Job", category: str) -> None:
+    def move_to_folder(self, job: "Task", category: str) -> None:
         """
         Physically moves the metadata folder to HOLD or QUARANTINE.
         category: "HOLD" | "QUARANTINE" | "DONE"
         """
-        base_dir = Path(job.exec_ctx.workspace_dir)
-
-        # Target: base/HOLD/job_id/run_id
-        new_path = base_dir / category / f"{job.job_id}_{job.run_id}"
+        # Use central helper from context
+        new_path = job.exec_ctx.get_run_path(
+            job.job_id, job.dataset_id, job.run_date, job.run_id, category=category
+        )
 
         # Ensure parent structure exists
         new_path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,7 +76,7 @@ class JobStep(ABC):
 
     def finalize(
         self,
-        job: "Job",
+        job: "Task",
         data_folder: Path | None = None,
         results: dict[str, Any] | None = None,
         exception: Exception | None = None,
@@ -83,7 +84,7 @@ class JobStep(ABC):
         """
         DECISION: Deterministic Paths & Symlinking.
         We avoid searching for 'latest' folders by using a static symlink
-        at active/{job_id}/{step_name}.
+        at active/{job_id}/{stage_name}.
         """
         from apps.ingestion.src.core.models.states.terminal import (
             FailedState,
@@ -100,7 +101,7 @@ class JobStep(ABC):
             if active_link.exists() or active_link.is_symlink():
                 active_link.unlink()
 
-            # Pointer: active/job_id/run_id/step -> ../../../data/step/folder
+            # Pointer: active/job_id/run_id/stage -> ../../../data/stage/folder
             relative_target = (
                 Path("..") / ".." / ".." / "data" / self.name / data_folder.name
             )
@@ -110,7 +111,7 @@ class JobStep(ABC):
         if exception:
             # Create the error payload
             error_payload = ErrorPayload(
-                step=self.name,
+                stage=self.name,
                 error_type=type(exception).__name__,
                 message=str(exception),
                 traceback=traceback.format_exc(),
@@ -121,10 +122,10 @@ class JobStep(ABC):
             # 2. ROUTING LOGIC (The "Sorting Hat")
             if isinstance(exception, (CircuitBreakerTripped, ClientCantConnect)):
                 # If we fail during CompleteStep, it's Deferred (Ready to wrap up)
-                # Otherwise, it's Blocked (Needs to re-run current step)
-                # data["job_status"] = (
-                #     JobStatus.DEFERRED if self.name == "CompleteStep"
-                #     else JobStatus.BLOCKED
+                # Otherwise, it's Blocked (Needs to re-run current stage)
+                # data["status"] = (
+                #     ExecutionStatus.DEFERRED if self.name == "CompleteStep"
+                #     else ExecutionStatus.BLOCKED
                 # )
 
                 HoldState(job).on_enter(data=error)
@@ -135,7 +136,7 @@ class JobStep(ABC):
 
             # 2.5 Signal change BEFORE moving the folder to avoid timing bugs
             # where the Orchestrator looks in 'active' while the move is in progress.
-            job.request_status_sync(deep_sync=True)
+            job.request_status_sync(is_failure=True)
 
             self.move_to_folder(job, target_category)
         else:
@@ -143,8 +144,8 @@ class JobStep(ABC):
             current_mask = data["bitmask"]
             new_mask = current_mask | self.bitmask
 
-            next_step = JobSteps.next_step(self.name)
-            reached_target = job.context.to_step == self.name
+            next_stage = StageName.next(self.name)
+            reached_target = job.context.to_stage == self.name
 
             if new_mask.is_fully_complete() or reached_target:
                 SuccessState(job).on_enter(
@@ -154,22 +155,25 @@ class JobStep(ABC):
                     }
                 )
                 LOG.info(
-                    "Job reached target state",
+                    "Task reached target state",
                     job_id=job.job_id,
-                    target=job.target_step,
+                    target=job.target_stage,
                 )
             else:
-                # Persist step results and bitmask for intermediate steps
+                # Persist stage results and bitmask for intermediate stages
                 job.update_manifest({self.name: results, "bitmask": new_mask.value})
 
             # Continue the chain (The Orchestrator will pick this up in the next scan)
-            if next_step:
+            if next_stage:
                 LOG.info(
-                    "Job progressing to next step",
-                    step=self.name,
+                    "Task progressing to next stage",
+                    stage=self.name,
                     job_id=job.job_id,
-                    next=next_step.label,
+                    next=next_stage.label,
                 )
 
             # 5. ATOMIC SWAP (Success Case)
+            job.request_status_sync()
+            job.request_status_sync()
+            job.request_status_sync()
             job.request_status_sync()

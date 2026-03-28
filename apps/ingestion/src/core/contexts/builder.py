@@ -8,7 +8,7 @@ import structlog
 from dynaconf import Dynaconf
 
 from apps.ingestion.src.core.contexts.execution import ExecutionContext, ExecutionMode
-from apps.ingestion.src.core.contexts.job import JobContext
+from apps.ingestion.src.core.contexts.job import TaskContext
 from apps.ingestion.src.utils.constants import APP_CONFIG_ROOT, APP_CURRENT_ENV
 
 LOG = structlog.get_logger()
@@ -29,7 +29,7 @@ def parse_set_options(settings: list[str] | None) -> dict[str, Any]:
         - Scoped: [dataset_name]:[key]=[value]
 
     Args:
-        settings: A list of strings provided via the '--set' or '-s' CLI flag.
+        settings: A set of strings provided via the '--set' or '-s' CLI flag.
 
     Returns:
         A dictionary with a mandatory '_global' key and optional dataset keys.
@@ -71,7 +71,7 @@ def parse_set_options(settings: list[str] | None) -> dict[str, Any]:
     return result
 
 
-class JobContextBuilder:
+class TaskContextBuilder:
     def __init__(self, app_cfg_path: str | None = None, env: str = APP_CURRENT_ENV):
         # 1. Initialize Dynaconf with the global app config and environment overrides
         self.app_cfg_path = app_cfg_path or APP_DEFAULT_CONFIG
@@ -90,7 +90,7 @@ class JobContextBuilder:
         LOG.debug(f"DEBUG: Config Path Absolute: {Path(self.app_cfg_path).resolve()}")
         LOG.debug(f"DEBUG: File Exists: {Path(self.app_cfg_path).exists()}")
         LOG.debug(
-            f"DEBUG: Loaded Keys: {', '.join(filter(lambda x: 'DYNACONF' not in x, list(self.app_settings.keys())))}"
+            f"DEBUG: Loaded Keys: {', '.join(filter(lambda x: 'DYNACONF' not in x, set(self.app_settings.keys())))}"
         )
 
         try:
@@ -130,7 +130,7 @@ class JobContextBuilder:
         self, settings: Dynaconf, ref_key: str, dataset_id: str
     ) -> dict:
         # Search hierarchy for service_ref:
-        # Dataset (Active -> Default) > Job (Active -> Default)
+        # Dataset (Active -> Default) > Task (Active -> Default)
         ref = (
             settings.get(f"datasets.{dataset_id}.{ref_key}.service_ref")
             or settings.from_env("default").get(
@@ -163,7 +163,7 @@ class JobContextBuilder:
                 )
                 return svc_dict
 
-            # 2. Try Job-level config.yaml services block
+            # 2. Try Task-level config.yaml services block
             job_level_def = settings.get(f"services.{ref}") or settings.from_env(
                 "default"
             ).get(f"services.{ref}")
@@ -183,7 +183,7 @@ class JobContextBuilder:
             )
 
         # Fallback to inline config block:
-        # Dataset (Active -> Default) > Job (Active -> Default)
+        # Dataset (Active -> Default) > Task (Active -> Default)
         return dict(
             settings.get(f"datasets.{dataset_id}.{ref_key}.config")
             or settings.from_env("default").get(
@@ -201,8 +201,8 @@ class JobContextBuilder:
         run_date_str: str | None = None,
         overrides_json: Path | None = None,
         overrides: dict[str, Any] | None = None,
-    ) -> list[JobContext]:
-        """Maps merged config into a list of msgspec JobContext objects."""
+    ) -> list[TaskContext]:
+        """Maps merged config into a set of msgspec TaskContext objects."""
         LOG.debug("Building job contexts", job_id=job_id, run_date=run_date_str)
 
         job_cfg_path = Path("apps/ingestion/config") / job_id / "config.yaml"
@@ -229,7 +229,7 @@ class JobContextBuilder:
             or datetime.now().astimezone().strftime("%Y-%m-%d")
         )
 
-        # 4. Get the Job-level defaults and the Dataset-level specifics
+        # 4. Get the Task-level defaults and the Dataset-level specifics
         job_defaults = settings.get("job", {})
         all_datasets = settings.get("datasets", {})
 
@@ -244,52 +244,38 @@ class JobContextBuilder:
 
             ds_cfg = all_datasets[ds_id]
 
-            # 5. Build the context using the resolution: Dataset Spec > Job Default
-            ctx = self._create_job_context(
+            # 5. Build the context using the resolution: Dataset Spec > Task Default
+            ctx = self._create_task_context(
                 job_id=job_id,
                 dataset_id=ds_id,
                 run_date=run_date,
-                # Pass both layers for hierarchical lookup
-                # job_defaults=job_defaults,
-                # ds_cfg=ds_cfg,
                 # Pass the full settings object to resolve global service refs
                 settings=settings,
+                overrides=overrides,
             )
-
-            # 6. Final Layer: Apply Runtime CLI Overrides (--set)
-            if overrides:
-                # Create a prioritized view: Dataset overrides > Global overrides
-                active_overrides = ChainMap(
-                    overrides.get(ds_id, {}), overrides.get("_global", {})
-                )
-
-                for key, value in active_overrides.items():
-                    if hasattr(ctx, key):
-                        setattr(ctx, key, value)
-                    else:
-                        ctx.custom_overrides[key] = value
 
             contexts.append(ctx)
 
         LOG.debug("Resolved contexts", count=len(contexts), job_id=job_id)
         return contexts
 
-    def _create_job_context(
+    def _create_task_context(
         self,
         job_id: str,
         dataset_id: str,
         run_date: str,
         settings: Dynaconf,
-    ) -> JobContext:
+        overrides: dict[str, Any] | None = None,
+    ) -> TaskContext:
         """
-        Helper that implements the 'Dataset > Job' fallback logic.
+        Helper that implements the 'Dataset > Task' fallback logic.
         """
 
         def get_val(path: str, default: Any = None) -> Any:
             """
             Hierarchical lookup helper.
             Search priority:
-            Dataset (Env) -> Dataset (Default) -> Job (Env) -> Job (Default) -> Fallback
+            Dataset (Env) -> Dataset (Default) -> Task (Env) -> Task (Default) -> Fallback
             """
             search_paths = [f"datasets.{dataset_id}.{path}", f"job.{path}"]
             for p in search_paths:
@@ -378,6 +364,20 @@ class JobContextBuilder:
             },
         }
 
+        # 3. Final Layer: Apply Runtime CLI Overrides (--set) BEFORE freezing
+        if overrides:
+            active_overrides = ChainMap(
+                overrides.get(dataset_id, {}), overrides.get("_global", {})
+            )
+            for key, value in active_overrides.items():
+                if key in ctx_data:
+                    ctx_data[key] = value
+                else:
+                    ctx_data.setdefault("custom_overrides", {})[key] = value
+
         # Validate via msgspec
-        return msgspec.json.decode(msgspec.json.encode(ctx_data), type=JobContext)
-        return msgspec.json.decode(msgspec.json.encode(ctx_data), type=JobContext)
+        return msgspec.json.decode(msgspec.json.encode(ctx_data), type=TaskContext)
+        return msgspec.json.decode(msgspec.json.encode(ctx_data), type=TaskContext)
+        return msgspec.json.decode(msgspec.json.encode(ctx_data), type=TaskContext)
+        return msgspec.json.decode(msgspec.json.encode(ctx_data), type=TaskContext)
+        return msgspec.json.decode(msgspec.json.encode(ctx_data), type=TaskContext)

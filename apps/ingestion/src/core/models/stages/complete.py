@@ -4,43 +4,43 @@ from datetime import datetime, timedelta
 import msgspec
 import structlog
 
-from apps.ingestion.src.core.models.job import Job
+from apps.ingestion.src.core.models.job import Task
 from apps.ingestion.src.core.models.job.manifest import CompletePayload
 from apps.ingestion.src.services.base import ArchiveMixin
 from apps.ingestion.src.services.factory import ServiceFactory
 
-from .base import JobStep
-from .enums import JobSteps
+from .base import ExecutionStage
+from .enums import StageName
 
 LOG = structlog.getLogger(__name__)
 
 
-class CompleteStep(JobStep):
-    name = JobSteps.COMPLETE.label
+class CompleteStep(ExecutionStage):
+    name = StageName.COMPLETE.label
     manifest: CompletePayload
 
-    def execute(self, job: Job) -> str:
+    def execute(self, job: Task) -> str:
         """
         Decision: The 'Zero-Footprint' Protocol.
         We preserve the audit trail and the output data in long-term storage
         while reclaiming high-speed local disk space.
         """
 
-        job_ctx = job.context
+        task_ctx = job.context
         start_ts = datetime.now().astimezone().isoformat()
 
         # 1. Initialize Storage Service for Archival
         # We retrieve the 'archive' service defined in the job configuration
         object_store: ArchiveMixin = ServiceFactory.get_archive(
-            type=job_ctx.archive.type,  # e.g., "s3" or "local"
-            **job_ctx.archive.config,
+            type=task_ctx.archive.type,  # e.g., "s3" or "local"
+            **task_ctx.archive.config,
         )
 
         try:
             # 2. OPTIONAL ARCHIVAL
             # Subject to privacy requirements defined in job_config
             final_archive_path = None
-            if job_ctx.archive.enabled:
+            if task_ctx.archive.enabled:
                 # 1. Archive Parquet Files
                 # We move data from the high-speed 'data/' vault to the 'archive/' vault.
                 # This includes both the Extract (Sanitized) and Transform results.
@@ -76,8 +76,8 @@ class CompleteStep(JobStep):
             # 4. Final Finalize (Post-Purge)
             # We don't use a symlink here; we just record SUCCESS in the DB/State Store
             LOG.info(
-                "Job lifecycle complete. Workspace purged.",
-                step=self.name,
+                "Task lifecycle complete. Workspace purged.",
+                stage=self.name,
                 job_id=job.job_id,
             )
 
@@ -88,32 +88,42 @@ class CompleteStep(JobStep):
             self.finalize(job, exception=e)
             raise
 
-    def _archive_parquet_data(self, object_store: ArchiveMixin, job: Job) -> None:
+    def _archive_parquet_data(self, object_store: ArchiveMixin, job: Task) -> None:
         """
         Decision: Move files to the Archive location defined in the Context.
-        Standardizing on: archive/{job_id}/{run_id}/{step}/
+        Standardizing on: archive/{job_id}/{run_id}/{stage}/
         """
         archive_root = f"{job.context.archive.base_path}/{job.job_id}/{job.run_id}"
 
-        # We loop through the steps we want to keep
-        for step in ["extract", "transform"]:
+        # We loop through the stages we want to keep
+        for stage in ["extract", "transform"]:
             # Follow the active symlink to find the physical data
-            src_folder = job.folder.resolve() / step
+            src_folder = job.folder.resolve() / stage
             if src_folder.exists():
-                dest_folder = f"{archive_root}/{step}"
+                dest_folder = f"{archive_root}/{stage}"
                 object_store.archive_data(
                     source_dir=src_folder, archive_path=dest_folder
                 )
 
-    def _calculate_expiry(self, job: Job, end_timestamp: datetime) -> str:
+    def _calculate_expiry(self, job: Task, end_timestamp: datetime) -> str:
         # e.g., standard 7-year retention or 30-day GDPR limit
         """
         Calculates the retention expiry date for a job.
 
-        Uses the retention_days attribute from the JobContext if present,
+        Uses the retention_days attribute from the TaskContext if present,
         otherwise falls back to a 7-year default.
 
         Returns an ISO-formatted string representing the retention expiry date.
         """
         retention_days = getattr(job.context, "retention_days", 2555)  # 7 years default
+        return (end_timestamp + timedelta(days=retention_days)).date().isoformat()
+        return (end_timestamp + timedelta(days=retention_days)).date().isoformat()
+        return (end_timestamp + timedelta(days=retention_days)).date().isoformat()
+        return (end_timestamp + timedelta(days=retention_days)).date().isoformat()
+        return (end_timestamp + timedelta(days=retention_days)).date().isoformat()
+        return (end_timestamp + timedelta(days=retention_days)).date().isoformat()
+        return (end_timestamp + timedelta(days=retention_days)).date().isoformat()
+        return (end_timestamp + timedelta(days=retention_days)).date().isoformat()
+        return (end_timestamp + timedelta(days=retention_days)).date().isoformat()
+        return (end_timestamp + timedelta(days=retention_days)).date().isoformat()
         return (end_timestamp + timedelta(days=retention_days)).date().isoformat()

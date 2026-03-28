@@ -1,0 +1,11 @@
+source_col,target_col,source_dtype,target_dtype,source_length,source_scale,target_length,target_scale,masking,internal_flag
+None,_created_at_ts,None,Datetime,0,0,0,0,None,True
+None,_partition,None,String,20,0,20,0,None,True
+None,_source,None,String,100,0,100,0,None,True
+None,_run_id,None,String,50,0,50,0,None,True
+order_id,order_id,Int64,Int64,19,0,19,0,None,False
+customer_id,customer_id,Int64,Int64,19,0,19,0,None,False
+order_date,order_date,String,Date,10,0,10,0,None,False
+amount,amount,String,Float64,12,4,12,2,None,False
+status,status,String,String,50,0,50,0,None,False
+updated_at,updated_at,String,Datetime,0,0,0,0,None,False

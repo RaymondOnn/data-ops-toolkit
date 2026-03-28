@@ -9,7 +9,7 @@ import polars as pl
 class DBClient(ABC):
     def __init__(self, **config: Any) -> None:
         self.config = config
-        self._connection = None
+        self._connection: Any = None
 
     @abstractmethod
     def connect(self) -> Any:
@@ -36,7 +36,7 @@ class DBClient(ABC):
         table_name: str,
         num_partitions: int = 10,
         filter_sql: str | None = None,
-    ) -> list[str]:
+    ) -> set[str]:
         """
         Convert a query into multiple "partition" queries
         """

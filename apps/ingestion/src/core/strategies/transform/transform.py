@@ -43,9 +43,8 @@ class DefaultTransformer(Transformer):
         # Using .replace preserves column names and is more concise
         lf = lf.with_columns(pl.col(pl.Utf8).replace("", None))
 
-        # 4. DEDUPLICATE: Global uniqueness via metadata hash
-        if "_row_hash" in lf.columns:
-            lf = lf.unique(subset=["_row_hash"], keep="first")
+        # 4. DEDUPLICATE: Global uniqueness at the record level
+        lf = lf.unique(keep="first")
 
         # # 5. AUTO-FLATTEN: Unpack nested Structs
         # lf = self._auto_flatten_structs(lf)
@@ -53,9 +52,9 @@ class DefaultTransformer(Transformer):
 
     def _standardize_column_names(self, lf: pl.LazyFrame) -> pl.LazyFrame:
         """Forces snake_case and removes special characters."""
-        # Use map_alias to rename columns without resolving the schema
+        # Use .name.map to rename columns without resolving the schema
         return lf.select(
-            pl.all().map_alias(
+            pl.all().name.map(
                 lambda col: col.lower().strip().replace(" ", "_").replace("-", "_")
             )
         )
@@ -74,7 +73,9 @@ class DefaultTransformer(Transformer):
 
     def _auto_flatten_structs(self, lf: pl.LazyFrame) -> pl.LazyFrame:
         """Unpacks Polars Struct types into top-level columns."""
-        struct_cols = [col for col, dtype in lf.schema.items() if dtype == pl.Struct]
+        struct_cols = [
+            col for col, dtype in lf.collect_schema().items() if dtype == pl.Struct
+        ]
         if struct_cols:
             lf = lf.unnest(struct_cols)
         return lf
@@ -100,13 +101,14 @@ class BitmaskTransformer(Transformer):
 
     def apply(self, lf: pl.LazyFrame, ctx: TransformContext) -> pl.LazyFrame:
         # STAGE 1: Decipher and Reorganize into Per-Operation Buckets
-        buckets: dict[str, list[str]] = {}
-        for col_name, mask in ctx.options.get("column_masks", []):
-            if col_name not in lf.columns:
+        buckets: dict[str, set[str]] = {}
+        schema_names = lf.collect_schema().names()
+        for col_name, mask in ctx.options.get("column_masks", set()):
+            if col_name not in schema_names:
                 continue
             for bit, op_label in self._OPS.items():
                 if int(mask) & bit:
-                    buckets.setdefault(op_label, []).append(col_name)
+                    buckets.setdefault(op_label, set()).add(col_name)
 
         if not buckets:
             return lf

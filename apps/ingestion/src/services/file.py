@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import structlog
+
 from libs.clients.base import ClientCantConnect
 from libs.file import FileSystemClient, FileSystemSkills, FormatFactory
 from libs.resilience.circuit_breaker import CircuitBreaker
@@ -34,7 +35,7 @@ class BaseStorageService(Service):
         self,
         name: str,
         url: str,
-        capabilities: list[FileSystemSkills],
+        capabilities: set[FileSystemSkills],
         storage_options: dict[str, Any],
         **config: Any,
     ) -> None:
@@ -80,14 +81,15 @@ class StorageSource(BaseStorageService, SourceMixin):
         # If target is a directory, we peek at one file to get the extension
         peek = next(self.client.walk_paths(target), None)
         if not peek:
-            return []
+            return set()
 
         ext = Path(peek).suffix.lstrip(".").lower()
         handler: FormatHandler = FormatFactory.get_handler(
             ext, self.client.fs, self.opts
         )
 
-        # 2. Use Handler-specific discovery (e.g. CSVHandler knows to find .csv and .txt)
+        # 2. Use Handler-specific discovery (e.g. CSVHandler 
+        # knows to find .csv and .txt)
         files = list(handler.discover(target))
 
         LOG.debug(
@@ -99,7 +101,7 @@ class StorageSource(BaseStorageService, SourceMixin):
         return [{"files": files[i::num_partitions]} for i in range(num_partitions)]
 
     @protect_service(breaker)
-    def fetch_data(self, unit: list[str] | str) -> pl.DataFrame | pl.LazyFrame:
+    def fetch_data(self, unit: set[str] | str) -> pl.DataFrame | pl.LazyFrame:
         """
         Reads a list of files (the work unit) into a single Polars DataFrame.
         Supports Parquet, CSV, and JSON formats.
@@ -131,7 +133,12 @@ class StorageSource(BaseStorageService, SourceMixin):
 
 class StorageSink(BaseStorageService, SinkMixin):
     @protect_service(breaker)
-    def stage_data(self, source_dir: Path, target_table: str) -> tuple[str, int]:
+    def stage_data(
+        self,
+        source_dir: Path,
+        target_table: str,
+        file_ext: str = "parquet",
+    ) -> tuple[str, int]:
         """
         Phase 1: Organize Parquet files into a staging directory.
         Returns a tuple of (path to the staged folder, number of items loaded).
@@ -183,7 +190,7 @@ class StorageSink(BaseStorageService, SinkMixin):
         self,
         reference: Path,
         other: Path,
-        exclude_columns: list[str] | None = None,
+        exclude_columns: set[str] | None = None,
     ) -> None:
         # Check if the number of files is the same
 
@@ -244,7 +251,7 @@ class FlatFileService(StorageSource):
         super().__init__(
             name=name,
             url=url,
-            capabilities=[FileSystemSkills.FILE],
+            capabilities={FileSystemSkills.FILE},
             storage_options=storage_options,
             **config,
         )
@@ -262,7 +269,7 @@ class StandardArchiveService(StorageArchive):
         super().__init__(
             name=name,
             url=url,
-            capabilities=[FileSystemSkills.ARCHIVE],
+            capabilities={FileSystemSkills.ARCHIVE},
             storage_options=storage_options,
             **config,
         )
@@ -281,7 +288,7 @@ class CASArchive(StorageArchive):
         super().__init__(
             name=name,
             url=url,
-            capabilities=[FileSystemSkills.CAS],
+            capabilities={FileSystemSkills.CAS},
             storage_options=storage_options,
             **config,
         )
@@ -299,7 +306,8 @@ class DataLakeService(StorageSource, StorageSink):
         super().__init__(
             name=name,
             url=url,
-            capabilities=[FileSystemSkills.FILE],
+            capabilities={FileSystemSkills.FILE},
             storage_options=storage_options,
             **config,
         )
+        

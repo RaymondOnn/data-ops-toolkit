@@ -28,7 +28,7 @@ class FlatFileMixin:
             # Self-healing logic (quarantine) could be called here
             return False
 
-        if size > 5 * 1024**3:
+        if size and size > 5 * 1024**3:
             LOG.warning(f"Very large file (>5GB): {target}. Forcing streaming mode.")
 
         return True
@@ -133,7 +133,7 @@ class FlatFileMixin:
 
         return fs, targets
 
-    def _get_encoded_stream(
+    def get_encoded_stream(
         self, fs: fsspec.AbstractFileSystem, target: str
     ) -> tuple[io.IOBase, str]:
         """
@@ -142,34 +142,14 @@ class FlatFileMixin:
         """
         from charset_normalizer import from_bytes
 
-        raw_stream = fs.open(target, mode="rb")
+        with fs.open(target, mode="rb") as raw_stream:
+            sample_size = 4096
+            sample: bytes = raw_stream.read(sample_size)
+            results = from_bytes(sample)
+            best_match = results.best()
+            encoding = best_match.encoding if best_match else "utf-8"
 
-        # 1. Read a sample for detection
-        sample = raw_stream.read(32768)
-        results = from_bytes(sample)
-        best_match = results.best()
-        encoding = best_match.encoding if best_match else "utf-8"
-
-        LOG.info(
-            "Encoding detected",
-            extra={
-                "file": target,
-                "encoding": encoding,
-                "confidence": best_match.confidence if best_match else "N/A",
-            },
-        )
-
-        # 2. Handle the "Reset" / Rewind logic
-        try:
-            # Attempt to seek back to the start if the filesystem supports it
-            raw_stream.seek(0)
             return raw_stream, encoding
-        except (AttributeError, io.UnsupportedOperation):
-            # Fallback for streams that don't support seek (e.g., some SFTP/S3 wrappers)
-            # We prepend the sample back to the remaining data
-            LOG.debug("Stream not seekable; reconstructing via BytesIO")
-            full_content = sample + raw_stream.read()
-            return io.BytesIO(full_content), encoding
 
     def get_load_strategy(
         self, path: str, file_pattern: str | None = None

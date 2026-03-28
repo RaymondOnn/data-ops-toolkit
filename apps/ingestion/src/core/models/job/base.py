@@ -7,19 +7,18 @@ from typing import Any, Self
 
 import msgspec
 import structlog
-
-from apps.ingestion.src.core.contexts import ExecutionContext, JobContext
-from apps.ingestion.src.core.models.job.manifest import JobManifest
-from apps.ingestion.src.core.models.job.status import JobStatus
-from apps.ingestion.src.core.models.steps.base import JobStep
-from apps.ingestion.src.core.models.steps.enums import JobSteps
+from apps.ingestion.src.core.contexts import ExecutionContext, TaskContext
+from apps.ingestion.src.core.models.job.manifest import TaskManifest
+from apps.ingestion.src.core.models.job.status import ExecutionStatus
+from apps.ingestion.src.core.models.stages.base import ExecutionStage
+from apps.ingestion.src.core.models.stages.enums import StageName
 
 LOG = structlog.getLogger(__name__)
 
 
 # TODO: Rename folders to include worker id?
-class Job:
-    _step: JobStep
+class Task:
+    _stage: ExecutionStage
     _folder: Path
     _manifest_path: Path
 
@@ -30,39 +29,44 @@ class Job:
         run_date: str,
         worker_id: str,
         exec_ctx: ExecutionContext,
-        target_step: str = JobSteps.START.label,
+        target_stage: str = StageName.START.label,
     ) -> None:
         self.job_id, self.dataset_id = composite_key.split(":", 1)
         self.run_id = run_id
         self.run_date = run_date
         self.worker_id = worker_id
         self.exec_ctx = exec_ctx
-        self.target_step = target_step
+        self.target_stage = target_stage
 
         # Ensure the physical workspace is set up
         self._make_folder()
         self._manifest_path = self._folder / "manifest.json"
 
-        # Immediately set the current step based on the target_step from the engine
-        # This ensures the Job object knows what step it's supposed to execute
-        from apps.ingestion.src.core.models.steps.utils import get_step_class_by_name
+        # Immediately set the current stage based on the target_stage from the engine
+        # This ensures the Task object knows what stage it's supposed to execute
+        from apps.ingestion.src.core.models.stages.utils import get_stage_class_by_name
 
-        self._step = get_step_class_by_name(self.target_step)
+        self._stage = get_stage_class_by_name(self.target_stage)
 
     @classmethod
     def from_folder(
         cls,
         folder_path: Path,
         exec_ctx: ExecutionContext,
-        target_step: JobSteps | None = None,
+        target_stage: StageName | None = None,
     ) -> Self:
         """
-        Factory to rehydrate a Job. If a target_step is provided,
+        Factory to rehydrate a Task. If a target_stage is provided,
         it performs an immediate check-in.
         """
         active_path = Path(folder_path)
         run_id = active_path.name
-        composite_key, run_date = active_path.parent.name.split("_", 1)
+
+        # The parent name is the full identifier: job_id:dataset_id:run_date
+        job_id, dataset_id, run_date, _ = exec_ctx.parse_identifier(
+            f"{active_path.parent.name}:{run_id}"
+        )
+        composite_key = f"{job_id}:{dataset_id}"
 
         instance = cls(
             composite_key=composite_key,
@@ -70,15 +74,19 @@ class Job:
             run_date=run_date,
             worker_id="recovery",
             exec_ctx=exec_ctx,
-            target_step=target_step.label if target_step else JobSteps.START.label,
+            target_stage=(
+                target_stage.label if target_stage else StageName.START.label
+            ),
         )
-        if target_step:
-            instance.check_in(target_step.label)
+        if target_stage:
+            instance.check_in(target_stage.label)
         return instance
 
     @property
     def id(self) -> str:
-        return f"{self.job_id}:{self.dataset_id}:{self.run_date}"
+        return self.exec_ctx.get_task_identifier(
+            self.job_id, self.dataset_id, self.run_date
+        )
 
     @property
     def folder(self) -> Path:
@@ -98,8 +106,8 @@ class Job:
                     "job_id": self.job_id,
                     "run_id": self.run_id,
                     "dataset_id": self.dataset_id,
-                    "job_status": JobStatus.RUNNING,
-                    "current_step": self.target_step,
+                    "status": ExecutionStatus.RUNNING,
+                    "current_stage": self.target_stage,
                     "bitmask": 0,
                 }
             )
@@ -107,33 +115,33 @@ class Job:
         return self._folder
 
     @property
-    def manifest(self) -> JobManifest:
+    def manifest(self) -> TaskManifest:
         """
         Dynamic accessor. Reads manifest from disk on demand.
         Ensures we don't hold JSON objects for thousands of jobs in RAM.
         """
         if not self._manifest_path.exists() or self._manifest_path.stat().st_size == 0:
             # Return a default manifest if file is missing/corrupt
-            return JobManifest(
+            return TaskManifest(
                 job_id=self.job_id,
                 run_id=self.run_id,
                 dataset_id=self.dataset_id,
-                current_step=self.target_step,
+                current_stage=self.target_stage,
                 bitmask=0,
-                job_status=JobStatus.UNKNOWN,
+                status=ExecutionStatus.UNKNOWN,
             )
 
         with self._manifest_path.open(mode="rb") as f:
-            return msgspec.json.decode(f.read(), type=JobManifest)
+            return msgspec.json.decode(f.read(), type=TaskManifest)
 
     @property
-    def context(self) -> JobContext:
+    def context(self) -> TaskContext:
         """
-        Finds the config file and returns a hydrated JobContext object.
+        Finds the config file and returns a hydrated TaskContext object.
         Does not store the object in self to save RAM.
         """
         # Local import to prevent circular dependency
-        from apps.ingestion.src.core.contexts import JobContext
+        from apps.ingestion.src.core.contexts import TaskContext
 
         try:
             # Priority 1: Check for the standardized 'config.json'
@@ -143,10 +151,10 @@ class Job:
                 config_path = next(self.folder.glob("*_config.json"))
 
             with config_path.open(mode="rb") as f:
-                return msgspec.json.decode(f.read(), type=JobContext)
+                return msgspec.json.decode(f.read(), type=TaskContext)
         except (StopIteration, FileNotFoundError):
             LOG.error(
-                "JobContext configuration missing on disk", folder=str(self.folder)
+                "TaskContext configuration missing on disk", folder=str(self.folder)
             )
             # Return an empty/default context if appropriate for your logic
             raise FileNotFoundError(
@@ -154,41 +162,43 @@ class Job:
             ) from None
 
     @property
-    def step(self) -> JobStep:
-        from apps.ingestion.src.core.models.steps.utils import get_step_class_by_name
+    def stage(self) -> ExecutionStage:
+        from apps.ingestion.src.core.models.stages.utils import get_stage_class_by_name
 
-        if not hasattr(self, "_step") or not self._step:
-            # This should ideally not be reached if _step is set in __init__
+        if not hasattr(self, "_stage") or not self._stage:
+            # This should ideally not be reached if _stage is set in __init__
             LOG.warning(
-                "Job._step not set, falling back to manifest/start",
+                "Task._stage not set, falling back to manifest/start",
                 job_id=self.job_id,
                 run_id=self.run_id,
             )
-            step = self.manifest.current_step or JobSteps.START.label
-            self._step = get_step_class_by_name(step)
-        return self._step
+            stage = self.manifest.current_stage or StageName.START.label
+            self._stage = get_stage_class_by_name(stage)
+        return self._stage
 
-    def set_step(self, step: JobStep) -> None:
-        self._step = step
+    def set_stage(self, stage: ExecutionStage) -> None:
+        self._stage = stage
 
     def execute(self) -> str:
-        """Execute the current job step.
+        """Execute the current job stage.
 
         :raises ValueError: If the job is not initialized.
         """
         start_time = time.perf_counter()
-        log = LOG.bind(job_id=self.job_id, run_id=self.run_id, step=self.step.name)
+        log = LOG.bind(job_id=self.job_id, run_id=self.run_id, stage=self.stage.name)
 
-        log.info("Executing step logic")
-        next_step_label = self.step.execute(job=self)
+        log.info("Executing stage logic")
+        next_stage_label = self.stage.execute(job=self)
 
         duration = time.perf_counter() - start_time
         log.info("Step execution finished", duration_sec=round(duration, 4))
-        return next_step_label
+        return next_stage_label
 
     def _make_folder(self) -> None:
         # 1. Assignment (Ensures paths are correctly calculated)
-        self._folder = self.exec_ctx.active_path / self.id / self.run_id
+        self._folder = self.exec_ctx.get_run_path(
+            self.job_id, self.dataset_id, self.run_date, self.run_id
+        )
 
         # 2. Physically create the folder if missing
         if not self._folder.exists():
@@ -197,7 +207,7 @@ class Job:
 
         # 3. Relocate the config file if it's still in the active root
         # The Orchestrator prefix uses a colon between the identifier and run_id
-        job_cfg_file = f"{self.id}:{self.run_id}_config.json"
+        job_cfg_file = f"{self.id}:{self.run_id}_config.json"  # Kept for backward compat with Orchestrator output
         source_path = self.exec_ctx.active_path / job_cfg_file
         dest_path = self._folder / "config.json"
 
@@ -221,10 +231,10 @@ class Job:
         # 2. Apply updates
         data.update(updates)
 
-        # If a step payload was updated, also update the bitmask
-        for step in JobSteps:
-            if step.label in updates and updates[step.label] is not None:
-                data["bitmask"] |= step.bitmask.value
+        # If a stage payload was updated, also update the bitmask
+        for stage in StageName:
+            if stage.label in updates and updates[stage.label] is not None:
+                data["bitmask"] |= stage.bitmask.value
 
         # Debug log for state changes
         LOG.debug("Updating manifest", run_id=self.run_id, updates=updates)
@@ -243,28 +253,28 @@ class Job:
 
         tmp_path.replace(self._manifest_path)
 
-    def check_in(self, step_name: str) -> None:
+    def check_in(self, stage_name: str) -> None:
         """
         The 'Step Check-in': Mark the start of a process on disk immediately.
-        Ensures the folder reflects the current step if a crash/outage occurs.
+        Ensures the folder reflects the current stage if a crash/outage occurs.
         """
         # Ensure workspace is provisioned (relocates config if needed
         _ = self.folder
 
         # Ensure the manifest is initialized if it doesn't exist,
-        # or update it with the current step.
+        # or update it with the current stage.
         if not self._manifest_path.exists() or self._manifest_path.stat().st_size == 0:
             LOG.info(
-                "Manifest not found or empty, initializing with current step",
+                "Manifest not found or empty, initializing with current stage",
                 run_id=self.run_id,
-                step=step_name,
+                stage=stage_name,
             )
             initial_manifest_data = {
                 "job_id": self.job_id,
                 "run_id": self.run_id,
                 "dataset_id": self.dataset_id,
-                "job_status": JobStatus.RUNNING,
-                "current_step": step_name,  # Use the actual step being checked in
+                "status": ExecutionStatus.RUNNING,
+                "current_stage": stage_name,  # Use the actual stage being checked in
                 "bitmask": 0,
                 # "start": {
                 #     "start_timestamp_utc": datetime.now().astimezone().isoformat()
@@ -274,20 +284,23 @@ class Job:
 
         self.update_manifest(
             {
-                "current_step": step_name,
-                "job_status": JobStatus.RUNNING,
+                "current_stage": stage_name,
+                "status": ExecutionStatus.RUNNING,
                 "last_active": datetime.now().astimezone().isoformat(),
             }
         )
-        LOG.debug("Job checked in to step", run_id=self.run_id, step=step_name)
+        LOG.debug("Task checked in to stage", run_id=self.run_id, stage=stage_name)
 
-    def move_to_folder(self, step: str) -> None:
+    def move_to_folder(self, stage: str) -> None:
         """
         Physically relocates the metadata folder (active -> HOLD/FAILED).
         Because data is in /data/ vault via symlinks, this move is instant.
         """
-        # Target: e.g., /opt/app/steps/HOLD/123/run_abc
-        new_path = Path(self.exec_ctx.workspace_dir) / step / self.id / self.run_id
+        # Target: e.g., /opt/app/stages/HOLD/123/run_abc
+        new_path = Path(self.exec_ctx.workspace_dir) / stage / self.id / self.run_id
+        new_path = self.exec_ctx.get_run_path(
+            self.job_id, self.dataset_id, self.run_date, self.run_id, category=stage
+        )
         new_path.parent.mkdir(parents=True, exist_ok=True)
 
         if self.folder.exists():
@@ -302,26 +315,34 @@ class Job:
             self._folder = new_path
             self._manifest_path = new_path / "manifest.json"
 
-    def request_status_sync(self, deep_sync: bool = False) -> None:
+    def request_status_sync(
+        self, deep_sync: bool = False, is_failure: bool = False
+    ) -> None:
         """
         Drops a signal file to notify the Orchestrator of a state change.
         """
         # 2. Define the signal path
-        # Path: /data/signals/{run_id}.step_name.bitmask.sync
+        # Path: /data/signals/{run_id}.stage_name.bitmask.sync
         signal_dir = self.exec_ctx.signal_path
         signal_dir.mkdir(parents=True, exist_ok=True)
 
         # 2. Drop the Breadcrumb
-        # The 'Light' signal for progress steps
+        # The 'Light' signal for progress stages
         ext = ".sync"
         if deep_sync:
             # The 'Heavy' signal for CompleteStep
             ext = ".done"
+        if is_failure:
+            ext = ".fail"
 
         # We embed metadata in the filename so the Orchestrator
         # might not even need to open the manifest for simple status updates.
         # Filename contains run_id for Orchestrator lookup
-        signal_path = signal_dir / f"{self.id}:{self.run_id}{ext}"
+        signal_filename = self.exec_ctx.get_signal_name(
+            self.job_id, self.dataset_id, self.run_date, self.run_id, ext
+        )
+        signal_path = signal_dir / signal_filename
+
         LOG.debug("Dropping state sync signal", name=signal_path)
         signal_path.touch()  # Create hidden/temp
 
@@ -336,9 +357,26 @@ class Job:
     #     report = {}
 
     #     # Iterate through our ordered enum to build the checklist
-    #     for step in StepOrder:
-    #         # Check if the specific bit for this step is flipped
-    #         is_done = bool(current_mask & step.bitmask_flag)
-    #         report[step.label] = "DONE" if is_done else "PENDING"
+    #     for stage in StepOrder:
+    #         # Check if the specific bit for this stage is flipped
+    #         is_done = bool(current_mask & stage.bitmask_flag)
+    #         report[stage.label] = "DONE" if is_done else "PENDING"
 
+    #     return report
+    #     return report
+    #     return report
+    #     return report
+    #     return report
+    #     return report
+    #     return report
+    #     return report
+    #     return report
+    #     return report
+    #     return report
+    #     return report
+    #     return report
+    #     return report
+    #     return report
+    #     return report
+    #     return report
     #     return report

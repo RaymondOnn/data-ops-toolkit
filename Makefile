@@ -1,4 +1,4 @@
-.PHONY: clean-pyc clean-test clean-all help docker-up docker-down docker-rebuild docker-clean docker-logs
+.PHONY: clean-pyc clean-test clean-all help docker-up docker-down docker-rebuild docker-clean docker-logs lint format sync venv-recreate lock
 
 help:
 	@echo "Usage: make <target>"
@@ -7,6 +7,9 @@ help:
 	@echo "  clean-all    - Remove all caches and temporary files"
 	@echo "  lint         - Run ruff check and format check"
 	@echo "  format       - Run ruff fix and format"
+	@echo "  sync         - Sync virtual environment using uv"
+	@echo "  venv-recreate - Delete and recreate the virtual environment"
+	@echo "  lock         - Update the uv.lock file"
 	@echo "  typecheck    - Run type checking"
 
 clean-pyc:
@@ -35,6 +38,18 @@ format: ## Run ruff fix and format
 	uv run ruff check --fix .
 	uv run ruff format .
 
+# --- Environment Management ---
+
+sync: ## Sync virtual environment with current lockfile
+	uv sync
+
+venv-recreate: ## Force delete and recreate the .venv directory
+	rm -rf .venv
+	uv sync
+
+lock: ## Update the uv.lock file
+	uv lock
+	
 # --- Docker Management ---
 
 DOCKER_COMPOSE_FILE := apps/ingestion/infra/environments/local/local.docker-compose.yaml

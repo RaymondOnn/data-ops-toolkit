@@ -40,7 +40,7 @@ class SignalProcessor:
 
         # Define our signals and whether they require a deep manifest sync
         # .sync = Light heartbeat | .done = Final deep audit
-        signals = {"*.sync": False, "*.done": True}
+        signals = {"*.sync": False, "*.done": True, "*.fail": True}
 
         # iterdir() returns a generator, which is memory efficient
         # This glob automatically ignores files starting with "."
@@ -49,22 +49,26 @@ class SignalProcessor:
                 identifier = None
                 try:
                     # 1. Parse metadata from filename
-                    # Example: 20240101-abc.transform.3.sync
-                    full_identifier = signal.stem.split(".")[0]
-                    job_id, dataset_id, run_date, run_id_from_file = full_identifier.split(":")
+                    # Format: {job_id}:{dataset_id}:{run_date}:{run_id}
+                    (
+                        job_id, dataset_id, run_date, run_id_from_file
+                    ) = self.exec_ctx.parse_identifier(signal.stem)
                     
-                    # If we are filtering (Dumb Mode), skip signals not belonging to our triggered run(s)
+                    # If we are filtering (Dumb Mode), skip signals not 
+                    # belonging to our triggered run(s)
                     if run_ids and run_id_from_file not in run_ids:
                         continue
                     
-                    identifier = f"{job_id}:{dataset_id}:{run_date}"
+                    identifier = self.exec_ctx.get_task_identifier(
+                        job_id, dataset_id, run_date
+                    )
                     record = self.state_store.active_records.get(identifier)
 
                     # If not in cache, leave it for the next iteration.
                     # This handles the gap between worker start and DB flush.
                     if not record:
                         LOG.info(
-                            "Creating job record",
+                            "Creating task record",
                             job_id=job_id,
                             dataset_id=dataset_id,
                             run_date=run_date,
@@ -80,16 +84,16 @@ class SignalProcessor:
                     # The folder might have been moved to FAILED/ or HOLD/ by the worker
                     # just before/after dropping the signal.
                     # We search the whole workspace.
-                    job_dir = find_path(self.exec_ctx.workspace_dir, run_id_from_file)
+                    task_dir = find_path(self.exec_ctx.workspace_dir, run_id_from_file)
 
-                    if not job_dir or not job_dir.exists():
+                    if not task_dir or not task_dir.exists():
                         LOG.warning(
-                            "Signal received but job directory not found", run_id=run_id_from_file
+                            "Signal received but task directory not found", run_id=run_id_from_file
                         )
                         continue
 
                     # 3. Sync manifest -> DB
-                    self.state_store.sync_from_folder(job_dir, deep_sync=is_deep_sync)
+                    self.state_store.sync_from_folder(task_dir, deep_sync=is_deep_sync)
 
                     # 4. Remove the signal
                     signal.unlink(missing_ok=True)

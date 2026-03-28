@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS JOB_SCHEDULES (
     , IS_SNAPSHOT           BOOLEAN
     , PRIORITY              INTEGER -- Worker Allocation Priority
     , TIMEOUT_SECS          INTEGER -- Max Execution Time
-    , CONCURRENCY_LIMIT     INTEGER -- Max Concurrent Jobs
+    , CONCURRENCY_LIMIT     INTEGER -- Max Concurrent Tasks
     , MISFIRE_GRACE_SECS    INTEGER -- Run if X Seconds late (0=Never, -1=Always)
     , WATCH_FILE_PATH       VARCHAR(1000) -- For file monitoring
     , NEXT_RUN_TS           TIMESTAMP_LTZ

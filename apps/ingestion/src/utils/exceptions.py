@@ -4,19 +4,19 @@ class Error(Exception):
     pass
 
 
-class JobDeferred(Error):
+class TaskDeferred(Error):
     """Exception raised when a non-critical task fails."""
 
     pass
 
 
-class JobBlocked(Error):
+class TaskBlocked(Error):
     """Exception raised when a critical task fails."""
 
     pass
 
 
-class JobFailed(Error):
+class TaskFailed(Error):
     """Exception raised when data fails validation and must be isolated."""
 
     pass

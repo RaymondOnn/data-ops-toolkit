@@ -5,11 +5,11 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from apps.ingestion.src.core.models.job.status import JobStatus
+from apps.ingestion.src.core.models.job.status import ExecutionStatus
 from apps.ingestion.src.services.registry import ServiceRegistry
 
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.models.job import Job
+    from apps.ingestion.src.core.models.job import Task
 
 
 LOG = structlog.getLogger(__name__)
@@ -18,7 +18,7 @@ LOG = structlog.getLogger(__name__)
 class LifecycleState(ABC):
     folder_name: str  # e.g., "HOLD", "FAILED", "DONE"
 
-    def __init__(self, job: "Job"):
+    def __init__(self, job: "Task"):
         self.job = job
 
     @abstractmethod
@@ -40,13 +40,13 @@ class HoldState(LifecycleState):
         """Mark as blocked and update metadata for the UI."""
         self.job.update_manifest(
             {
-                "job_status": JobStatus.BLOCKED,
+                "status": ExecutionStatus.BLOCKED,
                 "error": data,
                 "retry_count": self.job.manifest.retry_count + 1,
             }
         )
         # Note: The move_to_folder call happens in the finalize() or manager
-        LOG.warning("Job entered HOLD", job_id=self.job.job_id, reason=str(data))
+        LOG.warning("Task entered HOLD", job_id=self.job.job_id, reason=str(data))
 
     # TODO: Need to straighten out the logic
     def can_recover(self) -> bool:
@@ -64,8 +64,11 @@ class HoldState(LifecycleState):
             dt_error = dt_error.replace(tzinfo=UTC)
         hold_duration = datetime.now().astimezone() - dt_error
         if hold_duration.total_seconds() > (self.MAX_HOLD_TIME_HOURS * 3600):
-            LOG.error("Job expired in HOLD, moving to FAILED", job_id=self.job.job_id)
-            self.job.update_manifest({"job_status": JobStatus.EXPIRED})
+            LOG.error(
+                "Task expired in HOLD, moving to FAILED",
+                job_id=self.job.job_id,
+            )
+            self.job.update_manifest({"status": ExecutionStatus.EXPIRED})
             self.job.move_to_folder("FAILED")  # Self-escalation
             self.job.request_status_sync()
             return False
@@ -83,11 +86,11 @@ class FailedState(LifecycleState):
         """Snapshot everything for post-mortem analysis."""
         self.job.update_manifest(
             {
-                "job_status": JobStatus.FAILED,
+                "status": ExecutionStatus.FAILED,
                 "error": data,
             }
         )
-        LOG.error("Job FAILED", job_id=self.job.job_id)
+        LOG.error("Task FAILED", job_id=self.job.job_id)
 
     def can_recover(self) -> bool:
         """Manual intervention required."""
@@ -127,7 +130,7 @@ class SuccessState(LifecycleState):
             # archive folder here)
             self.job.update_manifest(
                 {
-                    "job_status": JobStatus.SUCCESS.value,
+                    "status": ExecutionStatus.SUCCESS.value,
                     **data,
                 }
             )
@@ -137,7 +140,7 @@ class SuccessState(LifecycleState):
             shutil.rmtree(self.job.folder)
 
             LOG.info(
-                "Job lifecycle complete. Resources released.",
+                "Task lifecycle complete. Resources released.",
                 job_id=self.job.job_id,
                 run_id=self.job.run_id,
             )
@@ -150,4 +153,8 @@ class SuccessState(LifecycleState):
         return False
 
 
+STATE_MAP = {"HOLD": HoldState, "FAILED": FailedState}
+STATE_MAP = {"HOLD": HoldState, "FAILED": FailedState}
+STATE_MAP = {"HOLD": HoldState, "FAILED": FailedState}
+STATE_MAP = {"HOLD": HoldState, "FAILED": FailedState}
 STATE_MAP = {"HOLD": HoldState, "FAILED": FailedState}

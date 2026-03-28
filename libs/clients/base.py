@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from types import TracebackType
+from typing import Any
 
 
 class ClientCantConnect(Exception):
@@ -8,7 +9,7 @@ class ClientCantConnect(Exception):
 
 class BaseIOClient(ABC):
     def __enter__(self):
-        return self.open()
+        return self
 
     def __exit__(
         self,
@@ -19,7 +20,7 @@ class BaseIOClient(ABC):
         self.close()
 
     @abstractmethod
-    def open(self):
+    def open(self, path: str, mode: str = "rb") -> Any:
         """Initialize the connection/pool/file-handle"""
         pass
 

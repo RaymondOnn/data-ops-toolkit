@@ -25,7 +25,7 @@ class FormatHandler(ABC):
         self.opts = storage_options or {}
 
     @abstractmethod
-    def discover(self, input_path: Path | str) -> list[str]:
+    def discover(self, input_path: Path | str) -> set[str]:
         """Expands a path into a list of Parquet files."""
         pass
 

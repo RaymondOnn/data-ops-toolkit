@@ -5,23 +5,24 @@ from typing import TYPE_CHECKING
 
 import msgspec
 import structlog
+
 from apps.ingestion.src.core.models.job.manifest import BasePayload
 
-from .base import JobStep
-from .enums import JobSteps
+from .base import ExecutionStage
+from .enums import StageName
 
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.models.job import Job
+    from apps.ingestion.src.core.models.job import Task
 
 
 LOG = structlog.getLogger(__name__)
 
 
-class StartStep(JobStep):
-    name = JobSteps.START.label
+class StartStep(ExecutionStage):
+    name = StageName.START.label
     manifest: BasePayload
 
-    def execute(self, job: "Job") -> str:
+    def execute(self, job: "Task") -> str:
         # persist job-start metadata using engine helper
         start_timestamp = datetime.now().astimezone().isoformat()
         try:
@@ -42,7 +43,10 @@ class StartStep(JobStep):
             # Note: Pass the Struct directly if finalize() handles to_builtins
             self.finalize(job, results=ctx)
             LOG.info(
-                "Job initialized", step=self.name, job_id=job.job_id, run_id=job.run_id
+                "Task initialized",
+                stage=self.name,
+                job_id=job.job_id,
+                run_id=job.run_id,
             )
             return str(self._transit(job))
         except Exception as e:
@@ -61,4 +65,12 @@ class StartStep(JobStep):
                 .strip()
             )
         except Exception:
+            return "unknown"
+            return "unknown"
+            return "unknown"
+            return "unknown"
+            return "unknown"
+            return "unknown"
+            return "unknown"
+            return "unknown"
             return "unknown"

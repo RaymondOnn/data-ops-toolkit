@@ -1,6 +1,6 @@
 # apps/ingestion/config/test_job/config.yaml
 
-# ── Job-level defaults (apply to all datasets in this job) ──────────────────
+# ── Task-level defaults (apply to all datasets in this job) ──────────────────
 default:
   job:
     extract:
@@ -26,12 +26,6 @@ default:
       transform:
         type: default
         options:
-          # column_bitmasks:
-          #   order_id: 1
-          #   customer_id: 2
-          #   order_date: 4
-          #   total_amount: 8
-          #   status: 16
       load:
         sink_identifier: default.orders
         service_ref: "clickhouse"

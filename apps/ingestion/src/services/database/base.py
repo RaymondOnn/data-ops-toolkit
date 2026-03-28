@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import structlog
-
 from apps.ingestion.src.services.base import Service, SinkMixin, SourceMixin
 from apps.ingestion.src.services.registry import protect_service
 from libs.clients.base import ClientCantConnect
@@ -75,7 +74,7 @@ class DatabaseService(Service):
 class DatabaseSource(DatabaseService, SourceMixin):
     def get_work_units(
         self, target: str, num_partitions: int, filter_sql: str | None = None
-    ) -> list[str]:
+    ) -> set[str]:
         # All DBs use the client's load strategy (e.g., ORA_HASH, ctid)
         return self.client.get_load_strategy(target, num_partitions, filter_sql)
 
@@ -96,7 +95,10 @@ class DatabaseSource(DatabaseService, SourceMixin):
 class DatabaseSink(DatabaseService, SinkMixin):
     @abstractmethod
     def stage_data(
-        self, source_dir: Path, target_table: str, file_ext: str = "parquet"
+        self,
+        source_dir: Path,
+        target_table: str,
+        file_ext: str = "parquet",
     ) -> tuple[str, int]:
         """Phase 1: Returns the name of the temporary staging table and rows loaded."""
         pass
@@ -117,11 +119,13 @@ class DatabaseSink(DatabaseService, SinkMixin):
         self,
         reference: Path,
         other: Path,
-        exclude_columns: list[str] | None = None,
+        exclude_columns: set[str] | None = None,
     ) -> bool:
         pass
 
     @abstractmethod
     def clone(self, reference: str, other: str) -> None:
         """Clone a table to a new table."""
+        pass
+        pass
         pass

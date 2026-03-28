@@ -3,7 +3,7 @@ from typing import Any, Literal
 import msgspec
 import structlog
 
-from apps.ingestion.src.core.models.steps.enums import JobSteps
+from apps.ingestion.src.core.models.stages.enums import StageName
 
 LOG = structlog.getLogger(__name__)
 
@@ -22,7 +22,7 @@ class ExtractConfig(msgspec.Struct):
         default_factory=dict
     )  # extraction-specific options (filters, etc.)
     schema_file: str | None = None
-    schema_items: list[dict[str, Any]] = msgspec.field(default_factory=list)
+    schema_items: set[dict[str, Any]] = msgspec.field(default_factory=set)
 
 
 class TransformConfig(msgspec.Struct):
@@ -54,7 +54,7 @@ class ArchiveConfig(msgspec.Struct):
     config: dict[str, Any] = msgspec.field(default_factory=dict)
 
 
-class JobContext(msgspec.Struct):
+class TaskContext(msgspec.Struct):
     # Sub-Configurations (Must come first as they don't have defaults)
     extract: ExtractConfig
     transform: TransformConfig
@@ -71,19 +71,21 @@ class JobContext(msgspec.Struct):
 
     # Runtime Details
 
-    from_step: str = JobSteps.first_step().label
-    to_step: str = JobSteps.last_step().label
+    from_stage: str = StageName.first().label
+    to_stage: str = StageName.last().label
 
     # Logic-wide Metadata
     audit_cols: list[str] = msgspec.field(
-        default_factory=lambda: [
-            "_ingested_at",
-            "_partition_key",
-            "_job_id",
-            "_row_hash",
-        ]
+        default_factory=lambda: ["_partition", "_run_id", "_source"]
     )
     validation_cmd: str = "validation-app"
     expires_at: float | None = None
     custom_overrides: dict[str, Any] = msgspec.field(default_factory=dict)
+    extras: dict[str, Any] = msgspec.field(default_factory=dict)
+    extras: dict[str, Any] = msgspec.field(default_factory=dict)
+    extras: dict[str, Any] = msgspec.field(default_factory=dict)
+    extras: dict[str, Any] = msgspec.field(default_factory=dict)
+    extras: dict[str, Any] = msgspec.field(default_factory=dict)
+    extras: dict[str, Any] = msgspec.field(default_factory=dict)
+    extras: dict[str, Any] = msgspec.field(default_factory=dict)
     extras: dict[str, Any] = msgspec.field(default_factory=dict)

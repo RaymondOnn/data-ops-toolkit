@@ -22,10 +22,6 @@ class LocalClient(FileSystemClient):
     def fs(self) -> LocalFileSystem:
         """Concrete implementation of the abstract property from FileSystemClient."""
         if self._fs is None:
-            self.connect()
-        return self._fs
-
-    def connect(self) -> LocalFileSystem:
-        if not self._fs:
             self._fs = fsspec.filesystem("file", **self.opts)
         return self._fs
+

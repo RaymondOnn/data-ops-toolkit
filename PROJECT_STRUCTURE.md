@@ -8,7 +8,7 @@ This repository is organized as a monorepo containing multiple data applications
 data-ops-toolkit/
 ├── apps/                       # Data Applications
 │   ├── ingestion/              # ⚡ 50M Row Ingestion Engine (Ray + Polars)
-│   │   ├── config/             # Job-specific YAML configurations
+│   │   ├── config/             # Task-specific YAML configurations
 │   │   ├── src/
 │   │   │   ├── core/           # Orchestrator, Engine, and Models
 │   │   │   ├── services/       # External service adapters (DB, S3, etc.)
@@ -35,7 +35,7 @@ data-ops-toolkit/
 
 The Ingestion Engine (`apps/ingestion/`) is the heart of the toolkit, featuring:
 - **`src/core/orchestrator/`**: Polling control loop and Ray actor management.
-- **`src/core/models/steps/`**: Pipeline stage definitions (`Raw`, `Transform`, `Audit`, `Write`).
+- **`src/core/models/stages/`**: Pipeline stage definitions (`Raw`, `Transform`, `Audit`, `Write`).
 - **`src/core/strategies/`**: Pluggable business logic for ingestion and transformation.
 
 ## 🛠️ Shared Libraries

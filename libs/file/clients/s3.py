@@ -47,7 +47,7 @@ class S3Client(FileSystemClient):
             if self.opts.get("use_mock"):
                 bucket = self.url.split("://")[-1].split("/")[0]
                 if not self._fs.exists(bucket):
-                    LOG.debug("Moto/Mock detected: Pre-creating bucket", bucket=bucket)
+                    LOG.debug("Moto/Mock detected: Pre-creating bucket", extra={"bucket": bucket})
                     self._fs.mkdir(bucket)
 
         return self._fs

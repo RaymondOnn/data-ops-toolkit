@@ -13,27 +13,27 @@ LOG = logging.getLogger(__name__)
 
 
 class XMLHandler(FormatHandler):
-    def discover(self, input_path: Path | str) -> list[str]:
+    def discover(self, input_path: Path | str) -> set[str]:
         """Expands a path into a list of XML files."""
         path_str = str(input_path)
 
         # If the path already contains a wildcard, expand it directly
         if "*" in path_str:
-            return [
-                str(self.fs.unstrip_protocol(p))
+            return {
+                str(self.fs.unstrip_protocol(str(p)))
                 for p in self.fs.glob(path_str)
                 if self.fs.isfile(p)
-            ]
+            }
 
         if self.fs.isfile(path_str):
-            return [path_str]
+            return {path_str}
 
         pattern = f"{path_str.rstrip('/')}/**/*.xml"
-        return [
-            str(self.fs.unstrip_protocol(p))
+        return {
+            str(self.fs.unstrip_protocol(str(p)))
             for p in self.fs.glob(pattern)
             if self.fs.isfile(p)
-        ]
+        }
 
     def _sanitize(self, path: str, **kwargs: Any):
         encoding = kwargs.get("encoding", "utf-8")

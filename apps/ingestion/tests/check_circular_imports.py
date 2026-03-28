@@ -30,14 +30,14 @@ if __name__ == "__main__":
     print("--- 🕵️‍♀️ Circular Import Detector ---")
 
     # 1. Check Base Definitions (Lowest Level)
-    check_import("src.core.models.steps.base")
+    check_import("src.core.models.stages.base")
 
     # 2. Check Individual Steps (Mid Level)
-    check_import("src.core.models.steps.extract")
-    check_import("src.core.models.steps.transform")
+    check_import("src.core.models.stages.extract")
+    check_import("src.core.models.stages.transform")
 
     # 3. Check Package Init (Aggregation Level)
-    check_import("src.core.models.steps")
+    check_import("src.core.models.stages")
 
     # 4. Check Orchestrator (High Level)
     check_import("src.core.orchestrator.orchestrator")

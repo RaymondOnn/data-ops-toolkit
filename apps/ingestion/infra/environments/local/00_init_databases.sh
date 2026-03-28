@@ -3,7 +3,7 @@ set -e
 
 # 1. Define the databases needed for the Ingestion Pipeline
 # These represent the different layers of your data lake/warehouse
-DATABASES=("raw" "silver" "gold" "audit" "orchestrator")
+DATABASES=("meta" "test")
 
 echo "🚀 Starting ClickHouse Object Coordination..."
 
@@ -11,7 +11,8 @@ echo "🚀 Starting ClickHouse Object Coordination..."
 # 2. Define the EXPLICIT order of SQL execution
 # Add your table definitions here in the order they should be created
 SQL_FILES=(
-    "/docker-entrypoint-initdb.d/orchestrator_setup.sql"
+    "/docker-entrypoint-initdb.d/test.orders.sql"
+    # "/docker-entrypoint-initdb.d/orchestrator_setup.sql"
     # "/docker-entrypoint-initdb.d/raw_tables.sql"
     # "/docker-entrypoint-initdb.d/silver_tables.sql"
 )

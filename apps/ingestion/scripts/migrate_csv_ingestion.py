@@ -8,16 +8,16 @@ import msgspec
 project_root = Path(__file__).parent.parent.parent
 sys.path.append(str(project_root / "apps" / "ingestion"))
 
-from apps.ingestion.src.core.contexts import ExecutionMode, JobContextBuilder
+from apps.ingestion.src.core.contexts import ExecutionMode, TaskContextBuilder
 from apps.ingestion.src.core.contexts.job import (
     ArchiveConfig,
     ExtractConfig,
-    JobContext,
     LoadConfig,
+    TaskContext,
     TransformConfig,
 )
-from apps.ingestion.src.core.models.job import Job
-from apps.ingestion.src.core.models.steps.utils import get_step_class_by_name
+from apps.ingestion.src.core.models.job import Task
+from apps.ingestion.src.core.models.stages.utils import get_stage_class_by_name
 from apps.ingestion.src.services.factory import ServiceFactory
 
 
@@ -29,11 +29,11 @@ def main():
 
     # 1. Initialize Execution Context using the Builder
     # This resolves the workspace_dir and environment settings.
-    builder = JobContextBuilder()
+    builder = TaskContextBuilder()
     exec_ctx = builder.get_execution_context(mode=ExecutionMode.NORMAL)
 
-    # 2. Setup Manual JobContext (Bypassing the full YAML-to-Context for this test)
-    ctx = JobContext(
+    # 2. Setup Manual TaskContext (Bypassing the full YAML-to-Context for this test)
+    ctx = TaskContext(
         job_id=job_id,
         dataset_id=dataset_id,
         run_date=run_date,
@@ -64,19 +64,19 @@ def main():
         archive=ArchiveConfig(enabled=False),
     )
 
-    # 3. Initialize Job
-    # The Job class manages its own manifest and state transitions.
+    # 3. Initialize Task
+    # The Task class manages its own manifest and state transitions.
     composite_key = f"{job_id}:{dataset_id}"
-    job = Job(
+    job = Task(
         run_id=run_id,
         composite_key=composite_key,
         run_date=run_date,
         worker_id="migration_worker",
         exec_ctx=exec_ctx,
-        target_step="start",
+        target_stage="start",
     )
 
-    # 4. Persistence: Manually write the config file into the workspace so the Job can find it
+    # 4. Persistence: Manually write the config file into the workspace so the Task can find it
     # Normally the Orchestrator does this.
     active_root = exec_ctx.active_path
     active_root.mkdir(parents=True, exist_ok=True)
@@ -88,20 +88,20 @@ def main():
 
     # Trigger folder creation and manifest init
     _ = job.folder
-    print(f"Job initialized in folder: {job.folder}")
+    print(f"Task initialized in folder: {job.folder}")
 
     # 5. Run the 6-Step Pipeline
     # Steps: start -> extract -> transform -> write -> publish -> complete
     # (Audit is skipped as per user request)
 
-    steps_to_run = ["start", "extract", "transform", "write", "publish", "complete"]
+    stages_to_run = ["start", "extract", "transform", "write", "publish", "complete"]
 
-    for step_name in steps_to_run:
-        print(f"\n--- Phase: {step_name.upper()} ---")
-        step_instance = get_step_class_by_name(step_name)
-        job.set_step(step_instance)
+    for stage_name in stages_to_run:
+        print(f"\n--- Phase: {stage_name.upper()} ---")
+        stage_instance = get_stage_class_by_name(stage_name)
+        job.set_stage(stage_instance)
         job.execute()
-        print(f"{step_name.capitalize()} completed.")
+        print(f"{stage_name.capitalize()} completed.")
 
     # 6. Verification
     print("\n--- Verification ---")
@@ -110,7 +110,7 @@ def main():
     print(f"Final row count in ClickHouse ({ctx.load.sink_identifier}): {result[0][0]}")
 
     # 7. Cleanup Check
-    # Note: 'complete' step purges extract/transform folders.
+    # Note: 'complete' stage purges extract/transform folders.
     run_parent = job.folder.parent
     if not (run_parent / "extract").exists():
         print("Success: Temporary extract files purged.")

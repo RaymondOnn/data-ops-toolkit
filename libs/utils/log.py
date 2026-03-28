@@ -36,6 +36,16 @@ def setup_logging(
     shared_processors: list[Callable] = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
+        # Adds the name of the logger (e.g. apps.ingestion.src.services.file)
+        structlog.stdlib.add_logger_name,
+        # Adds the filename, function name, and line number
+        structlog.processors.CallsiteParameterAdder(
+            {
+                structlog.processors.CallsiteParameter.FILENAME,
+                structlog.processors.CallsiteParameter.FUNC_NAME,
+                structlog.processors.CallsiteParameter.LINENO,
+            }
+        ),
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.dict_tracebacks,
     ]
@@ -63,9 +73,9 @@ def setup_logging(
     # CONSOLE gets Pretty (if not prod) or JSON
     console_formatter = structlog.stdlib.ProcessorFormatter(
         processor=(
-            structlog.dev.ConsoleRenderer(colors=True)
-            if not is_prod
-            else structlog.processors.JSONRenderer()
+            structlog.processors.JSONRenderer()
+            if is_prod and not is_debug
+            else structlog.dev.ConsoleRenderer(colors=True)
         ),
         foreign_pre_chain=shared_processors,
     )

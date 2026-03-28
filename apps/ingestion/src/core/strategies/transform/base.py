@@ -28,7 +28,7 @@ class Transformer(ABC):
     @abstractmethod
     def apply(self, lf: pl.LazyFrame, ctx: TransformContext) -> pl.LazyFrame:
         """
-        Add transformation steps to the lazy plan.
+        Add transformation stages to the lazy plan.
         Do NOT call .collect() here!
         """
         raise NotImplementedError("Subclasses must implement this method")

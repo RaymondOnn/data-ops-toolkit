@@ -46,7 +46,7 @@ def main():
 
     service = ClickHouseService(name="clickhouse_test", **config)
 
-    # Pre-step: Create the target table in ClickHouse
+    # Pre-stage: Create the target table in ClickHouse
     print(f"Checking if table '{target_table}' exists...")
     create_table_sql = f""" 
     CREATE TABLE IF NOT EXISTS {target_table} (
@@ -108,4 +108,5 @@ def main():
 
 
 if __name__ == "__main__":
+    main()
     main()

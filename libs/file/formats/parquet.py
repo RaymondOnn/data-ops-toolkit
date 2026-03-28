@@ -11,27 +11,27 @@ LOG = logging.getLogger(__name__)
 
 
 class ParquetHandler(FormatHandler):
-    def discover(self, input_path: Path | str) -> list[str]:
+    def discover(self, input_path: Path | str) -> set[str]:
         """Expands a path into a list of Parquet files."""
         path_str = str(input_path)
 
         # If the path already contains a wildcard, expand it directly
         if "*" in path_str:
-            return [
-                str(self.fs.unstrip_protocol(p))
+            return {
+                str(self.fs.unstrip_protocol(str(p)))
                 for p in self.fs.glob(path_str)
                 if self.fs.isfile(p)
-            ]
+            }
 
         if self.fs.isfile(path_str):
-            return [path_str]
+            return {path_str}
 
         pattern = f"{path_str.rstrip('/')}/**/*.parquet"
-        return [
-            str(self.fs.unstrip_protocol(p))
+        return {
+            str(self.fs.unstrip_protocol(str(p)))
             for p in self.fs.glob(pattern)
             if self.fs.isfile(p)
-        ]
+        }
 
     def read_file(self, input_path: Path | str, **kwargs: Any) -> io.BytesIO:
         """Parquet is binary; read directly into buffer."""
@@ -61,7 +61,7 @@ class ParquetHandler(FormatHandler):
 
         LOG.debug(f"ParquetHandler scanning paths. Found {len(paths)} files.")
         # Polars scan_parquet handles list of paths natively and efficiently
-        return pl.scan_parquet(paths, storage_options=self.opts)
+        return pl.scan_parquet(list(paths), storage_options=self.opts)
 
     def from_df(self, df: pl.LazyFrame | pl.DataFrame, output_file: Path | str) -> None:
         """

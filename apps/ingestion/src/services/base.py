@@ -19,7 +19,7 @@ class Service:
 
 class SourceMixin(ABC):
     @abstractmethod
-    def get_work_units(self, target: str, num_partitions: int) -> list[Any]:
+    def get_work_units(self, target: str, num_partitions: int) -> set[Any]:
         """How this service splits 50M rows into chunks."""
         pass
 
@@ -35,8 +35,6 @@ class SinkMixin(ABC):
         self,
         source_dir: Any,
         target_table: str,
-        partition_col: str,
-        partition_val: str,
         file_ext: str = "parquet",
     ) -> tuple[str, int]:
         """
@@ -61,7 +59,7 @@ class SinkMixin(ABC):
         self,
         reference: Any,
         other: Any,
-        exclude_columns: list[str] | None = None,
+        exclude_columns: set[str] | None = None,
     ) -> bool:
         pass
 
