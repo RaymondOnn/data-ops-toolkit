@@ -118,7 +118,7 @@ class Task:
     def manifest(self) -> TaskManifest:
         """
         Dynamic accessor. Reads manifest from disk on demand.
-        Ensures we don't hold JSON objects for thousands of jobs in RAM.
+        Ensures we don't hold JSON objects for thousands of tasks in RAM.
         """
         if not self._manifest_path.exists() or self._manifest_path.stat().st_size == 0:
             # Return a default manifest if file is missing/corrupt
@@ -158,7 +158,7 @@ class Task:
             )
             # Return an empty/default context if appropriate for your logic
             raise FileNotFoundError(
-                f"Config for job {self.job_id} not found in {self.folder}"
+                f"Config for task {self.id} not found in {self.folder}"
             ) from None
 
     @property
@@ -188,7 +188,7 @@ class Task:
         log = LOG.bind(job_id=self.job_id, run_id=self.run_id, stage=self.stage.name)
 
         log.info("Executing stage logic")
-        next_stage_label = self.stage.execute(job=self)
+        next_stage_label = self.stage.execute(task=self)
 
         duration = time.perf_counter() - start_time
         log.info("Step execution finished", duration_sec=round(duration, 4))
@@ -207,8 +207,8 @@ class Task:
 
         # 3. Relocate the config file if it's still in the active root
         # The Orchestrator prefix uses a colon between the identifier and run_id
-        job_cfg_file = f"{self.id}:{self.run_id}_config.json"  # Kept for backward compat with Orchestrator output
-        source_path = self.exec_ctx.active_path / job_cfg_file
+        cfg_file = f"{self.id}:{self.run_id}_config.json"  # Kept for backward compat with Orchestrator output
+        source_path = self.exec_ctx.active_path / cfg_file
         dest_path = self._folder / "config.json"
 
         if source_path.exists() and not dest_path.exists():
@@ -363,20 +363,4 @@ class Task:
     #         report[stage.label] = "DONE" if is_done else "PENDING"
 
     #     return report
-    #     return report
-    #     return report
-    #     return report
-    #     return report
-    #     return report
-    #     return report
-    #     return report
-    #     return report
-    #     return report
-    #     return report
-    #     return report
-    #     return report
-    #     return report
-    #     return report
-    #     return report
-    #     return report
-    #     return report
+

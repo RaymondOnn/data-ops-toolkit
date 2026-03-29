@@ -5,6 +5,8 @@ import diskcache
 import msgspec
 import ray
 import structlog
+from filelock import FileLock
+
 from apps.ingestion.src.core.contexts import ExecutionContext, RayMode
 from apps.ingestion.src.core.models.job import ExecutionStatus, Task, TaskManifest
 from apps.ingestion.src.core.models.stages.enums import EXEC_STAGES, StageName
@@ -12,7 +14,6 @@ from apps.ingestion.src.services.registry import ServiceRegistry
 from apps.ingestion.src.utils.common import find_path
 from apps.ingestion.src.utils.constants import DISKCACHE_FILE_PATH
 from apps.ingestion.src.utils.dates import epoch_to_iso, get_end_of_day_ts
-from filelock import FileLock
 from libs.utils.log import setup_logging
 
 from .enums import TaskMetadata
@@ -52,7 +53,7 @@ class Worker:
         with self.lock:
             raw_meta = self.cache[key]
             if not isinstance(raw_meta, TaskMetadata):
-                raise ValueError(f"Invalid job metadata for key {key}: {raw_meta}")
+                raise ValueError(f"Invalid task metadata for key {key}: {raw_meta}")
             meta: TaskMetadata = raw_meta
 
         # Update status to RUNNING immediately so Engine occupancy tracking is accurate
@@ -79,6 +80,9 @@ class Worker:
         try:
             # 2. Step Check-in: Update manifest immediately to 'RUNNING'
             task.check_in(current_stage)
+
+            # 2.5 Pre-flight validation (Resource & Connectivity check)
+            task.stage.pre_flight(task)
 
             # 3. Execute and get the next stage signal (returns label or 'FINISH')
             next_stage = task.execute()
@@ -172,7 +176,7 @@ class IngestionEngine:
         self._active_tasks: dict[ray.ObjectRef, ray.actor.ActorHandle] = {}
 
     def run(self) -> None:
-        """Main loop managing multiple jobs."""
+        """Main loop managing multiple tasks."""
         LOG.info("Starting Orchestrator...")
         while True:
             self.scan_and_recover()
@@ -251,9 +255,9 @@ class IngestionEngine:
                 raw_meta = self.cache[key]
                 if not isinstance(raw_meta, TaskMetadata):
                     continue
-                job_meta: TaskMetadata = raw_meta
+                task_meta: TaskMetadata = raw_meta
 
-                if job_meta.status == ExecutionStatus.PENDING.value:
+                if task_meta.status == ExecutionStatus.PENDING.value:
                     limit = self.stage_limits[stage_enum]["limit"]
                     # 2. Check if the specific stage has room
                     if current_occupancy[stage_enum] < limit:
@@ -265,9 +269,9 @@ class IngestionEngine:
                             else self.io_pool
                         )
                         if worker := self._get_idle_worker_from_pool(pool):
-                            job_meta.status = ExecutionStatus.PROVISIONING.value
-                            job_meta.last_hb = time.time()
-                            self.cache[key] = job_meta
+                            task_meta.status = ExecutionStatus.PROVISIONING.value
+                            task_meta.last_hb = time.time()
+                            self.cache[key] = task_meta
 
                             # Update local occupancy count
                             current_occupancy[stage_enum] += 1
@@ -348,12 +352,30 @@ class IngestionEngine:
 
                 meta: TaskMetadata = raw_meta
 
-                # Check if heartbeat is older than 5 minutes
+                # --- ENHANCED HEARTBEAT LOGIC ---
                 if (
                     meta.status == ExecutionStatus.RUNNING.value
                     and time.time() - meta.last_hb > 300
                 ):
-                    LOG.warning("Zombie job detected", key=key_str)
+                    # Check the 'Physical Heartbeat' (Manifest timestamp)
+                    # before declaring it a zombie.
+                    active_path = find_path(self.exec_ctx.active_path, meta.run_id)
+                    manifest_file = (
+                        active_path / "manifest.json" if active_path else None
+                    )
+
+                    if manifest_file and manifest_file.exists():
+                        mtime = manifest_file.stat().st_mtime
+                        if time.time() - mtime < 300:
+                            # Physical heartbeat is fresh! Update cache and move on.
+                            meta.last_hb = time.time()
+                            self.cache[key] = meta
+                            continue
+
+                    LOG.warning(
+                        "Zombie task detected - no activity on cache or disk",
+                        key=key_str,
+                    )
                     self._recover_job(stage_label, rest)
 
     def _recover_job(self, stage_name: str, rest_of_key: str) -> None:
@@ -364,12 +386,12 @@ class IngestionEngine:
             key = f"{stage_name}:{rest_of_key}"
 
             # .get() returns Optional[Any], so we check type and None-ness at once
-            job_meta = self.cache.get(key)
-            if not isinstance(job_meta, TaskMetadata):
+            task_meta = self.cache.get(key)
+            if not isinstance(task_meta, TaskMetadata):
                 return
 
-        job_id = job_meta.job_id
-        run_id = job_meta.run_id
+        job_id = task_meta.job_id
+        run_id = task_meta.run_id
 
         # 1. Verify if the stage actually finished on disk but failed to transit
         # We check for the .success marker in the current stage's folder
@@ -385,8 +407,8 @@ class IngestionEngine:
 
             del self.cache[key]
             if next_stage.casefold() != EXEC_STAGES[-1].casefold():
-                job_meta.status = ExecutionStatus.PENDING.value
-                self.cache[f"{next_stage}:{rest_of_key}"] = job_meta
+                task_meta.status = ExecutionStatus.PENDING.value
+                self.cache[f"{next_stage}:{rest_of_key}"] = task_meta
         else:
             # If no symlink exists, the worker died mid-stream or before finalize.
             # Reset to PENDING in the SAME queue to allow a retry.
@@ -395,9 +417,9 @@ class IngestionEngine:
                 job_id=job_id,
                 stage=stage_name,
             )
-            job_meta.status = ExecutionStatus.PENDING.value
-            job_meta.last_hb = time.time()
-            self.cache[key] = job_meta
+            task_meta.status = ExecutionStatus.PENDING.value
+            task_meta.last_hb = time.time()
+            self.cache[key] = task_meta
 
     def _check_stage_completion_on_disk(self, run_id: str, stage_name: str) -> bool:
         """
@@ -476,6 +498,4 @@ class IngestionEngine:
 
         with manifest_path.open("rb") as f:
             # Structural validation included via msgspec
-            return msgspec.json.decode(f.read(), type=TaskManifest)
-            return msgspec.json.decode(f.read(), type=TaskManifest)
             return msgspec.json.decode(f.read(), type=TaskManifest)

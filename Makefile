@@ -1,4 +1,4 @@
-.PHONY: clean-pyc clean-test clean-all help docker-up docker-down docker-rebuild docker-clean docker-logs lint format sync venv-recreate lock
+.PHONY: clean-pyc clean-test clean-all help docker-up docker-down docker-restart docker-rebuild docker-clean docker-logs lint format sync venv-recreate lock
 
 help:
 	@echo "Usage: make <target>"
@@ -55,20 +55,23 @@ lock: ## Update the uv.lock file
 DOCKER_COMPOSE_FILE := apps/ingestion/infra/environments/local/local.docker-compose.yaml
 
 docker-up: ## Start the Docker containers in detached mode
-	docker-compose -f $(DOCKER_COMPOSE_FILE) up -d
+	docker compose -f $(DOCKER_COMPOSE_FILE) up -d --remove-orphans
 
 docker-down: ## Stop and remove the Docker containers
-	docker-compose -f $(DOCKER_COMPOSE_FILE) down
+	docker compose -f $(DOCKER_COMPOSE_FILE) down
+
+docker-restart: ## Stop and then start the Docker containers again
+	make docker-clean && make docker-up 
 
 docker-rebuild: ## Rebuild Docker images and restart containers
-	docker-compose -f $(DOCKER_COMPOSE_FILE) build --no-cache
-	docker-compose -f $(DOCKER_COMPOSE_FILE) up -d --force-recreate
+	docker compose -f $(DOCKER_COMPOSE_FILE) build --no-cache
+	docker compose -f $(DOCKER_COMPOSE_FILE) up -d --force-recreate
 
 docker-clean: ## Stop, remove containers, volumes, and images
-	docker-compose -f $(DOCKER_COMPOSE_FILE) down --volumes --rmi all
+	docker compose -f $(DOCKER_COMPOSE_FILE) down --volumes --rmi all
 
 docker-logs: ## View logs for all Docker services
-	docker-compose -f $(DOCKER_COMPOSE_FILE) logs -f
+	docker compose -f $(DOCKER_COMPOSE_FILE) logs -f
 
 docker-exec-ch: ## Execute a command inside the ClickHouse container
-	docker-compose -f $(DOCKER_COMPOSE_FILE) exec clickhouse bash
+	docker compose -f $(DOCKER_COMPOSE_FILE) exec clickhouse bash

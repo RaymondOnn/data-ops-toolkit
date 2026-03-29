@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,6 @@ class Reader(ABC):
     @abstractmethod
     def fetch(
         self, service: SourceMixin, context: ReaderContext, target_folder: Path
-    ) -> set[dict[str, Any]]:
+    ) -> Generator[dict[str, Any], None, None]:
         raise NotImplementedError("Subclasses must implement this method")
 

@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from apps.ingestion.src.core.models.job import Task
 
 
-class AuditStep(ExecutionStage):
+class AuditStage(ExecutionStage):
     name = StageName.AUDIT.label
     manifest: AuditPayload
 

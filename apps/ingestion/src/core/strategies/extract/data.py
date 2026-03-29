@@ -7,6 +7,7 @@ import msgspec
 import polars as pl
 import ray
 import structlog
+
 from apps.ingestion.src.services.base import SourceMixin
 from apps.ingestion.src.services.database import DatabaseSource
 
@@ -24,10 +25,10 @@ class DataReader(Reader):
 
     def fetch(
         self, service: SourceMixin, context: ReaderContext, target_folder: Path
-    ) -> list[dict[str, Any]]:
-        """Entry point for ExtractStep."""
+    ) -> Generator[dict[str, Any], None, None]:
+        """Emits metadata for each file artifact as it is created."""
         df_generator = self._get_ray_generator(service, context)
-        return self.to_parquet(df_generator, target_folder)
+        yield from self.to_parquet(df_generator, target_folder)
 
     def _get_ray_generator(
         self,
@@ -42,7 +43,6 @@ class DataReader(Reader):
             count=len(work_units),
             source=context.source_identifier,
         )
-
 
         # 2. Package the metadata for the workers.
         # We don't send the 'service' object; we send the 'config' to recreate it.
@@ -120,13 +120,12 @@ class DataReader(Reader):
 
     def to_parquet(
         self, generator: Generator[pl.DataFrame, None, None], destination: Path
-    ) -> list[dict[str, Any]]:
+    ) -> Generator[dict[str, Any], None, None]:
         """
         Consumes the stream and saves each chunk as a unique parquet file.
-        Returns metadata required for the FileInfo structs.
+        Yields metadata immediately for real-time progress tracking.
         """
         destination.mkdir(parents=True, exist_ok=True)
-        metadata_list = []
 
         for i, df in enumerate(generator):
             if df.is_empty():
@@ -139,12 +138,8 @@ class DataReader(Reader):
             df.write_parquet(file_path, compression="snappy")
             LOG.info("Exported parquet chunk", path=str(file_path), rows=len(df))
 
-            # Capture metadata for the ExtractStep to process
-            metadata_list.append(
-                {"path": file_path, "rows": len(df), "schema": df.schema}
-            )
-
-        return metadata_list
+            # Yield metadata back to the Stage for checkpointing
+            yield {"path": file_path, "rows": len(df), "schema": df.schema}
 
     @abstractmethod
     def get_work_units(self, client: Any, context: ReaderContext) -> set[Any]:

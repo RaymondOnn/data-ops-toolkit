@@ -2,6 +2,7 @@ from collections.abc import Callable
 from typing import Any, ClassVar
 
 import structlog
+from apps.ingestion.src.utils.constants import APP_CURRENT_ENV
 from libs.auth.factory import AuthFactory
 from libs.auth.models import Secret
 
@@ -19,6 +20,8 @@ class ServiceFactory:
     _SERVICES: ClassVar[dict[str, type]] = {}
     # Registry of Singleton Instances (Populated at Runtime)
     _INSTANCES: ClassVar[dict[str, Any]] = {}
+    # Global App Settings (Provided by Builder)
+    _provider: ClassVar[Any] = None
 
     @staticmethod
     def _make_hashable(value: Any) -> Any:
@@ -36,14 +39,14 @@ class ServiceFactory:
 
         def wrapper(wrapped_class: type) -> type:
             cls._SERVICES[name.casefold()] = wrapped_class
-            LOG.debug(
-                "Service registered successfully",
-                service_name=name.casefold(),
-                class_name=wrapped_class.__name__,
-            )
             return wrapped_class
 
         return wrapper
+
+    @classmethod
+    def get_provider(cls, settings: Any) -> None:
+        provider_cfg = settings.get("secret_provider", {}).to_dict()
+        cls._provider = AuthFactory.get_provider(env=APP_CURRENT_ENV, **provider_cfg)
 
     @classmethod
     def get_service(cls, service_type: str, **config: Any) -> Any:
@@ -60,6 +63,10 @@ class ServiceFactory:
                 service_type=service_type,
                 instance_key=instance_key,
             )
+            LOG.debug(
+                "Available services in registry",
+                services=list(cls._SERVICES.keys()),
+            )
             service_cls = cls._SERVICES.get(service_type.casefold())
             if not service_cls:
                 raise ServiceNotFound(f"No service found for {service_type}")
@@ -68,8 +75,12 @@ class ServiceFactory:
             # If 'secret_key' (the ID) is present, wrap it in a Secret object.
             # This 'Secret' object is what gets sent to Ray workers.
             if config.get("secret_key"):
-                provider = AuthFactory.get_provider()
-                config["password"] = Secret(config["secret_key"], provider)
+                if cls._provider is None:
+                    raise ValueError(
+                        "Secret provider not configured in ServiceFactory."
+                    )
+
+                config["password"] = Secret(config["secret_key"], cls._provider)
 
             cls._INSTANCES[instance_key] = service_cls(name=instance_key, **config)
         else:

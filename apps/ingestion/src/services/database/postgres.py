@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import structlog
+
 from apps.ingestion.src.services.database.base import DatabaseSink, DatabaseSource
 from apps.ingestion.src.services.factory import ServiceFactory
 from libs.database.clients.postgres import PostgresClient
@@ -35,31 +36,22 @@ class PostgresService(DatabaseSource, DatabaseSink):
         staging_table = f"stg_{target_table}_{int(time.time())}"
         self.client.sql(f"CREATE UNLOGGED TABLE {staging_table} (LIKE {target_table})")
 
-        # Polars scan_parquet handles a directory path natively.
-        # It will treat all parquet files in the folder as a single dataset.
-        lf = pl.scan_parquet(f"{source_dir}/*.{file_ext}")
-
-        # 1. Get the connection from the DBAPI
         conn = self.client.connect()
-
         try:
             with conn.cursor() as cursor:
-                # 2. Open the COPY pipe
                 copy_sql = (
                     f"COPY {staging_table} FROM STDIN WITH (FORMAT CSV, HEADER FALSE)"
                 )
 
                 with cursor.copy(copy_sql) as copy:
-                    # Stream in 100k chunks to keep RAM flat
-                    df = lf.collect()
-                    if not isinstance(df, pl.DataFrame):
-                        raise TypeError(f"Expected polars.DataFrame, got {type(df)}")
-
-                    rows_staged = df.height
-
-                    for batch_df in df.iter_slices(n_rows=100_000):
-                        # write_csv returns bytes, which we feed into the copy pipe
-                        copy.write(batch_df.write_csv(include_header=False))
+                    # STREAMING BULK LOAD: Use sink_csv to a pipe or process
+                    # batches to keep RAM usage under 2GB.
+                    # For Postgres, we iterate the folder and COPY each file.
+                    rows_staged = 0
+                    for file_path in source_dir.glob(f"*.{file_ext}"):
+                        df = pl.read_parquet(file_path)
+                        copy.write(df.write_csv(include_header=False))
+                        rows_staged += len(df)
 
             # Commit only if the entire 50M row stream succeeded
             conn.commit()
@@ -132,7 +124,4 @@ class PostgresService(DatabaseSource, DatabaseSink):
             WHERE 1 = 0
         """
         LOG.info("Cloning table structure", source=reference, destination=other)
-        self.client.sql(sql)
-        self.client.sql(sql)
-        self.client.sql(sql)
         self.client.sql(sql)

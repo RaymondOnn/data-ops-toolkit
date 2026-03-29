@@ -4,7 +4,6 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import structlog
-
 from libs.clients.base import ClientCantConnect
 from libs.file import FileSystemClient, FileSystemSkills, FormatFactory
 from libs.resilience.circuit_breaker import CircuitBreaker
@@ -81,14 +80,14 @@ class StorageSource(BaseStorageService, SourceMixin):
         # If target is a directory, we peek at one file to get the extension
         peek = next(self.client.walk_paths(target), None)
         if not peek:
-            return set()
+            return []
 
         ext = Path(peek).suffix.lstrip(".").lower()
         handler: FormatHandler = FormatFactory.get_handler(
             ext, self.client.fs, self.opts
         )
 
-        # 2. Use Handler-specific discovery (e.g. CSVHandler 
+        # 2. Use Handler-specific discovery (e.g. CSVHandler
         # knows to find .csv and .txt)
         files = list(handler.discover(target))
 
@@ -101,7 +100,7 @@ class StorageSource(BaseStorageService, SourceMixin):
         return [{"files": files[i::num_partitions]} for i in range(num_partitions)]
 
     @protect_service(breaker)
-    def fetch_data(self, unit: set[str] | str) -> pl.DataFrame | pl.LazyFrame:
+    def fetch_data(self, unit: list[str] | str) -> pl.DataFrame | pl.LazyFrame:
         """
         Reads a list of files (the work unit) into a single Polars DataFrame.
         Supports Parquet, CSV, and JSON formats.
@@ -310,4 +309,3 @@ class DataLakeService(StorageSource, StorageSink):
             storage_options=storage_options,
             **config,
         )
-        

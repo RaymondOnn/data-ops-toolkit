@@ -3,7 +3,6 @@ from typing import TYPE_CHECKING
 
 import msgspec
 import structlog
-
 from apps.ingestion.src.core.models.job.manifest import WritePayload
 from apps.ingestion.src.core.strategies.load.load import Loader
 from apps.ingestion.src.services.factory import ServiceFactory
@@ -18,28 +17,30 @@ if TYPE_CHECKING:
 LOG = structlog.getLogger(__name__)
 
 
-class WriteStep(ExecutionStage):
+class WriteStage(ExecutionStage):
     name = StageName.WRITE.label
     manifest: WritePayload
 
-    def execute(self, job: "Task") -> str:
+    def pre_flight(self, task: "Task") -> None:
+        """Verify sink connectivity from the execution node."""
+        # Factory initialization already validates basic params and Secret resolution
+        self.service = ServiceFactory.get_sink(
+            task.context.load.sink_type, **task.context.load.sink_config
+        )
+        
+    def execute(self, task: "Task") -> str:
         start_ts = datetime.now().astimezone().isoformat()
-        task_ctx = job.context
+        task_ctx = task.context
 
         try:
             # 1. Resolve logical input (The partitioned parquet files)
-            source_dir = (job.folder / "transform").resolve()
+            source_dir = (task.folder / "transform").resolve()
 
             # Verify source_dir actually contains files before proceeding
             if not any(source_dir.glob("*.parquet")):
                 raise FileNotFoundError(
                     f"No parquet files found in transformed data directory: {source_dir}"
                 )
-
-            # 1. Get the Service (Securely initialized on Ray worker via ServiceFactory)
-            service = ServiceFactory.get_sink(
-                task_ctx.load.sink_type, **task_ctx.load.sink_config
-            )
 
             LOG.info(
                 "Starting load",
@@ -53,7 +54,7 @@ class WriteStep(ExecutionStage):
 
             # 2. PHASE 1: LOAD TO STAGING
             staging_artifact, rows_loaded = loader.load(
-                service=service,
+                service=self.service,
                 source_dir=source_dir,
                 target_table=task_ctx.load.sink_identifier,
                 partition_col=task_ctx.load.partition_col,
@@ -71,24 +72,15 @@ class WriteStep(ExecutionStage):
                 start_timestamp_utc=start_ts,
             )
 
-            self.finalize(job, results=msgspec.to_builtins(payload))
+            self.finalize(task, results=msgspec.to_builtins(payload))
             LOG.info(
                 "Load complete",
                 stage=self.name,
                 rows=int(rows_loaded),
                 staging_artifact=staging_artifact,
             )
-            return str(self._transit(job))
+            return str(self._transit(task))
 
         except Exception as exc:
-            self.finalize(job, exception=exc)
-            raise
-            raise
-            raise
-            raise
-            raise
-            raise
-            raise
-            raise
-            raise
+            self.finalize(task, exception=exc)
             raise

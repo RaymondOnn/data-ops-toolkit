@@ -3,7 +3,6 @@ from typing import TYPE_CHECKING
 
 import msgspec
 import structlog
-
 from apps.ingestion.src.core.models.job.manifest import PublishPayload
 from apps.ingestion.src.core.strategies.load.load import Loader, WriteContext
 from apps.ingestion.src.services.factory import ServiceFactory
@@ -18,7 +17,7 @@ if TYPE_CHECKING:
 LOG = structlog.getLogger(__name__)
 
 
-class PublishStep(ExecutionStage):
+class PublishStage(ExecutionStage):
     """
     Decision: The PublishStep makes the data 'Public'.
     We use the context to identify the target 'Prod' table vs 'Staging' table.
@@ -28,12 +27,12 @@ class PublishStep(ExecutionStage):
 
     manifest: PublishPayload
 
-    def execute(self, job: "Task") -> str:
-        task_ctx = job.context
+    def execute(self, task: "Task") -> str:
+        task_ctx = task.context
         start_ts = datetime.now().astimezone().isoformat()
 
         try:
-            write_meta = job.manifest.write
+            write_meta = task.manifest.write
             if not write_meta:
                 raise ValueError("Write metadata not found in manifest.")
 
@@ -70,8 +69,8 @@ class PublishStep(ExecutionStage):
             # 3. PAYLOAD: The 'Success Receipt'
             # Get count from previous write stage if available
             final_count = 0
-            if job.manifest.write:
-                final_count = job.manifest.write.rows_inserted
+            if task.manifest.write:
+                final_count = task.manifest.write.rows_inserted
 
             payload = PublishPayload(
                 final_destination=task_ctx.load.sink_identifier,
@@ -79,21 +78,12 @@ class PublishStep(ExecutionStage):
                 start_timestamp_utc=start_ts,
             )
 
-            self.finalize(job, results=msgspec.to_builtins(payload))
+            self.finalize(task, results=msgspec.to_builtins(payload))
             LOG.info(
                 "Publish complete", stage=self.name, table=task_ctx.load.sink_identifier
             )
-            return str(self._transit(job))
+            return str(self._transit(task))
 
         except Exception as e:
-            self.finalize(job, exception=e)
-            raise
-            raise
-            raise
-            raise
-            raise
-            raise
-            raise
-            raise
-            raise
+            self.finalize(task, exception=e)
             raise

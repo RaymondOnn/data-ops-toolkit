@@ -5,11 +5,10 @@ from typing import Any
 
 import msgspec
 import structlog
-from dynaconf import Dynaconf
-
 from apps.ingestion.src.core.contexts.execution import ExecutionContext, ExecutionMode
 from apps.ingestion.src.core.contexts.job import TaskContext
 from apps.ingestion.src.utils.constants import APP_CONFIG_ROOT, APP_CURRENT_ENV
+from dynaconf import Dynaconf
 
 LOG = structlog.get_logger()
 APP_DEFAULT_CONFIG = APP_CONFIG_ROOT / "app.yaml"
@@ -178,7 +177,8 @@ class TaskContextBuilder:
                 return svc_dict
 
             LOG.warning(
-                f"Service reference '{ref}' found, but no definition exists in services block.",
+                f"Service reference '{ref}' found, "
+                "but no definition exists in services block.",
                 ref_key=ref_key,
             )
 

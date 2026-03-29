@@ -1,16 +1,15 @@
-version: '3'
-
 services:
   clickhouse:
     image: clickhouse/clickhouse-server:latest
-    container_name: clickhouse-dev
+    # container_name: clickhouse-dev
     environment:
       - CLICKHOUSE_USER=default
       - CLICKHOUSE_PASSWORD=password
     volumes:
-      - ../../../tmp:/var/lib/clickhouse/user_files/tmp
-      - ../../../sql/definitions:/docker-entrypoint-initdb.d
-      - ./clickhouse_settings.xml:/etc/clickhouse-server/config.d/clickhouse_settings.xml
+      - ../../../sql/definitions:/sql
+      - ./tmp:/var/lib/clickhouse/user_files/tmp
+      # - ./clickhouse/init_databases.sh:/docker-entrypoint-initdb.d/init_databases.sh
+      # - ./clickhouse/clickhouse_settings.xml:/etc/clickhouse-server/config.d/clickhouse_settings.xml
     ports:
       - "8123:8123"
       - "9000:9000"
@@ -19,10 +18,28 @@ services:
         soft: 262144
         hard: 262144
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8123/ping"]
+      test: ["CMD", "clickhouse-client", "--user", "default", "--password", "password", "--query", "SELECT 1"]
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - ch_ntw
+
+  clickhouse-init:
+    image: clickhouse/clickhouse-server:latest
+    environment:
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=password
+      - CH_HOST=clickhouse
+    volumes:
+      - ./clickhouse/init_databases.sh:/init_databases.sh
+      - ../../../sql/definitions:/sql
+    depends_on:
+      - clickhouse
+    networks:
+      - ch_ntw
+    entrypoint: /bin/bash
+    command: /init_databases.sh
 
   # S3 replacement
   # garage:
@@ -40,3 +57,7 @@ services:
   #     - ./garage-data:/var/lib/garage/data
   #   environment:
   #     - RUST_LOG=garage=info
+
+networks:
+  ch_ntw:
+    driver: bridge

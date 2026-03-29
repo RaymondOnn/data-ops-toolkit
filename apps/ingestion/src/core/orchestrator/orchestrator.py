@@ -3,7 +3,6 @@ import time
 from collections import Counter
 from copy import deepcopy
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -27,13 +26,12 @@ if TYPE_CHECKING:
     from .enums import TaskMetadata
 
 LOG = structlog.getLogger(__name__)
-PID_FILE = Path(".daemon.pid")
 MISFIRE_GRACE_PERIOD_SECS = 3600
 DEFAULT_SYNC_TIMEOUT_SECS = 1800  # 1 Hour default
 
 
 def generate_run_id() -> str:
-    """Generates a unique run ID for a job."""
+    """Generates a unique run ID for a task."""
     timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
     short_hash = generate(alphabet="0123456789abcdef", size=6)
     return f"{timestamp}-{short_hash}"
@@ -61,6 +59,8 @@ class Orchestrator:
         # Service Discovery: Use the resolved app settings from the builder
         db_config = deepcopy(self.builder.app_settings.get("services.clickhouse", {}))
         service_name = db_config.pop("type")
+
+        ServiceFactory.get_provider(self.builder.app_settings)
         self.db_service = ServiceFactory.get_service(service_name, **db_config)
         self.state_store = StateStore(self.db_service, self.exec_ctx)
         # State timers
@@ -82,7 +82,15 @@ class Orchestrator:
         self.signals.register_command("PURGE_EXPIRED.cmd", self.lifecycle.handle_expiry)
         # self.signals.register_command("RELOAD_CONFIG.cmd", self._reload_internal_config)
 
+        self._perform_platform_preflight()
         LOG.info("Orchestrator initialized")
+
+    def _perform_platform_preflight(self) -> None:
+        """Validates critical shared infrastructure."""
+        # 1. Verify connection to the State Tracking database
+        self.db_service.client.connect()
+        # 2. Ensure signal directory is writable
+        self.exec_ctx.signal_path.mkdir(parents=True, exist_ok=True)
 
     def run(
         self,
@@ -457,7 +465,6 @@ def create_orchestrator(app_cfg_path: str | None = None) -> Orchestrator:
     builder = TaskContextBuilder(app_cfg_path=app_cfg_path)
 
     # 2. Return fully wired Orchestrator (It will resolve its own services)
-    return Orchestrator(builder=builder)
     return Orchestrator(builder=builder)
     return Orchestrator(builder=builder)
     return Orchestrator(builder=builder)

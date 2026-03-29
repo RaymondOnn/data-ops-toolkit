@@ -33,50 +33,52 @@ class ExecutionStage(ABC):
         raise ValueError(f"Invalid offset: {offset}")
 
     @abstractmethod
-    def execute(self, job: "Task") -> str:
-        """Execute the current TaskStage with the given engine and dataframe.
-
-        :param engine: The IngestionEngine instance.
-        :type engine: IngestionEngine
-        :param df: The dataframe to process in this stage.
-        :type df: Any
+    def pre_flight(self, task: "Task") -> None:
         """
-        raise NotImplementedError
+        Performs node-specific connectivity and resource checks.
+        Should raise an exception if requirements are not met.
+        """
+        pass
 
-    def _transit(self, job: "Task") -> str:
+    @abstractmethod
+    def execute(self, task: "Task") -> str:
+        """Execute the current Task Stage logic."""
+        pass
+
+    def _transit(self, task: "Task") -> str:
         """Transit the Task instance to the next stage."""
         from apps.ingestion.src.core.models.stages.utils import get_stage_class_by_name
 
         next_stage = StageName.next(self.name)
         if next_stage:
-            job.set_stage(get_stage_class_by_name(next_stage.label))
+            task.set_stage(get_stage_class_by_name(next_stage.label))
             return next_stage.label
         return "FINISH"
 
-    def move_to_folder(self, job: "Task", category: str) -> None:
+    def move_to_folder(self, task: "Task", category: str) -> None:
         """
         Physically moves the metadata folder to HOLD or QUARANTINE.
         category: "HOLD" | "QUARANTINE" | "DONE"
         """
         # Use central helper from context
-        new_path = job.exec_ctx.get_run_path(
-            job.job_id, job.dataset_id, job.run_date, job.run_id, category=category
+        new_path = task.exec_ctx.get_run_path(
+            task.job_id, task.dataset_id, task.run_date, task.run_id, category=category
         )
 
         # Ensure parent structure exists
         new_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if job.folder.exists():
-            LOG.info("Moving metadata folder", src=job.folder, dst=new_path)
+        if task.folder.exists():
+            LOG.info("Moving metadata folder", src=task.folder, dst=new_path)
             # shutil.move handles cross-filesystem moves if necessary
-            shutil.move(str(job.folder), str(new_path))
+            shutil.move(str(task.folder), str(new_path))
 
             # Update the job instance reference so subsequent saves hit the new path
-            job._folder = new_path
+            task._folder = new_path
 
     def finalize(
         self,
-        job: "Task",
+        task: "Task",
         data_folder: Path | None = None,
         results: dict[str, Any] | None = None,
         exception: Exception | None = None,
@@ -93,11 +95,11 @@ class ExecutionStage(ABC):
         )
 
         results = results or {}
-        data = msgspec.to_builtins(job.manifest)
+        data = msgspec.to_builtins(task.manifest)
 
         # 4. SYMLINK (Pointer to immutable data)
         if data_folder:
-            active_link = job.folder / self.name
+            active_link = task.folder / self.name
             if active_link.exists() or active_link.is_symlink():
                 active_link.unlink()
 
@@ -115,7 +117,7 @@ class ExecutionStage(ABC):
                 error_type=type(exception).__name__,
                 message=str(exception),
                 traceback=traceback.format_exc(),
-                # worker_id=job.worker_id,
+                # worker_id=task.worker_id,
             )
             error = msgspec.to_builtins(error_payload)
 
@@ -128,27 +130,27 @@ class ExecutionStage(ABC):
                 #     else ExecutionStatus.BLOCKED
                 # )
 
-                HoldState(job).on_enter(data=error)
+                HoldState(task).on_enter(data=error)
                 target_category = "HOLD"
             else:
-                FailedState(job).on_enter(data=error)
+                FailedState(task).on_enter(data=error)
                 target_category = "FAILED"
 
             # 2.5 Signal change BEFORE moving the folder to avoid timing bugs
             # where the Orchestrator looks in 'active' while the move is in progress.
-            job.request_status_sync(is_failure=True)
+            task.request_status_sync(is_failure=True)
 
-            self.move_to_folder(job, target_category)
+            self.move_to_folder(task, target_category)
         else:
             # Update the bitmask
             current_mask = data["bitmask"]
             new_mask = current_mask | self.bitmask
 
             next_stage = StageName.next(self.name)
-            reached_target = job.context.to_stage == self.name
+            reached_target = task.context.to_stage == self.name
 
             if new_mask.is_fully_complete() or reached_target:
-                SuccessState(job).on_enter(
+                SuccessState(task).on_enter(
                     data={
                         "bitmask": new_mask,
                         self.name: results or {},
@@ -156,24 +158,22 @@ class ExecutionStage(ABC):
                 )
                 LOG.info(
                     "Task reached target state",
-                    job_id=job.job_id,
-                    target=job.target_stage,
+                    job_id=task.job_id,
+                    target=task.target_stage,
                 )
             else:
                 # Persist stage results and bitmask for intermediate stages
-                job.update_manifest({self.name: results, "bitmask": new_mask.value})
+                task.update_manifest({self.name: results, "bitmask": new_mask.value})
 
             # Continue the chain (The Orchestrator will pick this up in the next scan)
             if next_stage:
                 LOG.info(
                     "Task progressing to next stage",
                     stage=self.name,
-                    job_id=job.job_id,
+                    job_id=task.job_id,
                     next=next_stage.label,
                 )
 
             # 5. ATOMIC SWAP (Success Case)
-            job.request_status_sync()
-            job.request_status_sync()
-            job.request_status_sync()
-            job.request_status_sync()
+            task.request_status_sync()
+

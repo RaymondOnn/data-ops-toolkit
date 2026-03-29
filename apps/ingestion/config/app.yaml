@@ -25,29 +25,33 @@ local:
   archive_base_path: "file:///tmp/archive"
   storage_options:
     region: "us-east-1"
+  secret_provider:
+    type: "local_file"
+    path: "./.secrets.json"
+    master_key: "SECRET_MASTER_KEY" # This can be an env var name or plain text for local dev
   services:
     file:
       type: flat_file
       url: "."
     clickhouse: # Now pointing to a Docker container
-      type: "clickhouse_db"
-      host: "localhost"
+      type: clickhouse_db
+      host: localhost
       port: 8123
-      user: "default"
-      secret_key: "CLICKHOUSE_PASSWORD"
-    mock_s3:
+      user: default
+      secret_key: CLICKHOUSE_PASSWORD
+    ms3:
       type: data_lake
       url: "s3://landing-zone"
       storage_options:
         <<: *moto_base
         use_mock: true # This flag triggers the bucket creation
-    moto_server_s3:
+    s3_sink:
       type: data_lake
       url: "s3://landing-zone"
       storage_options:
         <<: *moto_base
         use_mock: false # Set to true if you want the client to auto-create the bucket on the server
-    moto_archive: # Specific archive configuration for the 'local' environment
+    s3_archive: # Specific archive configuration for the 'local' environment
       type: standard_archive
       url: "s3://landing-zone"
       storage_options:
@@ -59,12 +63,12 @@ dev:
   services:
     file:
       type: flat_file
-    clickhouse:
+    clickhouse: # Now pointing to a Docker container
       type: "clickhouse_db"
       host: "localhost"
       port: 8123
       user: "default"
-      secret_key: "CLICKHOUSE_PASSWORD" 
+      secret_key: "CLICKHOUSE_PASSWORD"
 
 # production:
 #   archive_base_path: "s3://prod-vault/archival"

@@ -43,13 +43,6 @@ class S3Client(FileSystemClient):
 
             self._fs: S3FileSystem = fsspec.filesystem("s3", **self.opts)
 
-            # If we are mocking, ensure the bucket exists (Moto starts empty)
-            if self.opts.get("use_mock"):
-                bucket = self.url.split("://")[-1].split("/")[0]
-                if not self._fs.exists(bucket):
-                    LOG.debug("Moto/Mock detected: Pre-creating bucket", extra={"bucket": bucket})
-                    self._fs.mkdir(bucket)
-
         return self._fs
 
     def reconnect(self, max_retries: int = 3) -> None:
@@ -63,3 +56,4 @@ class S3Client(FileSystemClient):
                 if i == max_retries - 1:
                     raise
                 time.sleep(2**i)
+     

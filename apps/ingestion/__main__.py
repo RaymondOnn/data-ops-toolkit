@@ -111,17 +111,7 @@ def run(
             overrides=overrides,
         )
 
-    # If in debug mode and Ray is local, one wrapper covers the whole process
-    if state["debug"] and state["ray_mode"] == RayMode.LOCAL:
-        try:
-            from moto import mock_aws
-
-            with mock_aws():
-                _execute_orchestrator()
-        except ImportError:
-            _execute_orchestrator()
-    else:
-        _execute_orchestrator()
+    _execute_orchestrator()
 
     try:
         pass  # The _execute_orchestrator() call is now outside the try-except

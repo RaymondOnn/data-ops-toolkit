@@ -16,14 +16,21 @@ LOG = structlog.get_logger(__name__)
 @ServiceFactory.register("clickhouse_db")
 class ClickHouseService(DatabaseSource, DatabaseSink):
     def _init_client(self, **config: Any) -> ClickhouseClient:
-        print(config)
+        # 1. Resolve Password safely
+        # If 'secret_key' was used, 'password' is a Secret object. 
+        # If 'password' was a string in YAML, it stays a string.
+        raw_password = config.get("password", "")
+        resolved_password = (
+            raw_password.resolve(sanitize=True) 
+            if hasattr(raw_password, "resolve") 
+            else str(raw_password)
+        )
 
-        secret: Secret = config["password"]
         return ClickhouseClient(
             host=config.get("host", "localhost"),
             port=config.get("port", 8123),
             user=config.get("user", "default"),
-            password=secret.resolve(sanitize=True) if secret else "",
+            password=resolved_password,
         )
 
     def stage_data(

@@ -274,10 +274,3 @@ class StateStore:
         with self.stream_path.open("ab") as f:
             f.write(line)
             f.write(line)
-            f.write(line)
-            f.write(line)
-            f.write(line)
-            f.write(line)
-            f.write(line)
-            f.write(line)
-            f.write(line)
