@@ -182,17 +182,51 @@ class TaskContextBuilder:
                 ref_key=ref_key,
             )
 
-        # Fallback to inline config block:
-        # Dataset (Active -> Default) > Task (Active -> Default)
-        return dict(
-            settings.get(f"datasets.{dataset_id}.{ref_key}.config")
-            or settings.from_env("default").get(
-                f"datasets.{dataset_id}.{ref_key}.config"
+            # Fallback to inline config block:
+            # Dataset (Active -> Default) > Task (Active -> Default)
+            svc_dict = dict(
+                settings.get(f"datasets.{dataset_id}.{ref_key}.config")
+                or settings.from_env("default").get(
+                    f"datasets.{dataset_id}.{ref_key}.config"
+                )
+                or settings.get(f"job.{ref_key}.config")
+                or settings.from_env("default").get(f"job.{ref_key}.config")
+                or {}
             )
-            or settings.get(f"job.{ref_key}.config")
-            or settings.from_env("default").get(f"job.{ref_key}.config")
-            or {}
+
+            if svc_dict is not None and "type" not in svc_dict:
+                LOG.warning(
+                    f"Service dictionary for '{ref}' is missing the required 'type' key. "
+                    "Factory initialization will likely fail.",
+                    dataset_id=dataset_id,
+                    config=svc_dict,
+                )
+            return svc_dict
+
+        LOG.critical(
+            f"No service reference found for '{ref_key}' in dataset '{dataset_id}'. "
+            "Falling back to inline configuration if available."
         )
+        return {}
+
+    def _load_schema_file(self, job_id: str, schema_file: str) -> list[dict[str, Any]]:
+        """
+        Reads a CSV schema file from the job's config directory.
+        Expected format: CSV with headers matching the required schema contract.
+        """
+        import csv
+
+        schema_path = APP_CONFIG_ROOT / job_id / schema_file
+        if not schema_path.exists():
+            LOG.warning(
+                "Schema file defined but not found on disk", path=str(schema_path)
+            )
+            return []
+
+        LOG.debug("Loading schema from file", path=str(schema_path))
+        with schema_path.open(encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            return list(reader)
 
     def build(
         self,
@@ -205,10 +239,10 @@ class TaskContextBuilder:
         """Maps merged config into a set of msgspec TaskContext objects."""
         LOG.debug("Building job contexts", job_id=job_id, run_date=run_date_str)
 
-        job_cfg_path = Path("apps/ingestion/config") / job_id / "config.yaml"
+        task_cfg_path = APP_CONFIG_ROOT / job_id / "config.yaml"
 
         # 1. Initialize Dynaconf with job-specific overrides
-        settings_files = [job_cfg_path]
+        settings_files = [task_cfg_path]
         if overrides_json:
             settings_files.append(overrides_json)
 
@@ -290,42 +324,35 @@ class TaskContextBuilder:
                     return val
             return default
 
+        # 0. Handle Schema File Loading
+        schema_file = get_val("extract.schema_file")
+        schema_items = get_val("schema_items", [])
+        if schema_file:
+            schema_items = self._load_schema_file(job_id, schema_file)
+
         # 1. Resolve full service dictionaries (respecting service_ref)
+        # pop() extracts specific 'type' and leave residual as 'config'
         source_svc = self._resolve_service(settings, "extract", dataset_id)
-        sink_svc = self._resolve_service(settings, "load", dataset_id)
-        archive_svc = self._resolve_service(settings, "archive", dataset_id)
-
-        # 2. Extract specific 'type' and leave residual as 'config'
-        # 2. Validate 'type' presence and extract it
-        for label, svc_dict in [
-            ("source", source_svc),
-            ("sink", sink_svc),
-            ("archive", archive_svc),
-        ]:
-            if svc_dict is not None and "type" not in svc_dict:
-                LOG.warning(
-                    f"Service dictionary for {label} is missing the required 'type' key. "
-                    "Factory initialization will likely fail.",
-                    dataset_id=dataset_id,
-                    config=svc_dict,
-                )
-
-        # pop() with fallback to hierarchical config lookup
         source_type = (
             source_svc.pop("type", get_val("source.type"))
             if source_svc
             else get_val("source.type")
         )
+
+        sink_svc = self._resolve_service(settings, "load", dataset_id)
         sink_type = (
             sink_svc.pop("type", get_val("sink.type"))
             if sink_svc
             else get_val("sink.type")
         )
-        archive_type = (
-            archive_svc.pop("type", get_val("archive.type"))
-            if archive_svc
-            else get_val("archive.type")
-        )
+
+        if enable_archival := get_val("archive.enable_archival"):
+            archive_svc = self._resolve_service(settings, "archive", dataset_id)
+            archive_type = (
+                archive_svc.pop("type", get_val("archive.type"))
+                if archive_svc
+                else get_val("archive.type")
+            )
 
         ctx_data = {
             "job_id": job_id,
@@ -337,10 +364,10 @@ class TaskContextBuilder:
                 "source_identifier": get_val("extract.source_identifier")
                 or get_val("source_identifier"),
                 "num_partitions": get_val("num_partitions", 1),
-                "load_mode": get_val("extract.load_mode", "snapshot"),
+                "load_mode": get_val("extract.load_mode"),
                 "source_config": source_svc,
                 "source_params": get_val("extract.source_params", {}),
-                "schema_items": get_val("schema_items", []),
+                "schema_items": schema_items,
             },
             "transform": {
                 "transform_type": get_val("transform.type", "default"),
@@ -351,16 +378,18 @@ class TaskContextBuilder:
                 "sink_identifier": get_val("load.sink_identifier")
                 or get_val("target_destination"),
                 "sink_config": sink_svc,
-                "partition_col": get_val("partition_col", "run_date"),
+                "partition_col": get_val("partition_col", "_partition"),
                 "partition_value": get_val("partition_value", run_date),
                 "load_params": get_val("load.load_params", {}),
             },
             "archive": {
-                "enabled": get_val("archive.enable_archival", True),
-                "retention_days": get_val("archive.retention_days", 2555),
-                "base_path": get_val("archive.base_path", "/mnt/archive"),
-                "type": archive_type,
-                "config": archive_svc,
+                "enabled": enable_archival,
+                "retention_days": (
+                    get_val("archive.retention_days") if enable_archival else None
+                ),
+                "base_path": get_val("archive.base_path") if enable_archival else None,
+                "type": archive_type if enable_archival else None,
+                "config": archive_svc if enable_archival else None,
             },
         }
 
@@ -376,8 +405,4 @@ class TaskContextBuilder:
                     ctx_data.setdefault("custom_overrides", {})[key] = value
 
         # Validate via msgspec
-        return msgspec.json.decode(msgspec.json.encode(ctx_data), type=TaskContext)
-        return msgspec.json.decode(msgspec.json.encode(ctx_data), type=TaskContext)
-        return msgspec.json.decode(msgspec.json.encode(ctx_data), type=TaskContext)
-        return msgspec.json.decode(msgspec.json.encode(ctx_data), type=TaskContext)
         return msgspec.json.decode(msgspec.json.encode(ctx_data), type=TaskContext)

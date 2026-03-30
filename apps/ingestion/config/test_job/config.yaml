@@ -23,16 +23,16 @@ default:
         source_params:
           filter_sql: ""         # e.g. "WHERE order_date = {{run_date}}"
           bind_params: {}
+          schema_file: "schema.csv"
       transform:
         type: default
         options:
       load:
-        sink_identifier: default.orders
+        sink_identifier: test.orders
         service_ref: "clickhouse"
-      partition_value: "2023-10-27"
       archive:
         enable_archival: true    # per-dataset archival override
-        service_ref: "moto_archive"
+        service_ref: "s3_archive"
 
 
 # ── Local env overrides ──────────────────────────────────────────────────────

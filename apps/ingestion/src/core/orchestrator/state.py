@@ -7,12 +7,15 @@ from typing import Any
 import msgspec
 import polars as pl
 import structlog
-
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
 from apps.ingestion.src.core.contexts.job import TaskContext
 from apps.ingestion.src.core.models.job import ExecutionStatus, TaskManifest
 from apps.ingestion.src.services.database import DatabaseSink
-from apps.ingestion.src.utils.constants import ALWAYS_ON_MODE
+from apps.ingestion.src.utils.constants import (
+    ALWAYS_ON_MODE,
+    CONFIG_FILENAME,
+    MANIFEST_FILENAME,
+)
 
 LOG = structlog.getLogger(__name__)
 CURRENT_EXECUTION_TBL = "CURRENT_EXECUTION"
@@ -50,7 +53,7 @@ class StateStore:
         Returns the map of active/pending/blocked/deferred records.
         If _active_records is None or force_refresh is True, it queries the DB view.
         """
-        if self._active_records is None or force_refresh:
+        if not self._active_records or force_refresh:
             LOG.info("Refreshing active records from database view")
 
         # We only care about jobs that are not SUCCESS, FAILED, or EXPIRED
@@ -118,8 +121,8 @@ class StateStore:
         Reads the manifest.json from a physical folder and
         syncs the internal state/database mirror.
         """
-        manifest_file = folder_path / "manifest.json"
-        config_file = folder_path / "config.json"
+        manifest_file = folder_path / MANIFEST_FILENAME
+        config_file = folder_path / CONFIG_FILENAME
 
         if not manifest_file.exists():
             LOG.warning("No manifest found. Sync skipped.", path=str(manifest_file))
@@ -272,5 +275,4 @@ class StateStore:
 
         line = msgspec.json.encode(event) + b"\n"
         with self.stream_path.open("ab") as f:
-            f.write(line)
             f.write(line)

@@ -7,14 +7,14 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 import structlog
-from nanoid import generate
-
 from apps.ingestion.src.core.contexts import TaskContextBuilder
 from apps.ingestion.src.core.models.job import ExecutionStatus, Task
 from apps.ingestion.src.core.models.stages.enums import StageName
 from apps.ingestion.src.services.factory import ServiceFactory
-from apps.ingestion.src.utils.constants import ALWAYS_ON_MODE
+from apps.ingestion.src.utils.constants import ALWAYS_ON_MODE, DISK_THRESHOLD_HALT, CONFIG_FILENAME
 from libs.resilience.heartbeat import Heartbeat
+from libs.utils.system import get_disk_usage
+from nanoid import generate
 
 from .engine import IngestionEngine
 from .lifecycle import LifecycleManager
@@ -28,6 +28,11 @@ if TYPE_CHECKING:
 LOG = structlog.getLogger(__name__)
 MISFIRE_GRACE_PERIOD_SECS = 3600
 DEFAULT_SYNC_TIMEOUT_SECS = 1800  # 1 Hour default
+INTERVAL_HEARTBEAT_SECS = 30
+INTERVAL_DB_POLL_SECS = 60
+INTERVAL_STATE_SYNC_SECS = 30
+INTERVAL_ENGINE_SCAN_SECS = 10
+INTERVAL_RECOVERY_SWEEP_SECS = 300
 
 
 def generate_run_id() -> str:
@@ -52,6 +57,9 @@ class Orchestrator:
     def __init__(self, builder: TaskContextBuilder):
         self.builder = builder
         self.exec_ctx = builder.get_execution_context()
+        self.exec_ctx.provider_config = self.builder.app_settings.get(
+            "secret_provider", {}
+        ).to_dict()
 
         self.heartbeat = Heartbeat()
         self.engine = IngestionEngine(self.exec_ctx)
@@ -60,7 +68,7 @@ class Orchestrator:
         db_config = deepcopy(self.builder.app_settings.get("services.clickhouse", {}))
         service_name = db_config.pop("type")
 
-        ServiceFactory.get_provider(self.builder.app_settings)
+        ServiceFactory.get_provider(self.exec_ctx.provider_config)
         self.db_service = ServiceFactory.get_service(service_name, **db_config)
         self.state_store = StateStore(self.db_service, self.exec_ctx)
         # State timers
@@ -91,6 +99,15 @@ class Orchestrator:
         self.db_service.client.connect()
         # 2. Ensure signal directory is writable
         self.exec_ctx.signal_path.mkdir(parents=True, exist_ok=True)
+
+        # 3. Check for Disk Pressure (Safety Threshold: 95%)
+        usage = get_disk_usage(self.exec_ctx.workspace_dir)
+        if usage.percent > DISK_THRESHOLD_HALT:
+            LOG.critical(
+                "System storage full. Orchestrator cannot start safely.",
+                extra={"disk_usage_pct": round(usage.percent, 2)},
+            )
+            sys.exit(1)
 
     def run(
         self,
@@ -129,12 +146,15 @@ class Orchestrator:
                 self.signals._process_worker_signals()
 
                 # --- 1. Systemd Heartbeat (Every 30s) ---
-                if now - self.timers["heartbeat"] > 30:
+                if now - self.timers["heartbeat"] > INTERVAL_HEARTBEAT_SECS:
                     self.heartbeat.ping()
                     self.timers["heartbeat"] = int(now)
 
                 # --- 2. Database Polling (Every 60s) ---
-                if now - self.timers["db_poll"] > 60 and ALWAYS_ON_MODE:
+                if (
+                    now - self.timers["db_poll"] > INTERVAL_DB_POLL_SECS
+                    and ALWAYS_ON_MODE
+                ):
                     # state_store.refresh() queries Postgres for active job definitions
                     active_definitions = self.state_store.get_latest_state(
                         force_refresh=True
@@ -144,7 +164,7 @@ class Orchestrator:
 
                 # 2. NEW: Sync the StateStore to Postgres
                 # This writes all buffered 'RUNNING', 'HELD', or 'COMPLETED' updates
-                if now - self.timers["state_sync"] > 30:
+                if now - self.timers["state_sync"] > INTERVAL_STATE_SYNC_SECS:
                     self.state_store.flush()
                     self.timers["state_sync"] = int(now)
 
@@ -154,13 +174,13 @@ class Orchestrator:
 
                 # --- 4. Engine Driving (Every Loop - High Priority) ---
                 # This drives the actual work (Ray workers/Recovery)
-                if now - self.timers["engine_scan"] > 10:
+                if now - self.timers["engine_scan"] > INTERVAL_ENGINE_SCAN_SECS:
                     self.engine.scan_and_recover()
                     self.engine._process_jobs()
                     self.timers["engine_scan"] = int(now)
 
                 # 3. Maintenance: Run recovery sweep every 5 minutes
-                if now - self.timers["recovery_sweep"] > 300:
+                if now - self.timers["recovery_sweep"] > INTERVAL_RECOVERY_SWEEP_SECS:
                     self.lifecycle.handle_recovery()
                     self.lifecycle.handle_expiry()
                     self.timers["recovery_sweep"] = int(now)
@@ -408,7 +428,7 @@ class Orchestrator:
             active_root.mkdir(parents=True, exist_ok=True)
 
             # E. Freeze the Task Context (The instructions for the workers)
-            config_path = active_root / f"{prefix}_config.json"
+            config_path = active_root / f"{prefix}_{CONFIG_FILENAME}"
             with config_path.open("wb") as f:
                 f.write(msgspec.json.encode(task_ctx))
 
@@ -465,6 +485,4 @@ def create_orchestrator(app_cfg_path: str | None = None) -> Orchestrator:
     builder = TaskContextBuilder(app_cfg_path=app_cfg_path)
 
     # 2. Return fully wired Orchestrator (It will resolve its own services)
-    return Orchestrator(builder=builder)
-    return Orchestrator(builder=builder)
     return Orchestrator(builder=builder)

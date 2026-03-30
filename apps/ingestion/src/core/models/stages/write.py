@@ -23,11 +23,12 @@ class WriteStage(ExecutionStage):
 
     def pre_flight(self, task: "Task") -> None:
         """Verify sink connectivity from the execution node."""
+        super().pre_flight(task)
         # Factory initialization already validates basic params and Secret resolution
         self.service = ServiceFactory.get_sink(
             task.context.load.sink_type, **task.context.load.sink_config
         )
-        
+
     def execute(self, task: "Task") -> str:
         start_ts = datetime.now().astimezone().isoformat()
         task_ctx = task.context
@@ -84,3 +85,4 @@ class WriteStage(ExecutionStage):
         except Exception as exc:
             self.finalize(task, exception=exc)
             raise
+

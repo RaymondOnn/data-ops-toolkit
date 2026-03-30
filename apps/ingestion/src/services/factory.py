@@ -20,7 +20,6 @@ class ServiceFactory:
     _SERVICES: ClassVar[dict[str, type]] = {}
     # Registry of Singleton Instances (Populated at Runtime)
     _INSTANCES: ClassVar[dict[str, Any]] = {}
-    # Global App Settings (Provided by Builder)
     _provider: ClassVar[Any] = None
 
     @staticmethod
@@ -44,9 +43,8 @@ class ServiceFactory:
         return wrapper
 
     @classmethod
-    def get_provider(cls, settings: Any) -> None:
-        provider_cfg = settings.get("secret_provider", {}).to_dict()
-        cls._provider = AuthFactory.get_provider(env=APP_CURRENT_ENV, **provider_cfg)
+    def get_provider(cls, config: dict[str, Any]) -> None:
+        cls._provider = AuthFactory.get_provider(env=APP_CURRENT_ENV, **config)
 
     @classmethod
     def get_service(cls, service_type: str, **config: Any) -> Any:

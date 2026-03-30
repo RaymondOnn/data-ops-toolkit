@@ -10,6 +10,7 @@ import typer
 from apps.ingestion.src.core.contexts import ExecutionMode, parse_set_options
 from apps.ingestion.src.core.contexts.execution import RayMode
 from apps.ingestion.src.core.orchestrator import create_orchestrator
+from apps.ingestion.src.utils.constants import ALWAYS_ON_MODE
 from libs.utils.log import setup_logging
 
 app = typer.Typer(help="50M Row Ingest Pipeline")
@@ -123,10 +124,86 @@ def run(
 
 
 @app.command()
-def recover():
-    """Recover jobs from a failed state."""
-    # ... placeholder ...
-    pass
+def recover(
+    job_id: Annotated[
+        str | None, typer.Option("--job-id", "-j", help="Specific Job ID to recover")
+    ] = None,
+    dataset: Annotated[
+        str | None, typer.Option("--dataset", "-d", help="Specific dataset to recover")
+    ] = None,
+    run_date: Annotated[
+        str | None, typer.Option("--run-date", help="Specific run date to recover")
+    ] = None,
+    run_id: Annotated[
+        str | None, typer.Option("--run-id", help="Specific run ID to recover")
+    ] = None,
+) -> None:
+    """
+    Recover jobs from a failed state (HOLD or FAILED).
+    If no specific IDs are provided, triggers a global recovery sweep.
+    """
+    orchestrator = create_orchestrator()
+
+    # 1. Search for candidate folders in terminal states
+    target_folders = []
+    for category in ["HOLD", "FAILED"]:
+        base_path = orchestrator.exec_ctx.workspace_dir / category
+        if not base_path.exists():
+            continue
+
+        # rglob ensures we find manifests regardless of directory depth
+        for manifest_path in base_path.rglob("manifest.json"):
+            folder = manifest_path.parent
+            r_id = folder.name
+            ident = folder.parent.name
+
+            try:
+                # Extract components to verify against filters
+                p_job, p_ds, p_date, _ = orchestrator.exec_ctx.parse_identifier(
+                    f"{ident}:{r_id}"
+                )
+
+                # Apply filters: if a value is provided, it must match
+                if job_id and p_job != job_id:
+                    continue
+                if dataset and p_ds != dataset:
+                    continue
+                if run_date and p_date != run_date:
+                    continue
+                if run_id and r_id != run_id:
+                    continue
+
+                target_folders.append(folder)
+            except ValueError:
+                continue
+
+    if not target_folders:
+        typer.secho(
+            "No matching failed or held jobs found to recover.",
+            fg=typer.colors.YELLOW,
+        )
+        return
+
+    typer.echo(f"🔧 Found {len(target_folders)} matching tasks in HOLD/FAILED.")
+
+    # 2. Trigger Recovery mechanism based on loop mode
+    if ALWAYS_ON_MODE:
+        # Signal trigger: Communicates with the background Orchestrator loop
+        signal_path = orchestrator.exec_ctx.signal_path / "RECOVER_ALL.cmd"
+        signal_path.touch()
+        typer.secho(
+            "🚀 Signal dropped. ALWAYS_ON Orchestrator will process the recovery.",
+            fg=typer.colors.GREEN,
+        )
+    else:
+        # Dumb trigger mode: CLI executes recovery directly in the foreground
+        with typer.progressbar(target_folders, label="Recovering jobs") as progress:
+            for folder in progress:
+                orchestrator.lifecycle.recover_task_by_path(folder)
+        typer.secho(
+            f"✅ Successfully recovered {len(target_folders)} tasks.",
+            fg=typer.colors.GREEN,
+        )
 
 
 if __name__ == "__main__":

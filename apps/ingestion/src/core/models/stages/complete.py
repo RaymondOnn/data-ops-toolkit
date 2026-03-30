@@ -7,6 +7,7 @@ from apps.ingestion.src.core.models.job import Task
 from apps.ingestion.src.core.models.job.manifest import CompletePayload
 from apps.ingestion.src.services.base import ArchiveMixin
 from apps.ingestion.src.services.factory import ServiceFactory
+from apps.ingestion.src.utils.constants import MANIFEST_FILENAME
 
 from .base import ExecutionStage
 from .enums import StageName
@@ -18,6 +19,13 @@ class CompleteStage(ExecutionStage):
     name = StageName.COMPLETE.label
     manifest: CompletePayload
 
+    def pre_flight(self, task: "Task") -> None:
+        """Verify source connectivity from the execution node."""
+        task_ctx = task.context
+        if task_ctx.archive.enabled:
+            self.service = ServiceFactory.get_archive(
+                service_type=task_ctx.archive.type, **task_ctx.archive.config
+            )
     def execute(self, task: Task) -> str:
         """
         Decision: The 'Zero-Footprint' Protocol.
@@ -28,12 +36,6 @@ class CompleteStage(ExecutionStage):
         task_ctx = task.context
         start_ts = datetime.now().astimezone().isoformat()
 
-        # 1. Initialize Storage Service for Archival
-        # We retrieve the 'archive' service defined in the job configuration
-        object_store: ArchiveMixin = ServiceFactory.get_archive(
-            type=task_ctx.archive.type,  # e.g., "s3" or "local"
-            **task_ctx.archive.config,
-        )
 
         try:
             # 2. OPTIONAL ARCHIVAL
@@ -43,7 +45,7 @@ class CompleteStage(ExecutionStage):
                 # 1. Archive Parquet Files
                 # We move data from the high-speed 'data/' vault to the 'archive/' vault.
                 # This includes both the Extract (Sanitized) and Transform results.
-                self._archive_parquet_data(object_store, task)
+                self._archive_parquet_data(self.service, task)
 
             # 3. CLEANUP VERIFICATION
             # Force removal of all intermediate data (Extract & Transform folders)

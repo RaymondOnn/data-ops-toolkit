@@ -40,12 +40,12 @@ class BasePayload(msgspec.Struct, kw_only=True):
 
 
 class ExtractPayload(msgspec.Struct, kw_only=True):
-    file_count: int  # Number of files detected
+    file_count: int = 0 # Number of files detected
     files: list[FileInfo] = []  # List of file metadata
-    artifact_folder: str
-    source_row_count: int  # Number of rows detected
+    artifact_folder: str = ""
+    source_row_count: int = 0  # Number of rows detected
     schema_signature: dict[str, str] = {}  # Column names and types
-    start_timestamp_utc: str
+    start_timestamp_utc: str = ""
     end_timestamp_utc: str = field(
         default_factory=lambda: datetime.now().astimezone().isoformat()
     )

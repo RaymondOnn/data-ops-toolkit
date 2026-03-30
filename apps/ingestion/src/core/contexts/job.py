@@ -2,7 +2,6 @@ from typing import Any, Literal
 
 import msgspec
 import structlog
-
 from apps.ingestion.src.core.models.stages.enums import StageName
 
 LOG = structlog.getLogger(__name__)
@@ -22,7 +21,7 @@ class ExtractConfig(msgspec.Struct):
         default_factory=dict
     )  # extraction-specific options (filters, etc.)
     schema_file: str | None = None
-    schema_items: set[dict[str, Any]] = msgspec.field(default_factory=set)
+    schema_items: list[dict[str, Any]] = msgspec.field(default_factory=list)
 
 
 class TransformConfig(msgspec.Struct):
@@ -81,11 +80,4 @@ class TaskContext(msgspec.Struct):
     validation_cmd: str = "validation-app"
     expires_at: float | None = None
     custom_overrides: dict[str, Any] = msgspec.field(default_factory=dict)
-    extras: dict[str, Any] = msgspec.field(default_factory=dict)
-    extras: dict[str, Any] = msgspec.field(default_factory=dict)
-    extras: dict[str, Any] = msgspec.field(default_factory=dict)
-    extras: dict[str, Any] = msgspec.field(default_factory=dict)
-    extras: dict[str, Any] = msgspec.field(default_factory=dict)
-    extras: dict[str, Any] = msgspec.field(default_factory=dict)
-    extras: dict[str, Any] = msgspec.field(default_factory=dict)
     extras: dict[str, Any] = msgspec.field(default_factory=dict)

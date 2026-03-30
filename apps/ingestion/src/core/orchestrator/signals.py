@@ -1,6 +1,7 @@
 from collections.abc import Callable
 
 import structlog
+
 from apps.ingestion.src.core.contexts import ExecutionContext
 from apps.ingestion.src.core.orchestrator.engine import IngestionEngine
 from apps.ingestion.src.core.orchestrator.state import StateStore
@@ -26,7 +27,7 @@ class SignalProcessor:
         """Registers a method to be called when a .cmd file appears."""
         self._command_registry[cmd_name] = callback
 
-    def _process_worker_signals(self, run_ids: set[str] ) -> None:
+    def _process_worker_signals(self, run_ids: set[str] | None = None) -> None:
         """
         Scans the flat signals directory for any {run_id}.signal files.
 
@@ -34,6 +35,8 @@ class SignalProcessor:
         This prevents the Orchestrator from reading a manifest that the worker
         is still writing.
         """
+        run_ids = run_ids or set()  # If None, we process all signals in the directory
+        
         signal_dir = self.exec_ctx.signal_path
         if not signal_dir.exists():
             return
@@ -132,3 +135,4 @@ class SignalProcessor:
                     LOG.exception(
                         "Unexpected error executing manual command", cmd=cmd_file
                     )
+

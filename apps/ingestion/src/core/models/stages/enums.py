@@ -34,12 +34,12 @@ class StageBitmask(IntFlag):
 
 class StageName(IntEnum):
     START = 0
-    EXTRACT = 1
-    TRANSFORM = 2
-    WRITE = 3
-    AUDIT = 4
-    PUBLISH = 5
-    COMPLETE = 6
+    EXTRACT = auto()
+    TRANSFORM = auto()
+    WRITE = auto()
+    # AUDIT = auto()
+    PUBLISH = auto()
+    COMPLETE = auto()
 
     @property
     def label(self) -> str:
@@ -53,7 +53,7 @@ class StageName(IntEnum):
             StageName.EXTRACT: StageBitmask.EXTRACT,
             StageName.TRANSFORM: StageBitmask.TRANSFORM,
             StageName.WRITE: StageBitmask.WRITE,
-            StageName.AUDIT: StageBitmask.AUDIT,
+            # StageName.AUDIT: StageBitmask.AUDIT,
             StageName.PUBLISH: StageBitmask.PUBLISH,
             StageName.COMPLETE: StageBitmask.COMPLETE,
         }

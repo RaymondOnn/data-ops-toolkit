@@ -55,13 +55,20 @@ lock: ## Update the uv.lock file
 DOCKER_COMPOSE_FILE := apps/ingestion/infra/environments/local/local.docker-compose.yaml
 
 docker-up: ## Start the Docker containers in detached mode
-	docker compose -f $(DOCKER_COMPOSE_FILE) up -d --remove-orphans
+	ls -ld apps/ingestion/infra/environments/local/garage/garage.toml \
+		&& docker compose -f $(DOCKER_COMPOSE_FILE) up -d --remove-orphans \
 
 docker-down: ## Stop and remove the Docker containers
 	docker compose -f $(DOCKER_COMPOSE_FILE) down
 
+docker-init-garage: ## Run the Garage initialization script
+	bash apps/ingestion/infra/environments/local/garage/init-garage.sh
+
 docker-restart: ## Stop and then start the Docker containers again
-	make docker-clean && make docker-up 
+	docker compose -f $(DOCKER_COMPOSE_FILE) restart
+
+docker-reset: ## Force a wipe of all local data and restart
+	make docker-clean && make docker-up
 
 docker-rebuild: ## Rebuild Docker images and restart containers
 	docker compose -f $(DOCKER_COMPOSE_FILE) build --no-cache
@@ -69,6 +76,9 @@ docker-rebuild: ## Rebuild Docker images and restart containers
 
 docker-clean: ## Stop, remove containers, volumes, and images
 	docker compose -f $(DOCKER_COMPOSE_FILE) down --volumes --rmi all
+	rm -rf apps/ingestion/infra/environments/local/tmp/garage-meta
+	rm -rf apps/ingestion/infra/environments/local/tmp/garage-data
+	rm -rf apps/ingestion/infra/environments/local/tmp/clickhouse/data
 
 docker-logs: ## View logs for all Docker services
 	docker compose -f $(DOCKER_COMPOSE_FILE) logs -f

@@ -7,12 +7,13 @@ from typing import Any, Self
 
 import msgspec
 import structlog
+
 from apps.ingestion.src.core.contexts import ExecutionContext, TaskContext
 from apps.ingestion.src.core.models.job.manifest import TaskManifest
 from apps.ingestion.src.core.models.job.status import ExecutionStatus
 from apps.ingestion.src.core.models.stages.base import ExecutionStage
 from apps.ingestion.src.core.models.stages.enums import StageName
-
+from apps.ingestion.src.utils.constants import CONFIG_FILENAME
 LOG = structlog.getLogger(__name__)
 
 
@@ -30,6 +31,7 @@ class Task:
         worker_id: str,
         exec_ctx: ExecutionContext,
         target_stage: str = StageName.START.label,
+        folder_path: Path | None = None,
     ) -> None:
         self.job_id, self.dataset_id = composite_key.split(":", 1)
         self.run_id = run_id
@@ -38,8 +40,10 @@ class Task:
         self.exec_ctx = exec_ctx
         self.target_stage = target_stage
 
-        # Ensure the physical workspace is set up
-        self._make_folder()
+        # 1. Resolve physical folder location
+        self._folder = folder_path or self.exec_ctx.get_run_path(
+            self.job_id, self.dataset_id, self.run_date, self.run_id
+        )
         self._manifest_path = self._folder / "manifest.json"
 
         # Immediately set the current stage based on the target_stage from the engine
@@ -68,18 +72,24 @@ class Task:
         )
         composite_key = f"{job_id}:{dataset_id}"
 
+        # Re-hydrate manifest to find the correct target stage if not provided
+        # Since we have the path, we can read it directly
+        manifest_path = active_path / "manifest.json"
+        current_stage = target_stage.label if target_stage else StageName.START.label
+        if manifest_path.exists():
+            with manifest_path.open("rb") as f:
+                m = msgspec.json.decode(f.read(), type=TaskManifest)
+                current_stage = m.current_stage
+
         instance = cls(
             composite_key=composite_key,
             run_id=run_id,
             run_date=run_date,
             worker_id="recovery",
             exec_ctx=exec_ctx,
-            target_stage=(
-                target_stage.label if target_stage else StageName.START.label
-            ),
+            target_stage=current_stage,
+            folder_path=active_path,
         )
-        if target_stage:
-            instance.check_in(target_stage.label)
         return instance
 
     @property
@@ -145,10 +155,10 @@ class Task:
 
         try:
             # Priority 1: Check for the standardized 'config.json'
-            config_path = self.folder / "config.json"
+            config_path = self.folder / CONFIG_FILENAME
             if not config_path.exists():
                 # Fallback: Look for the original complex filename if not yet renamed
-                config_path = next(self.folder.glob("*_config.json"))
+                config_path = next(self.folder.glob(f"*_{CONFIG_FILENAME}"))
 
             with config_path.open(mode="rb") as f:
                 return msgspec.json.decode(f.read(), type=TaskContext)
@@ -207,9 +217,9 @@ class Task:
 
         # 3. Relocate the config file if it's still in the active root
         # The Orchestrator prefix uses a colon between the identifier and run_id
-        cfg_file = f"{self.id}:{self.run_id}_config.json"  # Kept for backward compat with Orchestrator output
+        cfg_file = f"{self.id}:{self.run_id}_{CONFIG_FILENAME}"  # Kept for backward compat with Orchestrator output
         source_path = self.exec_ctx.active_path / cfg_file
-        dest_path = self._folder / "config.json"
+        dest_path = self._folder / CONFIG_FILENAME
 
         if source_path.exists() and not dest_path.exists():
             LOG.info(
@@ -363,4 +373,4 @@ class Task:
     #         report[stage.label] = "DONE" if is_done else "PENDING"
 
     #     return report
-
+    #     return report

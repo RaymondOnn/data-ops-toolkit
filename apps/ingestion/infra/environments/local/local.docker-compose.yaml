@@ -7,9 +7,9 @@ services:
       - CLICKHOUSE_PASSWORD=password
     volumes:
       - ../../../sql/definitions:/sql
-      - ./tmp:/var/lib/clickhouse/user_files/tmp
+      - ./tmp/clickhouse/data:/var/lib/clickhouse
       # - ./clickhouse/init_databases.sh:/docker-entrypoint-initdb.d/init_databases.sh
-      # - ./clickhouse/clickhouse_settings.xml:/etc/clickhouse-server/config.d/clickhouse_settings.xml
+      - ./clickhouse/clickhouse_settings.xml:/etc/clickhouse-server/config.d/clickhouse_settings.xml
     ports:
       - "8123:8123"
       - "9000:9000"
@@ -43,7 +43,7 @@ services:
 
   # S3 replacement
   # garage:
-  #   image: dxflrs/garage:v1.1.0 # Use a specific version for stability
+  #   image: dxflrs/garage:v2.2.0
   #   container_name: garage
   #   restart: unless-stopped
   #   ports:
@@ -52,11 +52,20 @@ services:
   #     - "3902:3902" # S3 Web (optional)
   #     - "3903:3903" # Admin API
   #   volumes:
-  #     - ./garage.toml:/etc/garage.toml:ro
-  #     - ./garage-meta:/var/lib/garage/meta
-  #     - ./garage-data:/var/lib/garage/data
+  #     - ./garage/garage.toml:/etc/garage.toml
+  #     - ./tmp/garage-meta:/var/lib/garage/meta:rw
+  #     - ./tmp/garage-data:/var/lib/garage/data:rw
   #   environment:
-  #     - RUST_LOG=garage=info
+  #     - RUST_LOG=garage=debug
+  #   healthcheck:
+  #     # test: ["CMD-SHELL", "pgrep garage > /dev/null || exit 1"]
+  #     test: ["CMD", "/garage", "status"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+  #     start_period: 10s
+  #   networks:
+  #     - ch_ntw
 
 networks:
   ch_ntw:

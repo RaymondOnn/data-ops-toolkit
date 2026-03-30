@@ -34,6 +34,7 @@ class ExtractStage(ExecutionStage):
 
     def pre_flight(self, task: "Task") -> None:
         """Verify source connectivity from the execution node."""
+        super().pre_flight(task)
         task_ctx = task.context
         self.service = ServiceFactory.get_source(
             task_ctx.extract.source_type, **task_ctx.extract.source_config
@@ -97,40 +98,51 @@ class ExtractStage(ExecutionStage):
             #   c. Workers call service.fetch_stream() [Protected by Circuit Breaker]
             #   d. Workers call _apply_schema_contract
             #   e. Streams results to Parquet files (keeping RAM < 2GB)
-            # 4. Execute Ingestion via Generator
-            # Instead of waiting for all 50M rows, we process each file 'pulse'
-            file_infos = []
-            total_rows = 0
-            all_schemas = []
-
-            progress_generator = reader.fetch(
+            extracted_files = reader.fetch(
                 service=self.service,
                 target_folder=data_store,
                 context=ctx,
             )
 
-            for i, f in progress_generator:
-                # A. Build FileInfo Pulse
-                path, rows = Path(str(f["path"])), int(f.get("rows", 0))
-                checksum = self._calculate_checksum(path)
-                file_schema = pl.read_parquet_schema(path)
-
-                info = FileInfo(
-                    path=str(path),
-                    checksum=checksum,
-                    row_count=rows,
-                    size_bytes=path.stat().st_size,
+            if not extracted_files:
+                LOG.warning(
+                    "Ingestion returned no data",
+                    stage=self.name,
+                    source=ctx.source_identifier,
+                    job_id=task.job_id,
+                    run_id=task.run_id,
                 )
 
-                # B. Accumulate for Final Manifest
-                file_infos.append(info)
-                total_rows += rows
+            file_infos = []
+            total_rows = 0
+            all_schemas = []
+
+            for i, f in enumerate(extracted_files):
+                path = f["path"]
+
+                # A. Calculate Checksum (MD5 or SHA256)
+                checksum = self._calculate_checksum(f["path"])
+
+                # Use Polars to get the schema of this specific file
+                # This is fast as it only reads the parquet metadata
+                file_schema = pl.read_parquet_schema(path)
                 all_schemas.append(file_schema)
 
-                # C. Checkpoint: Update manifest every 5 files (Optimization)
+                # B. Build FileInfo
+                file_infos.append(
+                    FileInfo(
+                        path=str(f["path"]),
+                        checksum=checksum,
+                        row_count=f["rows"],
+                        size_bytes=f["path"].stat().st_size,
+                    )
+                )
+                total_rows += f["rows"]
+
+                # C. Checkpoint: Update manifest every 1 files (Optimization)
                 # This updates the 'last_modified' timestamp on disk,
                 # providing a physical heartbeat for the engine.
-                if i % 5 == 0:
+                if i % 1 == 0:
                     task.update_manifest(
                         {
                             "extract": {
@@ -139,6 +151,7 @@ class ExtractStage(ExecutionStage):
                             }
                         }
                     )
+                    # No request_status_sync needed here anymore
 
             # c. CALCULATE FINAL SCHEMA (The "Union" of all files)
             # This identifies all columns across all files, handling API drift.
@@ -181,19 +194,19 @@ class ExtractStage(ExecutionStage):
             self.finalize(task, exception=e)
             raise
 
-    def _calculate_checksum(self, path: Path | str) -> str:
+    def _calculate_checksum(self, path: Path) -> str:
         """
         Calculate the MD5 checksum of a file.
         Important to ensure data integrity and can be used for deduplication
         """
         LOG.debug("Calculating checksum", stage=self.name, file=str(path))
         hash_md5 = hashlib.md5()
-        with Path(path).open("rb") as f:
+        with path.open("rb") as f:
             for chunk in iter(lambda: f.read(4096), b""):
                 hash_md5.update(chunk)
         return hash_md5.hexdigest()
 
-    def _merge_schemas(self, schemas: list[dict[str, str]]) -> dict[str, str]:
+    def _merge_schemas(self, schemas: set[dict[str, str]]) -> dict[str, str]:
         """
         Unions all schemas found in the source files to create a
         master schema for the Transform stage.
@@ -210,4 +223,3 @@ class ExtractStage(ExecutionStage):
                 # type conflicts (e.g., Float vs Int)
                 merged[col] = str(dtype)
         return merged
-

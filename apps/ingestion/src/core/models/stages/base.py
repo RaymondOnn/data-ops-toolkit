@@ -1,4 +1,3 @@
-import shutil
 import traceback
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -9,8 +8,12 @@ import structlog
 
 from apps.ingestion.src.core.models.job.manifest import ErrorPayload
 from apps.ingestion.src.core.models.stages.enums import EXEC_STAGES, StageName
+from apps.ingestion.src.utils.constants import (
+    DISK_THRESHOLD_HALT
+)
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreakerTripped
+from libs.utils.system import get_disk_usage
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.job import Task
@@ -32,13 +35,24 @@ class ExecutionStage(ABC):
 
         raise ValueError(f"Invalid offset: {offset}")
 
-    @abstractmethod
+    # TODO: Trigger cleanup utility to remove old temporary task folders
     def pre_flight(self, task: "Task") -> None:
         """
         Performs node-specific connectivity and resource checks.
         Should raise an exception if requirements are not met.
         """
-        pass
+        # Check Disk Pressure before starting heavy IO (Threshold: 90%)
+        usage = get_disk_usage(task.exec_ctx.workspace_dir)
+
+        if usage.percent > DISK_THRESHOLD_HALT:
+            LOG.critical(
+                "Disk space critical - halting task",
+                used_pct=round(usage.percent, 2),
+                workspace=str(task.exec_ctx.workspace_dir),
+            )
+            raise OSError(
+                f"Disk usage is at {usage.percent:.1f}%. Halting to prevent corruption."
+            )
 
     @abstractmethod
     def execute(self, task: "Task") -> str:
@@ -60,21 +74,10 @@ class ExecutionStage(ABC):
         Physically moves the metadata folder to HOLD or QUARANTINE.
         category: "HOLD" | "QUARANTINE" | "DONE"
         """
-        # Use central helper from context
-        new_path = task.exec_ctx.get_run_path(
-            task.job_id, task.dataset_id, task.run_date, task.run_id, category=category
+        LOG.info(
+            "Moving task to terminal directory", category=category, run_id=task.run_id
         )
-
-        # Ensure parent structure exists
-        new_path.parent.mkdir(parents=True, exist_ok=True)
-
-        if task.folder.exists():
-            LOG.info("Moving metadata folder", src=task.folder, dst=new_path)
-            # shutil.move handles cross-filesystem moves if necessary
-            shutil.move(str(task.folder), str(new_path))
-
-            # Update the job instance reference so subsequent saves hit the new path
-            task._folder = new_path
+        task.move_to_folder(category)
 
     def finalize(
         self,
@@ -176,4 +179,4 @@ class ExecutionStage(ABC):
 
             # 5. ATOMIC SWAP (Success Case)
             task.request_status_sync()
-
+            task.request_status_sync()

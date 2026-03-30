@@ -5,21 +5,22 @@ import diskcache
 import msgspec
 import ray
 import structlog
-from filelock import FileLock
-
 from apps.ingestion.src.core.contexts import ExecutionContext, RayMode
 from apps.ingestion.src.core.models.job import ExecutionStatus, Task, TaskManifest
 from apps.ingestion.src.core.models.stages.enums import EXEC_STAGES, StageName
+from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.services.registry import ServiceRegistry
 from apps.ingestion.src.utils.common import find_path
-from apps.ingestion.src.utils.constants import DISKCACHE_FILE_PATH
+from apps.ingestion.src.utils.constants import DISKCACHE_FILE_PATH, MANIFEST_FILENAME
 from apps.ingestion.src.utils.dates import epoch_to_iso, get_end_of_day_ts
+from filelock import FileLock
 from libs.utils.log import setup_logging
 
 from .enums import TaskMetadata
 
 LOG = structlog.getLogger(__name__)
-
+IO_POOL_SIZE = 15
+CPU_POOL_SIZE = 4
 
 @ray.remote
 class Worker:
@@ -34,6 +35,11 @@ class Worker:
             sqlite_journal_mode="wal",
             sqlite_synchronous=1,  # 'NORMAL' - better for WAL mode performance
         )
+        
+        # Initialize the Secret Provider for this process using the context's config
+        if getattr(self.exec_ctx, "provider_config", None):
+            ServiceFactory.get_provider(self.exec_ctx.provider_config)
+            
         # Share the same cache path with ServiceRegistry so that circuit-breaker
         # state (written by workers) is visible to the Orchestrator's registry.
         ServiceRegistry.configure(self.exec_ctx.workspace_dir)
@@ -156,7 +162,7 @@ class IngestionEngine:
             StageName.EXTRACT: {"limit": 10, "pool": "io"},
             StageName.TRANSFORM: {"limit": 4, "pool": "cpu"},  # CPU-Heavy
             StageName.WRITE: {"limit": 5, "pool": "io"},
-            StageName.AUDIT: {"limit": 4, "pool": "io"},
+            # StageName.AUDIT: {"limit": 4, "pool": "io"},
             StageName.PUBLISH: {
                 "limit": 1,
                 "pool": "io",
@@ -166,10 +172,10 @@ class IngestionEngine:
 
         # Initialize specialized pools
         self.io_pool: list[ray.actor.ActorHandle] = [
-            Worker.remote(f"io_{i}", self.exec_ctx) for i in range(15)  # type: ignore
+            Worker.remote(f"io_{i}", self.exec_ctx) for i in range(IO_POOL_SIZE)  # type: ignore
         ]
         self.cpu_pool: list[ray.actor.ActorHandle] = [
-            Worker.remote(f"cpu_{i}", self.exec_ctx) for i in range(4)  # type: ignore
+            Worker.remote(f"cpu_{i}", self.exec_ctx) for i in range(CPU_POOL_SIZE)  # type: ignore
         ]
 
         # Local tracker for active Ray tasks to avoid blocking RPC calls
@@ -361,7 +367,7 @@ class IngestionEngine:
                     # before declaring it a zombie.
                     active_path = find_path(self.exec_ctx.active_path, meta.run_id)
                     manifest_file = (
-                        active_path / "manifest.json" if active_path else None
+                        active_path / MANIFEST_FILENAME if active_path else None
                     )
 
                     if manifest_file and manifest_file.exists():
@@ -464,7 +470,7 @@ class IngestionEngine:
 
         active_root = self.exec_ctx.active_path
         active_path = find_path(active_root, run_id)
-        manifest_path = active_path / "manifest.json"
+        manifest_path = active_path / MANIFEST_FILENAME
 
         if not manifest_path.exists():
             LOG.info("No active manifest found, starting fresh.", job_id=job_id)
@@ -490,7 +496,7 @@ class IngestionEngine:
         """
         active_root = self.exec_ctx.active_path
         active_path = find_path(active_root, run_id)
-        manifest_path = active_path / "manifest.json"
+        manifest_path = active_path / MANIFEST_FILENAME
 
         if not manifest_path.exists():
             # During recovery, if a job exists in DB but not on disk, it's a 'Ghost'

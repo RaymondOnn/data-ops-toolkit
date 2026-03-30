@@ -24,6 +24,7 @@ class ExecutionContext(msgspec.Struct):
     workspace_dir: Path
     execution_mode: ExecutionMode = ExecutionMode.NORMAL
     ray_mode: RayMode = RayMode.CLUSTER
+    provider_config: dict[str, str] = {}  # Config for secret provider
 
     @property
     def active_path(self) -> Path:
