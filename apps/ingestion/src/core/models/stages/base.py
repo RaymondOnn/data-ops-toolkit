@@ -179,4 +179,3 @@ class ExecutionStage(ABC):
 
             # 5. ATOMIC SWAP (Success Case)
             task.request_status_sync()
-            task.request_status_sync()

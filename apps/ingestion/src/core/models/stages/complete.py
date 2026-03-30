@@ -7,7 +7,6 @@ from apps.ingestion.src.core.models.job import Task
 from apps.ingestion.src.core.models.job.manifest import CompletePayload
 from apps.ingestion.src.services.base import ArchiveMixin
 from apps.ingestion.src.services.factory import ServiceFactory
-from apps.ingestion.src.utils.constants import MANIFEST_FILENAME
 
 from .base import ExecutionStage
 from .enums import StageName

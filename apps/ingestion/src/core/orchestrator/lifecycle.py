@@ -3,7 +3,6 @@ from pathlib import Path
 
 import msgspec
 import structlog
-
 from apps.ingestion.src.core.contexts import ExecutionContext, TaskContext
 from apps.ingestion.src.core.models.job import ExecutionStatus, Task
 from apps.ingestion.src.core.models.states.terminal import HoldState
@@ -195,7 +194,4 @@ class LifecycleManager:
         for stage_dir in data_root.iterdir():
             if stage_dir.is_dir():
                 for physical_folder in stage_dir.glob(f"{job_id}_*"):
-                    shutil.rmtree(physical_folder)
-                    shutil.rmtree(physical_folder)
-                    shutil.rmtree(physical_folder)
                     shutil.rmtree(physical_folder)

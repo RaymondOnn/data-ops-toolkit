@@ -14,6 +14,7 @@ from apps.ingestion.src.core.models.job.status import ExecutionStatus
 from apps.ingestion.src.core.models.stages.base import ExecutionStage
 from apps.ingestion.src.core.models.stages.enums import StageName
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME
+
 LOG = structlog.getLogger(__name__)
 
 
@@ -372,5 +373,4 @@ class Task:
     #         is_done = bool(current_mask & stage.bitmask_flag)
     #         report[stage.label] = "DONE" if is_done else "PENDING"
 
-    #     return report
     #     return report
