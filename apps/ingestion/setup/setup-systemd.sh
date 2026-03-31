@@ -1,5 +1,9 @@
 #!/bin/bash
 # setup_orchestrator.sh
+# 
+# NOTE: This script is intended for Production/Staging Linux environments.
+# It configures the Orchestrator to run as a systemd background service.
+# For local testing, use 'python -m ingestion start' instead.
 
 APP_NAME="ingestion"
 PEX_FILE="/home/ubuntu/app/orchestrator.pex"

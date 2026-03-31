@@ -41,6 +41,12 @@ done
 # Add your table definitions here in the order they should be created
 SQL_FILES=(
     "/sql/tables/test.orders.sql"
+    "/sql/tables/meta.execution_log.sql"
+    "/sql/tables/meta.job_schedules.sql"
+    "/sql/tables/meta.execution_history.sql"
+    "/sql/views/meta.execution_history.sql"
+    "/sql/views/meta.error_log.sql"
+    "/sql/views/meta.current_execution.sql"
 )
 
 

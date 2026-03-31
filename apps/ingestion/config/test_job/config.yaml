@@ -31,8 +31,8 @@ default:
         sink_identifier: test.orders
         service_ref: "clickhouse"
       archive:
-        enable_archival: true    # per-dataset archival override
-        service_ref: "s3_archive"
+        enable_archival: false    # per-dataset archival override
+        # service_ref: "s3_archive"
 
 
 # ── Local env overrides ──────────────────────────────────────────────────────

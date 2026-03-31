@@ -9,8 +9,8 @@ import typer
 # from apps.ingestion.src.cli.test import test_app
 from apps.ingestion.src.core.contexts import ExecutionMode, parse_set_options
 from apps.ingestion.src.core.contexts.execution import RayMode
+from apps.ingestion.src.core.models.job import Task
 from apps.ingestion.src.core.orchestrator import create_orchestrator
-from apps.ingestion.src.utils.constants import ALWAYS_ON_MODE
 from libs.utils.log import setup_logging
 
 app = typer.Typer(help="50M Row Ingest Pipeline")
@@ -59,6 +59,9 @@ def run(
         str,
         typer.Option("--dataset", "-d", help="Dataset identifier (e.g., 'sales_data')"),
     ],
+    stage: Annotated[
+        str | None, typer.Option("--stage", help="Execute a specific stage only")
+    ],
     # Allow debug to be passed here to override the global setting
     debug: Annotated[
         bool, typer.Option("--debug", help="Enable verbose logging (overrides global)")
@@ -101,6 +104,20 @@ def run(
     orchestrator.exec_ctx.execution_mode = exec_mode
     orchestrator.exec_ctx.ray_mode = state["ray_mode"]
 
+    # 5. Isolated Stage Execution (Subprocess Entry Point)
+    if stage:
+        typer.echo(f"🛠️  Executing isolated stage: {stage}")
+        task = Task(
+            run_id=job_id,  # Simplified for isolated run
+            composite_key=f"{job_id}:{dataset}",
+            run_date=run_date.strftime("%Y-%m-%d"),
+            worker_id="pex-subprocess",
+            exec_ctx=orchestrator.exec_ctx,
+            target_stage=stage,
+        )
+        task.execute()
+        return
+
     typer.echo(f"🚀 Initializing {dataset} for {run_date.date()} (ID: {job_id})")
 
     # 3. Hand off to Orchestrator
@@ -121,6 +138,36 @@ def run(
         if state["debug"]:
             traceback.print_exc()
         raise typer.Exit(code=1) from e
+
+
+@app.command()
+def start(
+    debug: Annotated[
+        bool, typer.Option("--debug", help="Enable verbose logging")
+    ] = False,
+) -> None:
+    """
+    Start the Ingestion Orchestrator in ALWAYS-ON mode (Daemon).
+    In this mode, it polls for database triggers and filesystem signals.
+    """
+
+    orchestrator = create_orchestrator()
+    orchestrator.exec_ctx.always_on = True
+
+    # 2. Setup Local-Friendly Logging
+    setup_logging(
+        log_dir=Path("./.workspace/logs"),
+        is_prod=orchestrator.exec_ctx.is_prod(),
+        is_debug=debug,
+        filename="orchestrator_daemon.jsonl",
+    )
+
+    typer.secho(
+        "🐝 Orchestrator starting in ALWAYS-ON mode...",
+        fg=typer.colors.MAGENTA,
+        bold=True,
+    )
+    orchestrator.run(job_id="daemon", dataset_id="daemon")
 
 
 @app.command()
@@ -187,7 +234,7 @@ def recover(
     typer.echo(f"🔧 Found {len(target_folders)} matching tasks in HOLD/FAILED.")
 
     # 2. Trigger Recovery mechanism based on loop mode
-    if ALWAYS_ON_MODE:
+    if orchestrator.exec_ctx.always_on:
         # Signal trigger: Communicates with the background Orchestrator loop
         signal_path = orchestrator.exec_ctx.signal_path / "RECOVER_ALL.cmd"
         signal_path.touch()

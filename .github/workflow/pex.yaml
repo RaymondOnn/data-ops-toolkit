@@ -27,46 +27,64 @@ name: Build PEX Artifacts
 on:
   push:
     branches: [ main ]
+    paths:
+      - 'apps/ingestion/src/**'
+      - 'libs/**'
+      - 'uv.lock'
+      - 'pyproject.toml'
   workflow_dispatch:
+    inputs:
+      force_deps:
+        description: 'Force rebuild deps.pex'
+        type: boolean
+        default: false
 
 jobs:
   build-pex:
     runs-on: ubuntu-latest
-    stages:
+    steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Required for git diff to work
 
       - name: Install uv and pex
-        run: pip install uv pex
-
-      - name: Generate requirements.txt
-        run: uv pip compile apps/ingestion/pyproject.toml -o requirements.txt
-
-      - name: Download dependencies with uv
-        # We install dependencies into a local folder first.
-        # This leverages uv's speed for resolution and downloading.
-        # We exclude the local 'core-utils' from this stage to ensure it goes into code.pex, not deps.pex.
         run: |
-          sed -i '/core-utils/d' requirements.txt
-          mkdir -p .deps
-          uv pip install -r requirements.txt --target .deps
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          pip install pex
+
+      - name: Check for dependency changes
+        id: check_deps
+        run: |
+          # Compare current commit with the previous one
+          # If uv.lock or pyproject.toml changed, set 'rebuild=true'
+          if git diff --name-only HEAD^ HEAD | grep -E 'uv.lock|pyproject.toml'; then
+            echo "rebuild=true" >> $GITHUB_OUTPUT
+          else
+            echo "rebuild=false" >> $GITHUB_OUTPUT
+          fi
+          # Note: This only checks the last commit. For a more robust solution, consider comparing with the main branch or a specific tag.
 
       - name: Build deps.pex
-        # Create a PEX from the downloaded dependencies
+        if: steps.check_deps.outputs.rebuild == 'true' || github.event_name == 'workflow_dispatch'
         run: |
-          pex --sources-directory .deps \
+          uv export --no-dev --project apps/ingestion --format requirements.txt > requirements.txt
+          sed -i '/-e/d' requirements.txt
+          pex -r requirements.txt \
+              --platform manylinux2014_x86_64-cp-311-cp311 \
               -o deps.pex \
+              --runtime-pty \
               --python-shebang="/usr/bin/env python3"
 
       - name: Build code.pex
-        # Package the application and shared library source code.
-        # We use -e to specify the entry point directly since we are using raw sources.
         run: |
           pex --sources-directory apps/ingestion/src \
-              --sources-directory libs/core-utils/src \
+              --sources-directory libs/utils \
+              --sources-directory libs/auth \
+              --sources-directory libs/database \
+              --sources-directory libs/file \
               --no-pypi \
-              -e main:start \
+              --entry-point apps.ingestion.__main__:app \
               -o code.pex \
-              --python-shebang="/usr/bin/env python3"
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4

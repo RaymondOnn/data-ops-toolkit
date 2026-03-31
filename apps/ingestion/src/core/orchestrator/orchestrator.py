@@ -11,7 +11,7 @@ from apps.ingestion.src.core.contexts import TaskContextBuilder
 from apps.ingestion.src.core.models.job import ExecutionStatus, Task
 from apps.ingestion.src.core.models.stages.enums import StageName
 from apps.ingestion.src.services.factory import ServiceFactory
-from apps.ingestion.src.utils.constants import ALWAYS_ON_MODE, DISK_THRESHOLD_HALT, CONFIG_FILENAME
+from apps.ingestion.src.utils.constants import CONFIG_FILENAME, DISK_THRESHOLD_HALT
 from libs.resilience.heartbeat import Heartbeat
 from libs.utils.system import get_disk_usage
 from nanoid import generate
@@ -68,7 +68,9 @@ class Orchestrator:
         db_config = deepcopy(self.builder.app_settings.get("services.clickhouse", {}))
         service_name = db_config.pop("type")
 
-        ServiceFactory.get_provider(self.exec_ctx.provider_config)
+        ServiceFactory.get_provider(
+            self.exec_ctx.env, self.exec_ctx.provider_config
+        )
         self.db_service = ServiceFactory.get_service(service_name, **db_config)
         self.state_store = StateStore(self.db_service, self.exec_ctx)
         # State timers
@@ -116,7 +118,7 @@ class Orchestrator:
         run_date_str: str | None = None,
         overrides: dict[str, Any] | None = None,
     ) -> None:
-        if ALWAYS_ON_MODE:
+        if self.exec_ctx.always_on:
             self._start_always_on_loop()
             self.mode = "ALWAYS_ON"
         else:
@@ -153,7 +155,7 @@ class Orchestrator:
                 # --- 2. Database Polling (Every 60s) ---
                 if (
                     now - self.timers["db_poll"] > INTERVAL_DB_POLL_SECS
-                    and ALWAYS_ON_MODE
+                    and self.exec_ctx.always_on
                 ):
                     # state_store.refresh() queries Postgres for active job definitions
                     active_definitions = self.state_store.get_latest_state(

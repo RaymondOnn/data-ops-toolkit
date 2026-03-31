@@ -34,7 +34,7 @@ def setup_logging(
     # 3. Define the Shared Processors
     # These run for BOTH the console and the file
     shared_processors: list[Callable] = [
-        structlog.contextvars.merge_contextvars,
+        structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S"),
         structlog.processors.add_log_level,
         # Adds the name of the logger (e.g. apps.ingestion.src.services.file)
         structlog.stdlib.add_logger_name,
@@ -42,11 +42,12 @@ def setup_logging(
         structlog.processors.CallsiteParameterAdder(
             {
                 structlog.processors.CallsiteParameter.FILENAME,
+                structlog.processors.CallsiteParameter.MODULE,
                 structlog.processors.CallsiteParameter.FUNC_NAME,
                 structlog.processors.CallsiteParameter.LINENO,
             }
         ),
-        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.contextvars.merge_contextvars,
         structlog.processors.dict_tracebacks,
     ]
 
@@ -74,8 +75,8 @@ def setup_logging(
     console_formatter = structlog.stdlib.ProcessorFormatter(
         processor=(
             structlog.processors.JSONRenderer()
-            if is_prod and not is_debug
-            else structlog.dev.ConsoleRenderer(colors=True)
+            if is_prod
+            else structlog.dev.ConsoleRenderer(colors=True, event_key="event")
         ),
         foreign_pre_chain=shared_processors,
     )

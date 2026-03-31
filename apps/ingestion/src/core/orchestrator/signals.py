@@ -1,7 +1,7 @@
+import shutil
 from collections.abc import Callable
 
 import structlog
-
 from apps.ingestion.src.core.contexts import ExecutionContext
 from apps.ingestion.src.core.orchestrator.engine import IngestionEngine
 from apps.ingestion.src.core.orchestrator.state import StateStore
@@ -36,7 +36,7 @@ class SignalProcessor:
         is still writing.
         """
         run_ids = run_ids or set()  # If None, we process all signals in the directory
-        
+
         signal_dir = self.exec_ctx.signal_path
         if not signal_dir.exists():
             return
@@ -53,15 +53,15 @@ class SignalProcessor:
                 try:
                     # 1. Parse metadata from filename
                     # Format: {job_id}:{dataset_id}:{run_date}:{run_id}
-                    (
-                        job_id, dataset_id, run_date, run_id_from_file
-                    ) = self.exec_ctx.parse_identifier(signal.stem)
-                    
-                    # If we are filtering (Dumb Mode), skip signals not 
+                    (job_id, dataset_id, run_date, run_id_from_file) = (
+                        self.exec_ctx.parse_identifier(signal.stem)
+                    )
+
+                    # If we are filtering (Dumb Mode), skip signals not
                     # belonging to our triggered run(s)
                     if run_ids and run_id_from_file not in run_ids:
                         continue
-                    
+
                     identifier = self.exec_ctx.get_task_identifier(
                         job_id, dataset_id, run_date
                     )
@@ -91,12 +91,20 @@ class SignalProcessor:
 
                     if not task_dir or not task_dir.exists():
                         LOG.warning(
-                            "Signal received but task directory not found", run_id=run_id_from_file
+                            "Signal received but task directory not found",
+                            run_id=run_id_from_file,
                         )
                         continue
 
                     # 3. Sync manifest -> DB
                     self.state_store.sync_from_folder(task_dir, deep_sync=is_deep_sync)
+
+                    # 4. Final Metadata Cleanup (Zero-Footprint)
+                    # If this was a .done signal, the Orchestrator performs the final cleanup
+                    # now that the manifest has been successfully synced to the DB.
+                    if ".done" in signal.name:
+                        LOG.info("Final sync complete.", run_id=run_id_from_file)
+                        shutil.rmtree(task_dir, ignore_errors=True)
 
                     # 4. Remove the signal
                     signal.unlink(missing_ok=True)
@@ -135,4 +143,3 @@ class SignalProcessor:
                     LOG.exception(
                         "Unexpected error executing manual command", cmd=cmd_file
                     )
-

@@ -15,6 +15,13 @@ class RayMode(StrEnum):
     CLUSTER = "cluster"
 
 
+class Env(StrEnum):
+    LOCAL = "local"
+    DEV = "dev"
+    TEST = "test"
+    PROD = "prod"
+
+
 class ExecutionContext(msgspec.Struct):
     """
     Holds global application settings that are resolved at runtime.
@@ -24,6 +31,10 @@ class ExecutionContext(msgspec.Struct):
     workspace_dir: Path
     execution_mode: ExecutionMode = ExecutionMode.NORMAL
     ray_mode: RayMode = RayMode.CLUSTER
+    env: str = "local"
+    always_on: bool = False
+    code_pex_path: Path | None = None
+    deps_pex_path: Path | None = None
     provider_config: dict[str, str] = {}  # Config for secret provider
 
     @property
@@ -62,6 +73,9 @@ class ExecutionContext(msgspec.Struct):
 
     def is_normal(self) -> bool:
         return self.execution_mode == ExecutionMode.NORMAL
+
+    def is_prod(self) -> bool:
+        return self.env == ExecutionMode.NORMAL
 
     def get_task_identifier(self, job_id: str, dataset_id: str, run_date: str) -> str:
         """Standard format for parent folder names and cache keys."""

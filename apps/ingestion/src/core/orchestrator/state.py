@@ -11,11 +11,7 @@ from apps.ingestion.src.core.contexts.execution import ExecutionContext
 from apps.ingestion.src.core.contexts.job import TaskContext
 from apps.ingestion.src.core.models.job import ExecutionStatus, TaskManifest
 from apps.ingestion.src.services.database import DatabaseSink
-from apps.ingestion.src.utils.constants import (
-    ALWAYS_ON_MODE,
-    CONFIG_FILENAME,
-    MANIFEST_FILENAME,
-)
+from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
 
 LOG = structlog.getLogger(__name__)
 CURRENT_EXECUTION_TBL = "CURRENT_EXECUTION"
@@ -42,7 +38,7 @@ class StateStore:
 
     @property
     def active_records(self) -> dict[str, dict[str, Any]]:
-        if not self._active_records and ALWAYS_ON_MODE:
+        if not self._active_records and self.exec_ctx.always_on:
             self.get_latest_state()
         return self._active_records
 
@@ -230,19 +226,23 @@ class StateStore:
         Appends state to the local JSONL stream.
         Low latency, disk-persistent.
         """
+        if manifest is None or context is None:
+            LOG.warning("Cannot emit state without manifest and context")
+            return
+
         metadata = metadata or {}
         identifier = self.exec_ctx.get_task_identifier(
             manifest.job_id, manifest.dataset_id, context.run_date
         )
-        record = self.active_records.get(identifier, {})
+        record = self.active_records.get(identifier) or {}
 
         # Align keys with your execution_log.sql columns
         incoming_update = {
-            "RUN_ID": manifest.run_id if manifest else None,
-            "JOB_ID": manifest.job_id if manifest else None,
-            "SCHEDULED_TIMESTAMP": record.get("SCHEDULED_TIMESTAMP", None),
-            "DATASET_ID": manifest.dataset_id if manifest else None,
-            "RUN_DATE": context.run_date if context else None,
+            "RUN_ID": manifest.run_id,
+            "JOB_ID": manifest.job_id,
+            "SCHEDULED_TIMESTAMP": record.get("SCHEDULED_TIMESTAMP"),
+            "DATASET_ID": manifest.dataset_id,
+            "RUN_DATE": context.run_date,
             "START_TIMESTAMP": (
                 manifest.start.start_timestamp_utc if manifest.start else None
             ),
@@ -250,10 +250,12 @@ class StateStore:
                 manifest.complete.end_timestamp_utc if manifest.complete else None
             ),
             "LAST_UPDATED_AT_TS": datetime.now().astimezone().isoformat(),
-            "JOB_STATUS": str(metadata.get("JOB_STATUS", manifest.status)).upper(),
+            "JOB_STATUS": str(
+                metadata.get("JOB_STATUS", manifest.status.value)
+            ).upper(),
             "CURRENT_STEP": manifest.current_stage.upper(),
             "JOB_BITMASK": manifest.bitmask,
-            "WATCH_FILE_PATH": record.get("WATCH_FILE_PATH", None),
+            "WATCH_FILE_PATH": record.get("WATCH_FILE_PATH"),
             "RUNTIME_OVERRIDES": context.custom_overrides,
             "RETRY_ATTEMPTS": manifest.retry_count,
             "SOURCE_ROW_COUNT": (
@@ -262,7 +264,9 @@ class StateStore:
             "FINAL_ROW_COUNT": (
                 manifest.publish.final_count if manifest.publish else None
             ),
-            "FINAL_MANIFEST": msgspec.json.encode(manifest) if deep_sync else None,
+            "FINAL_MANIFEST": (
+                msgspec.json.encode(manifest).decode() if deep_sync else None
+            ),
         }
 
         # 2. Chain them: current_transition takes priority, record is the fallback

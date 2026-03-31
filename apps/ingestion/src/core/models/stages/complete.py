@@ -1,4 +1,5 @@
 import shutil
+import time
 from datetime import datetime, timedelta
 
 import msgspec
@@ -25,6 +26,7 @@ class CompleteStage(ExecutionStage):
             self.service = ServiceFactory.get_archive(
                 service_type=task_ctx.archive.type, **task_ctx.archive.config
             )
+
     def execute(self, task: Task) -> str:
         """
         Decision: The 'Zero-Footprint' Protocol.
@@ -35,24 +37,33 @@ class CompleteStage(ExecutionStage):
         task_ctx = task.context
         start_ts = datetime.now().astimezone().isoformat()
 
-
         try:
-            # 2. OPTIONAL ARCHIVAL
+
+            # 1. OPTIONAL ARCHIVAL
             # Subject to privacy requirements defined in job_config
             final_archive_path = None
             if task_ctx.archive.enabled:
                 # 1. Archive Parquet Files
-                # We move data from the high-speed 'data/' vault to the 'archive/' vault.
+                # We archive data from the 'data/' vault.
                 # This includes both the Extract (Sanitized) and Transform results.
                 self._archive_parquet_data(self.service, task)
 
-            # 3. CLEANUP VERIFICATION
-            # Force removal of all intermediate data (Extract & Transform folders)
-            local_run_root = task.folder.parent
-            for folder in ["extract", "transform"]:
-                target = local_run_root / folder
-                if target.exists():
-                    shutil.rmtree(target)
+            # 2. Garbage Collection Delay
+            # Allows Ray workers and Polars memory maps to release file handles
+            # before we attempt a physical wipe of the data vaults.
+            time.sleep(2)
+
+            # 3. PURGE DATA VAULTS
+            # We identify physical data via symlinks in the task folder.
+            # This ensures we only delete data belonging to this specific run.
+            LOG.info("Purging physical data vaults", job_id=task.job_id)
+            for item in task.folder.iterdir():
+                if item.is_symlink():
+                    real_data_path = item.resolve()
+                    if real_data_path.exists():
+                        LOG.debug("Deleting vault directory", path=str(real_data_path))
+                        shutil.rmtree(real_data_path, ignore_errors=True)
+                    item.unlink()  # Remove the symlink
 
             # 4. Calculate Timestamps and Duration
             end_ts = datetime.now().astimezone()
@@ -76,15 +87,14 @@ class CompleteStage(ExecutionStage):
             # 4. Final Finalize (Post-Purge)
             # We don't use a symlink here; we just record SUCCESS in the DB/State Store
             LOG.info(
-                "Task lifecycle complete. Workspace purged.",
+                "Task lifecycle complete.",
                 stage=self.name,
                 job_id=task.job_id,
             )
-
-            # This marks the final state of the manifest
             return "FINISH"
 
         except Exception as e:
+            LOG.error("CompleteStage failed during cleanup", error=str(e))
             self.finalize(task, exception=e)
             raise
 
@@ -117,4 +127,3 @@ class CompleteStage(ExecutionStage):
         """
         retention_days = getattr(job.context, "retention_days", 2555)  # 7 years default
         return (end_timestamp + timedelta(days=retention_days)).date().isoformat()
-

@@ -2,7 +2,7 @@ from collections.abc import Callable
 from typing import Any, ClassVar
 
 import structlog
-from apps.ingestion.src.utils.constants import APP_CURRENT_ENV
+
 from libs.auth.factory import AuthFactory
 from libs.auth.models import Secret
 
@@ -43,8 +43,8 @@ class ServiceFactory:
         return wrapper
 
     @classmethod
-    def get_provider(cls, config: dict[str, Any]) -> None:
-        cls._provider = AuthFactory.get_provider(env=APP_CURRENT_ENV, **config)
+    def get_provider(cls, env: str, config: dict[str, Any]) -> None:
+        cls._provider = AuthFactory.get_provider(env=env, **config)
 
     @classmethod
     def get_service(cls, service_type: str, **config: Any) -> Any:

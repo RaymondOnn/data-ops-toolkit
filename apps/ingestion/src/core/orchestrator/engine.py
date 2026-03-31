@@ -1,3 +1,5 @@
+import os
+import subprocess
 import time
 from typing import Any
 
@@ -5,6 +7,8 @@ import diskcache
 import msgspec
 import ray
 import structlog
+from filelock import FileLock
+
 from apps.ingestion.src.core.contexts import ExecutionContext, RayMode
 from apps.ingestion.src.core.models.job import ExecutionStatus, Task, TaskManifest
 from apps.ingestion.src.core.models.stages.enums import EXEC_STAGES, StageName
@@ -13,7 +17,6 @@ from apps.ingestion.src.services.registry import ServiceRegistry
 from apps.ingestion.src.utils.common import find_path
 from apps.ingestion.src.utils.constants import DISKCACHE_FILE_PATH, MANIFEST_FILENAME
 from apps.ingestion.src.utils.dates import epoch_to_iso, get_end_of_day_ts
-from filelock import FileLock
 from libs.utils.log import setup_logging
 
 from .enums import TaskMetadata
@@ -21,6 +24,7 @@ from .enums import TaskMetadata
 LOG = structlog.getLogger(__name__)
 IO_POOL_SIZE = 15
 CPU_POOL_SIZE = 4
+
 
 @ray.remote
 class Worker:
@@ -35,11 +39,13 @@ class Worker:
             sqlite_journal_mode="wal",
             sqlite_synchronous=1,  # 'NORMAL' - better for WAL mode performance
         )
-        
+
         # Initialize the Secret Provider for this process using the context's config
         if getattr(self.exec_ctx, "provider_config", None):
-            ServiceFactory.get_provider(self.exec_ctx.provider_config)
-            
+            ServiceFactory.get_provider(
+                self.exec_ctx.env, self.exec_ctx.provider_config
+            )
+
         # Share the same cache path with ServiceRegistry so that circuit-breaker
         # state (written by workers) is visible to the Orchestrator's registry.
         ServiceRegistry.configure(self.exec_ctx.workspace_dir)
@@ -48,7 +54,7 @@ class Worker:
         # Initialize logging for the worker process.
         # Using 'platform.jsonl' for workers as they are shared across runs.
         log_dir = self.exec_ctx.workspace_dir / "logs"
-        setup_logging(log_dir=log_dir, is_prod=not self.exec_ctx.is_debug())
+        setup_logging(log_dir=log_dir, is_prod=self.exec_ctx.is_prod())
         self.is_busy = False
 
     def process_stage(self, key: str) -> None:
@@ -83,8 +89,42 @@ class Worker:
         # Ensure the job's workspace is fully provisioned before check-in
         _ = task.folder
 
+        # 1. OPTION A: Isolated Execution via PEX (Production Mode)
+        if self.exec_ctx.code_pex_path and self.exec_ctx.code_pex_path.exists():
+            log.info(
+                "Launching isolated PEX process", pex=str(self.exec_ctx.code_pex_path)
+            )
+            try:
+                env = os.environ.copy()
+                if self.exec_ctx.deps_pex_path:
+                    env["PEX_PATH"] = str(self.exec_ctx.deps_pex_path)
+
+                cmd = [
+                    "python3",
+                    str(self.exec_ctx.code_pex_path),
+                    "run",
+                    meta.run_date,
+                    "--job-id",
+                    meta.job_id,
+                    "--dataset",
+                    meta.dataset_id,
+                    "--stage",
+                    current_stage,
+                ]
+
+                # This blocks the Ray Actor until the PEX finishes
+                subprocess.run(cmd, env=env, check=True)
+
+                # If successful, we assume the PEX updated the manifest and handled finalization
+                # We return here to avoid executing Option B
+                return
+            except subprocess.CalledProcessError as e:
+                log.error("PEX process failed", exit_code=e.returncode)
+                # Fall through to the except block to mark the task as FAILED in cache
+                raise e
+
         try:
-            # 2. Step Check-in: Update manifest immediately to 'RUNNING'
+            # 2. OPTION B: Direct Import Execution (Dev/Fallback Mode)
             task.check_in(current_stage)
 
             # 2.5 Pre-flight validation (Resource & Connectivity check)

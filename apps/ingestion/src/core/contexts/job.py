@@ -43,14 +43,14 @@ class LoadConfig(msgspec.Struct):
     load_params: dict[str, Any] = msgspec.field(default_factory=dict)
 
 
-class ArchiveConfig(msgspec.Struct):
+class ArchiveConfig(msgspec.Struct, omit_defaults=True):
     """Configuration for data governance and archival."""
 
-    enabled: bool = True
-    retention_days: int = 2555
-    base_path: str = "/mnt/archive/ingestion"
-    type: str = "s3"
-    config: dict[str, Any] = msgspec.field(default_factory=dict)
+    enabled: bool
+    retention_days: int | None
+    base_path: str | None
+    type: str | None
+    config: dict[str, Any] | None = msgspec.field(default_factory=dict)
 
 
 class TaskContext(msgspec.Struct):

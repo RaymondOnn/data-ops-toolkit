@@ -5,12 +5,9 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 import structlog
-
 from apps.ingestion.src.core.models.job.manifest import ErrorPayload
 from apps.ingestion.src.core.models.stages.enums import EXEC_STAGES, StageName
-from apps.ingestion.src.utils.constants import (
-    DISK_THRESHOLD_HALT
-)
+from apps.ingestion.src.utils.constants import DISK_THRESHOLD_HALT
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreakerTripped
 from libs.utils.system import get_disk_usage
@@ -164,9 +161,10 @@ class ExecutionStage(ABC):
                     job_id=task.job_id,
                     target=task.target_stage,
                 )
-            else:
-                # Persist stage results and bitmask for intermediate stages
-                task.update_manifest({self.name: results, "bitmask": new_mask.value})
+                return
+
+            # Persist stage results and bitmask for intermediate stages
+            task.update_manifest({self.name: results, "bitmask": new_mask.value})
 
             # Continue the chain (The Orchestrator will pick this up in the next scan)
             if next_stage:

@@ -5,10 +5,15 @@ from typing import Any
 
 import msgspec
 import structlog
+from dynaconf import Dynaconf
+
 from apps.ingestion.src.core.contexts.execution import ExecutionContext, ExecutionMode
 from apps.ingestion.src.core.contexts.job import TaskContext
-from apps.ingestion.src.utils.constants import APP_CONFIG_ROOT, APP_CURRENT_ENV
-from dynaconf import Dynaconf
+from apps.ingestion.src.utils.constants import (
+    APP_CONFIG_ROOT,
+    APP_CURRENT_ENV,
+    DEFAULT_PARTITION_COL,
+)
 
 LOG = structlog.get_logger()
 APP_DEFAULT_CONFIG = APP_CONFIG_ROOT / "app.yaml"
@@ -122,7 +127,9 @@ class TaskContextBuilder:
         # and subdirectories can be created safely.
         workspace.mkdir(parents=True, exist_ok=True)
 
-        return ExecutionContext(workspace_dir=workspace, execution_mode=mode)
+        return ExecutionContext(
+            workspace_dir=workspace, execution_mode=mode, app_env=self.env
+        )
 
     # TODO: Skip archive if enable_archival = False
     def _resolve_service(
@@ -309,7 +316,10 @@ class TaskContextBuilder:
             """
             Hierarchical lookup helper.
             Search priority:
-            Dataset (Env) -> Dataset (Default) -> Task (Env) -> Task (Default) -> Fallback
+            1. Job Config: Dataset (Active Env) -> Dataset (Default)
+            2. Job Config: Job-wide (Active Env) -> Job-wide (Default)
+            3. App Config: Global Environment-specific (e.g. 'local')
+            4. App Config: Global Defaults
             """
             search_paths = [f"datasets.{dataset_id}.{path}", f"job.{path}"]
             for p in search_paths:
@@ -322,6 +332,11 @@ class TaskContextBuilder:
                 val = settings.from_env("default").get(p)
                 if val is not None:
                     return val
+            # 2. Fallback to global app.yaml (respecting active environment)
+            val = self.app_settings.get(path)
+            if val is not None:
+                return val
+
             return default
 
         # 0. Handle Schema File Loading
@@ -334,25 +349,33 @@ class TaskContextBuilder:
         # pop() extracts specific 'type' and leave residual as 'config'
         source_svc = self._resolve_service(settings, "extract", dataset_id)
         source_type = (
-            source_svc.pop("type", get_val("source.type"))
+            source_svc.pop("type", get_val("extract.source_type"))
             if source_svc
-            else get_val("source.type")
+            else get_val("extract.source_type")
         )
 
         sink_svc = self._resolve_service(settings, "load", dataset_id)
         sink_type = (
-            sink_svc.pop("type", get_val("sink.type"))
+            sink_svc.pop("type", get_val("load.sink_type"))
             if sink_svc
-            else get_val("sink.type")
+            else get_val("load.sink_type")
         )
 
         if enable_archival := get_val("archive.enable_archival"):
             archive_svc = self._resolve_service(settings, "archive", dataset_id)
             archive_type = (
-                archive_svc.pop("type", get_val("archive.type"))
+                archive_svc.pop("type", get_val("archive.archive_type"))
                 if archive_svc
-                else get_val("archive.type")
+                else get_val("archive.archive_type")
             )
+
+            retention_days = get_val("archive.retention_days")
+            base_path = get_val("archive.base_path")
+        else:
+            archive_svc = {}
+            archive_type = None
+            retention_days = None
+            base_path = None
 
         ctx_data = {
             "job_id": job_id,
@@ -363,7 +386,7 @@ class TaskContextBuilder:
                 "source_type": source_type,
                 "source_identifier": get_val("extract.source_identifier")
                 or get_val("source_identifier"),
-                "num_partitions": get_val("num_partitions", 1),
+                "num_partitions": get_val("extract.num_partitions"),
                 "load_mode": get_val("extract.load_mode"),
                 "source_config": source_svc,
                 "source_params": get_val("extract.source_params", {}),
@@ -378,18 +401,16 @@ class TaskContextBuilder:
                 "sink_identifier": get_val("load.sink_identifier")
                 or get_val("target_destination"),
                 "sink_config": sink_svc,
-                "partition_col": get_val("partition_col", "_partition"),
-                "partition_value": get_val("partition_value", run_date),
+                "partition_col": get_val("load.partition_col", DEFAULT_PARTITION_COL),
+                "partition_value": get_val("load.partition_value", run_date),
                 "load_params": get_val("load.load_params", {}),
             },
             "archive": {
                 "enabled": enable_archival,
-                "retention_days": (
-                    get_val("archive.retention_days") if enable_archival else None
-                ),
-                "base_path": get_val("archive.base_path") if enable_archival else None,
-                "type": archive_type if enable_archival else None,
-                "config": archive_svc if enable_archival else None,
+                "retention_days": retention_days,
+                "base_path": base_path,
+                "type": archive_type,
+                "config": archive_svc,
             },
         }
 

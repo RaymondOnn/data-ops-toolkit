@@ -1,10 +1,8 @@
-import shutil
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
-
 from apps.ingestion.src.core.models.job.status import ExecutionStatus
 from apps.ingestion.src.services.registry import ServiceRegistry
 
@@ -102,59 +100,22 @@ class SuccessState(LifecycleState):
 
     def on_enter(self, data: dict[str, Any]) -> None:
         """
-        The Garbage Collector:
-        1. Identifies symlinks to the /data/ vault.
-        2. Deletes the physical data files (50M rows).
-        3. Cleans up the metadata folder.
+        Finalizes the manifest status. 
+        Physical cleanup is deferred to the CompleteStage.
         """
-        LOG.info(
-            "Starting final cleanup", job_id=self.job.job_id, run_id=self.job.run_id
-        )
-
         try:
-            # 1. Iterate through files in the job folder to find symlinks
-            for item in self.job.folder.iterdir():
-                if item.is_symlink():
-                    # Get the real path of the 50M row data file in the vault
-                    real_data_path = item.resolve()
-
-                    if real_data_path.exists():
-                        real_data_path.unlink()
-                        LOG.debug("Deleted vault data", path=str(real_data_path))
-
-                    # Remove the symlink itself
-                    item.unlink()
-
-            # 2. Finalize the manifest status for logs/history before deletion
-            # (If you want to keep a record, move the manifest to an
-            # archive folder here)
             self.job.update_manifest(
                 {
                     "status": ExecutionStatus.SUCCESS.value,
                     **data,
                 }
             )
-
-            # 3. Final Wipe: Remove the entire job run folder
-            # Caution: Ensure you actually want to delete the metadata folder!
-            shutil.rmtree(self.job.folder)
-
-            LOG.info(
-                "Task lifecycle complete. Resources released.",
-                job_id=self.job.job_id,
-                run_id=self.job.run_id,
-            )
-
         except Exception as e:
-            LOG.error("Cleanup failed. Moving to FAILED for review.", error=str(e))
+            LOG.error("Failed to update success status", error=str(e))
             self.job.move_to_folder("FAILED")
 
     def can_recover(self) -> bool:
         return False
 
 
-STATE_MAP = {"HOLD": HoldState, "FAILED": FailedState}
-STATE_MAP = {"HOLD": HoldState, "FAILED": FailedState}
-STATE_MAP = {"HOLD": HoldState, "FAILED": FailedState}
-STATE_MAP = {"HOLD": HoldState, "FAILED": FailedState}
 STATE_MAP = {"HOLD": HoldState, "FAILED": FailedState}

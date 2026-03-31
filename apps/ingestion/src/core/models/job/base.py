@@ -13,7 +13,7 @@ from apps.ingestion.src.core.models.job.manifest import TaskManifest
 from apps.ingestion.src.core.models.job.status import ExecutionStatus
 from apps.ingestion.src.core.models.stages.base import ExecutionStage
 from apps.ingestion.src.core.models.stages.enums import StageName
-from apps.ingestion.src.utils.constants import CONFIG_FILENAME
+from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
 
 LOG = structlog.getLogger(__name__)
 
@@ -75,14 +75,14 @@ class Task:
 
         # Re-hydrate manifest to find the correct target stage if not provided
         # Since we have the path, we can read it directly
-        manifest_path = active_path / "manifest.json"
+        manifest_path = active_path / MANIFEST_FILENAME
         current_stage = target_stage.label if target_stage else StageName.START.label
         if manifest_path.exists():
             with manifest_path.open("rb") as f:
                 m = msgspec.json.decode(f.read(), type=TaskManifest)
                 current_stage = m.current_stage
 
-        instance = cls(
+        return cls(
             composite_key=composite_key,
             run_id=run_id,
             run_date=run_date,
@@ -91,7 +91,6 @@ class Task:
             target_stage=current_stage,
             folder_path=active_path,
         )
-        return instance
 
     @property
     def id(self) -> str:
@@ -198,12 +197,27 @@ class Task:
         start_time = time.perf_counter()
         log = LOG.bind(job_id=self.job_id, run_id=self.run_id, stage=self.stage.name)
 
-        log.info("Executing stage logic")
-        next_stage_label = self.stage.execute(task=self)
+        # In 'Pod' Scaling, this is the 'Entry Point' of the isolated process.
+        # If this process OOMs, Ray will catch the SIGKILL, but the
+        # Orchestrator will stay alive because it is not sharing memory
+        # with this code.
+        log.info("Executing stage logic", isolation_mode="RayActor")
+        try:
+            next_stage_label = self.stage.execute(task=self)
 
-        duration = time.perf_counter() - start_time
-        log.info("Step execution finished", duration_sec=round(duration, 4))
-        return next_stage_label
+            # Safety Check: If the manifest status is no longer RUNNING, stop the chain
+            if self.manifest.status not in [
+                ExecutionStatus.RUNNING,
+                ExecutionStatus.PENDING,
+            ]:
+                return "TERMINATED"
+
+            duration = time.perf_counter() - start_time
+            log.info("Step execution finished", duration_sec=round(duration, 4))
+            return next_stage_label
+        except Exception as e:
+            # The stage finalize already handled the move/manifest update
+            raise e
 
     def _make_folder(self) -> None:
         # 1. Assignment (Ensures paths are correctly calculated)
