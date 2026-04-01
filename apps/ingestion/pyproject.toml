@@ -21,6 +21,7 @@ dependencies = [
     "filelock",
     "dynaconf",
     "boto3",
+    "croniter",
 ]
 requires-python = ">=3.11"
 

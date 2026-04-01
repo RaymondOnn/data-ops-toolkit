@@ -128,7 +128,7 @@ class TaskContextBuilder:
         workspace.mkdir(parents=True, exist_ok=True)
 
         return ExecutionContext(
-            workspace_dir=workspace, execution_mode=mode, app_env=self.env
+            workspace_dir=workspace, execution_mode=mode, env=self.env
         )
 
     # TODO: Skip archive if enable_archival = False

@@ -1,15 +1,20 @@
 services:
   clickhouse:
-    image: clickhouse/clickhouse-server:latest
     # container_name: clickhouse-dev
+    # image: clickhouse/clickhouse-server:latest
+    build:
+      context: ./clickhouse
+      dockerfile: Dockerfile
     environment:
       - CLICKHOUSE_USER=default
       - CLICKHOUSE_PASSWORD=password
     volumes:
-      - ../../../sql/definitions:/sql
-      - ./tmp/clickhouse/data:/var/lib/clickhouse
+      - ../../../sql:/sql
       # - ./clickhouse/init_databases.sh:/docker-entrypoint-initdb.d/init_databases.sh
       - ./clickhouse/clickhouse_settings.xml:/etc/clickhouse-server/config.d/clickhouse_settings.xml
+      - ./clickhouse/cron_next_function.xml:/etc/clickhouse-server/user_defined_functions/cron_next_function.xml
+      - ./clickhouse/udf:/var/lib/clickhouse_scripts
+      - ./tmp/clickhouse:/var/lib/clickhouse
     ports:
       - "8123:8123"
       - "9000:9000"
@@ -18,7 +23,17 @@ services:
         soft: 262144
         hard: 262144
     healthcheck:
-      test: ["CMD", "clickhouse-client", "--user", "default", "--password", "password", "--query", "SELECT 1"]
+      test:
+        [
+          "CMD",
+          "clickhouse-client",
+          "--user",
+          "default",
+          "--password",
+          "password",
+          "--query",
+          "SELECT 1",
+        ]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -31,9 +46,10 @@ services:
       - CLICKHOUSE_USER=default
       - CLICKHOUSE_PASSWORD=password
       - CH_HOST=clickhouse
+      - LOCALSTACK_HOST=localstack
     volumes:
       - ./clickhouse/init_databases.sh:/init_databases.sh
-      - ../../../sql/definitions:/sql
+      - ../../../sql:/sql
     depends_on:
       - clickhouse
     networks:
@@ -41,29 +57,17 @@ services:
     entrypoint: /bin/bash
     command: /init_databases.sh
 
-  # S3 replacement
-  # garage:
-  #   image: dxflrs/garage:v2.2.0
-  #   container_name: garage
-  #   restart: unless-stopped
+  # localstack:
+  #   image: localstack/localstack:latest
+  #   container_name: localstack
   #   ports:
-  #     - "3900:3900" # S3 API
-  #     - "3901:3901" # RPC (for cluster communication)
-  #     - "3902:3902" # S3 Web (optional)
-  #     - "3903:3903" # Admin API
-  #   volumes:
-  #     - ./garage/garage.toml:/etc/garage.toml
-  #     - ./tmp/garage-meta:/var/lib/garage/meta:rw
-  #     - ./tmp/garage-data:/var/lib/garage/data:rw
+  #     - "4566:4566"            # LocalStack Edge Proxy
   #   environment:
-  #     - RUST_LOG=garage=debug
-  #   healthcheck:
-  #     # test: ["CMD-SHELL", "pgrep garage > /dev/null || exit 1"]
-  #     test: ["CMD", "/garage", "status"]
-  #     interval: 10s
-  #     timeout: 5s
-  #     retries: 5
-  #     start_period: 10s
+  #     - SERVICES=s3,secretsmanager,sts
+  #     - DOCKER_HOST=unix:///var/run/docker.sock
+  #   volumes:
+  #     - "/var/run/docker.sock:/var/run/docker.sock"
+  #     - "./tmp/localstack:/var/lib/localstack"
   #   networks:
   #     - ch_ntw
 

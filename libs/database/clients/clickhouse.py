@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Generator, Sequence
 from typing import Any
 
@@ -5,6 +6,7 @@ import polars as pl
 from clickhouse_connect.driver.client import Client
 from libs.database.clients.base import DBClient
 
+LOG = logging.getLogger(__name__)
 
 class ClickhouseClient(DBClient):
     def connect(self) -> Client:
@@ -49,11 +51,13 @@ class ClickhouseClient(DBClient):
 
     def sql(self, query: str) -> list[Sequence[Any]]:
         # Returns a list of tuples by default
+        LOG.debug("Executing SQL query", extra={"query": query})
         result = self.connect().query(query)
         return list(result.result_rows)
 
     def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
         # clickhouse-connect supports native DataFrame streaming
+        LOG.debug("Executing SQL query", extra={"query": query})
         result = self.connect().query_df_stream(
             query, settings={"max_block_size": 100_000}
         )

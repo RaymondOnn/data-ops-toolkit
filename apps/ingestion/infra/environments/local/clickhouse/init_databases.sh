@@ -26,7 +26,7 @@ fi
 
 # 1. Define the databases needed for the Ingestion Pipeline
 # These represent the different layers of your data lake/warehouse
-DATABASES=("meta" "test")
+DATABASES=("META" "TEST")
 
 echo "🚀 Starting ClickHouse Object Coordination..."
 
@@ -40,13 +40,16 @@ done
 # 2. Define the EXPLICIT order of SQL execution
 # Add your table definitions here in the order they should be created
 SQL_FILES=(
-    "/sql/tables/test.orders.sql"
-    "/sql/tables/meta.execution_log.sql"
-    "/sql/tables/meta.job_schedules.sql"
-    "/sql/tables/meta.execution_history.sql"
-    "/sql/views/meta.execution_history.sql"
-    "/sql/views/meta.error_log.sql"
-    "/sql/views/meta.current_execution.sql"
+    "/sql/definitions/tables/test.orders.sql"
+    "/sql/definitions/tables/meta.execution_log.sql"
+    "/sql/definitions/tables/meta.job_schedules.sql"
+    "/sql/definitions/tables/meta.execution_history.sql"
+    "/sql/definitions/views/meta.execution_history.sql"
+    "/sql/definitions/views/meta.error_log.sql"
+    "/sql/definitions/views/meta.current_execution.sql"
+    "/sql/definitions/views/meta.current_schedules.sql"
+    "/sql/definitions/views/meta.work_queue_trigger.sql"
+    "/sql/adhoc/seed_metadata.sql"
 )
 
 

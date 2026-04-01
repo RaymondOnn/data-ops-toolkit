@@ -1,0 +1,8 @@
+FROM clickhouse/clickhouse-server:latest
+
+# Combine commands and clean up cache to prevent disk space errors
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3-pip && \
+    pip3 install --no-cache-dir croniter && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*

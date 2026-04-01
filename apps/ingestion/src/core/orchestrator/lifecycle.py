@@ -3,13 +3,14 @@ from pathlib import Path
 
 import msgspec
 import structlog
+
 from apps.ingestion.src.core.contexts import ExecutionContext, TaskContext
 from apps.ingestion.src.core.models.job import ExecutionStatus, Task
 from apps.ingestion.src.core.models.states.terminal import HoldState
 from apps.ingestion.src.core.orchestrator.engine import IngestionEngine
 from apps.ingestion.src.core.orchestrator.state import StateStore
 from apps.ingestion.src.utils.common import find_path
-from apps.ingestion.src.utils.constants import MANIFEST_FILENAME, CONFIG_FILENAME
+from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
 from apps.ingestion.src.utils.dates import is_expired
 
 LOG = structlog.getLogger(__name__)
@@ -116,10 +117,21 @@ class LifecycleManager:
 
         for data in runs_to_check:
             # We only expire jobs that are stuck in a non-terminal state
-            if data["status"] in ExecutionStatus.active_statuses():
+            status = data.get("JOB_STATUS")
+            if status and status in ExecutionStatus.active_statuses():
                 try:
-                    # Use get_context to check expiry without a full manifest parse
-                    job_path = Path(data["folder_path"])
+                    job_id = data.get("JOB_ID")
+                    run_id = data.get("RUN_ID")
+                    dataset_id = data.get("DATASET_ID")
+                    run_date = str(data.get("RUN_DATE", ""))
+
+                    if not all([job_id, run_id, dataset_id, run_date]):
+                        continue
+
+                    # Standardize path resolution from database metadata
+                    job_path = self.exec_ctx.get_run_path(
+                        job_id, dataset_id, run_date, run_id
+                    )
                     if not job_path.exists():
                         continue
 
@@ -129,16 +141,16 @@ class LifecycleManager:
                     if is_expired(ctx.expires_at):
                         LOG.warning(
                             "Task TTL reached. Initiating purge.",
-                            job_id=data["job_id"],
-                            run_id=data["run_id"],
+                            job_id=job_id,
+                            run_id=run_id,
                         )
 
                         # 1. Perform physical cleanup
-                        self._cleanup_workspace(data["job_id"])
+                        self._cleanup_workspace(run_id)
 
                         # 2. Update State Store to terminal status
                         self.state_store.update_run(
-                            data["run_id"],
+                            run_id,
                             {"status": ExecutionStatus.EXPIRED, "stage": "cleanup"},
                         )
 

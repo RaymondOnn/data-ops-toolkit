@@ -186,6 +186,7 @@ class IngestionEngine:
         self.exec_ctx = exec_ctx
         # 2. Initialize the Global Registry (Diskcache)
         # This ensures the shared cache path exists for all Ray workers
+        ServiceRegistry.configure(self.exec_ctx.workspace_dir)
         self.registry = ServiceRegistry()
         cache_path = (self.exec_ctx.workspace_dir / DISKCACHE_FILE_PATH).resolve()
 

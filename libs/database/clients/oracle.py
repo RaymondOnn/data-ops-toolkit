@@ -1,13 +1,14 @@
+import logging
 from collections.abc import Generator, Sequence
 from typing import Any
 
 import polars as pl
+from libs.database.clients.base import DBClient
 from oracledb import Connection
 
-from libs.database.clients.base import DBClient
+LOG = logging.getLogger(__name__)
 
 # Note: Running on Thin mode; no instant client required
-
 
 class OracleClient(DBClient):
     def __init__(self, **config: Any) -> None:
@@ -40,7 +41,7 @@ class OracleClient(DBClient):
         table_name: str,
         num_partitions: int = 10,
         filter_sql: str | None = None,
-    ) -> list[str]:
+    ) -> set[str]:
         """
         Uses ORA_HASH to create N virtual partitions without needing a PK.
         """
@@ -54,7 +55,7 @@ class OracleClient(DBClient):
                 AND ORA_HASH(rowid, {num_partitions - 1}) = {i}
             """
             queries.append(sql)
-        return queries
+        return set(queries)
 
     def sql(self, query: str) -> list[Sequence[Any]]:
         """
@@ -62,6 +63,7 @@ class OracleClient(DBClient):
         Used for commands and small metadata fetches.
         """
         with self.connect() as conn, conn.cursor() as cur:
+            LOG.debug("Executing SQL query", extra={"query": query})
             cur.execute(query)
             rows = cur.fetchall()
             return [tuple(row) for row in rows]
@@ -70,6 +72,7 @@ class OracleClient(DBClient):
         """Fetched concurrently by Ray, but limited by the Manager's Session Lock."""
         cursor = self.connect().cursor()
         try:
+            LOG.debug("Executing SQL query", extra={"query": query})
             cursor.execute(query)
 
             # Ensure we have a valid description (required for column names)

@@ -1,5 +1,5 @@
 -- DDL for orders dataset in Silver layer
-CREATE TABLE IF NOT EXISTS test.orders (
+CREATE TABLE IF NOT EXISTS TEST.ORDERS (
     order_id Int64,
     customer_id Int64,
     order_date Date,

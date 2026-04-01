@@ -5,6 +5,7 @@ from typing import Any, ClassVar
 
 import diskcache
 import structlog
+
 from apps.ingestion.src.utils.constants import DISKCACHE_FILE_PATH
 from libs.resilience.circuit_breaker import (
     CircuitBreaker,
@@ -72,10 +73,9 @@ class ServiceRegistry:
 
     @classmethod
     def increment_failure(cls, name: str, window_seconds: int = 5) -> int:
-        """Increments and returns the new failure count atomically."""
         """
-        Dampens failure increments. Multiple failures within 
-        the window count as one to avoid swarming updates at the same time.
+        Increments and returns the failure count atomically.
+        Dampens increments: multiple failures within the window count as one.
         """
         now = time.time()
         cache = cls._get_cache()

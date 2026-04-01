@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Generator, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -8,6 +9,7 @@ from libs.database.clients.base import DBClient
 if TYPE_CHECKING:
     from adbc_driver_postgresql.dbapi import Connection
 
+LOG = logging.getLogger(__name__)
 
 class PostgresClient(DBClient):
     def __init__(self, **config: Any) -> None:
@@ -56,12 +58,14 @@ class PostgresClient(DBClient):
         Used for commands and small metadata fetches.
         """
         with self.connect().cursor() as cur:
+            LOG.debug("Executing SQL query", extra={"query": query})
             cur.execute(query)
             rows = cur.fetchall()
             return [tuple(row) for row in rows]
 
-    def fetch_df(self, query: str) -> Generator[pl.DataFrame, None, None]:
+    def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
         with self.connect().cursor() as cursor:
+            LOG.debug("Executing SQL query", extra={"query": query})
             cursor.execute(query)
             # ADBC native streaming to Arrow, then to Polars
             reader = cursor.fetch_record_batch()

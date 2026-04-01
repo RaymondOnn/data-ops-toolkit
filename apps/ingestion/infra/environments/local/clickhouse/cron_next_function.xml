@@ -1,0 +1,17 @@
+<functions>
+    <function>
+        <type>executable</type>
+        <name>cron_next</name>
+        <return_type>DateTime64(3, 'UTC')</return_type>
+        <argument>
+            <type>String</type>
+            <name>cron_expression</name>
+        </argument>
+        <argument>
+            <type>DateTime64(3, 'UTC')</type>
+            <name>reference_timestamp</name>
+        </argument>
+        <format>TabSeparated</format>
+        <command>/var/lib/clickhouse_scripts/cron_next.py</command>
+    </function>
+</functions>

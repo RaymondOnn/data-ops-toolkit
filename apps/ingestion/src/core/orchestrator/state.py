@@ -7,6 +7,7 @@ from typing import Any
 import msgspec
 import polars as pl
 import structlog
+
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
 from apps.ingestion.src.core.contexts.job import TaskContext
 from apps.ingestion.src.core.models.job import ExecutionStatus, TaskManifest
@@ -14,7 +15,7 @@ from apps.ingestion.src.services.database import DatabaseSink
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
 
 LOG = structlog.getLogger(__name__)
-CURRENT_EXECUTION_TBL = "CURRENT_EXECUTION"
+CURRENT_EXECUTION_TBL = "META.CURRENT_EXECUTION"
 
 
 # TODO: Logging to Error Log? Workflow for refresh current_execution for the day
@@ -43,11 +44,14 @@ class StateStore:
         return self._active_records
 
     def get_latest_state(
-        self, force_refresh: bool = False
+        self, force_refresh: bool = False, lookahead_mins: int = 60
     ) -> dict[str, dict[str, Any]]:
         """
         Returns the map of active/pending/blocked/deferred records.
         If _active_records is None or force_refresh is True, it queries the DB view.
+
+        Args:
+            lookahead_mins: Filter jobs scheduled within the next X minutes.
         """
         if not self._active_records or force_refresh:
             LOG.info("Refreshing active records from database view")
@@ -59,6 +63,7 @@ class StateStore:
         sql = f"""
             SELECT * FROM {CURRENT_EXECUTION_TBL} 
             WHERE JOB_STATUS IN ({status_filter})
+            AND SCHEDULED_TIMESTAMP <= now64() + INTERVAL {lookahead_mins} MINUTE
         """
         try:
             raw_records = self.db.fetch(sql)
@@ -250,9 +255,7 @@ class StateStore:
                 manifest.complete.end_timestamp_utc if manifest.complete else None
             ),
             "LAST_UPDATED_AT_TS": datetime.now().astimezone().isoformat(),
-            "JOB_STATUS": str(
-                metadata.get("JOB_STATUS", manifest.status.value)
-            ).upper(),
+            "JOB_STATUS": str(metadata.get("status", manifest.status.value)).upper(),
             "CURRENT_STEP": manifest.current_stage.upper(),
             "JOB_BITMASK": manifest.bitmask,
             "WATCH_FILE_PATH": record.get("WATCH_FILE_PATH"),

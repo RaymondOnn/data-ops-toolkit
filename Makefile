@@ -22,6 +22,7 @@ clean-test:
 	rm -rf .ruff_cache
 
 clean-all: clean-pyc clean-test
+	find . -name ".DS_Store" -delete
 	@echo "All temporary caches cleared."
 
 typecheck:
@@ -61,9 +62,6 @@ docker-up: ## Start the Docker containers in detached mode
 docker-down: ## Stop and remove the Docker containers
 	docker compose -f $(DOCKER_COMPOSE_FILE) down
 
-docker-init-garage: ## Run the Garage initialization script
-	bash apps/ingestion/infra/environments/local/garage/init-garage.sh
-
 docker-restart: ## Stop and then start the Docker containers again
 	docker compose -f $(DOCKER_COMPOSE_FILE) restart
 
@@ -74,14 +72,19 @@ docker-rebuild: ## Rebuild Docker images and restart containers
 	docker compose -f $(DOCKER_COMPOSE_FILE) build --no-cache
 	docker compose -f $(DOCKER_COMPOSE_FILE) up -d --force-recreate
 
+ch-img: ## Build only the custom ClickHouse image
+	docker compose -f $(DOCKER_COMPOSE_FILE) build clickhouse
+
 docker-clean: ## Stop, remove containers, volumes, and images
 	docker compose -f $(DOCKER_COMPOSE_FILE) down --volumes --rmi all
-	rm -rf apps/ingestion/infra/environments/local/tmp/garage-meta
-	rm -rf apps/ingestion/infra/environments/local/tmp/garage-data
-	rm -rf apps/ingestion/infra/environments/local/tmp/clickhouse/data
+	rm -rf apps/ingestion/infra/environments/local/tmp/clickhouse
+	rm -rf apps/ingestion/infra/environments/local/tmp/localstack
 
 docker-logs: ## View logs for all Docker services
 	docker compose -f $(DOCKER_COMPOSE_FILE) logs -f
+
+docker-logs-ch-init: ## View logs for the ClickHouse initialization container
+	docker compose -f $(DOCKER_COMPOSE_FILE) logs -f clickhouse-init
 
 docker-exec-ch: ## Execute a command inside the ClickHouse container
 	docker compose -f $(DOCKER_COMPOSE_FILE) exec clickhouse bash
