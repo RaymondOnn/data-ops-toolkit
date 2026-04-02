@@ -7,7 +7,6 @@ from typing import Any
 import msgspec
 import polars as pl
 import structlog
-
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
 from apps.ingestion.src.core.contexts.job import TaskContext
 from apps.ingestion.src.core.models.job import ExecutionStatus, TaskManifest
@@ -54,7 +53,7 @@ class StateStore:
             lookahead_mins: Filter jobs scheduled within the next X minutes.
         """
         if not self._active_records or force_refresh:
-            LOG.info("Refreshing active records from database view")
+            LOG.debug("Refreshing active records from database view")
 
         # We only care about jobs that are not SUCCESS, FAILED, or EXPIRED
         active_statuses = [f"'{s.value}'" for s in ExecutionStatus.active_statuses()]
@@ -66,12 +65,23 @@ class StateStore:
             AND SCHEDULED_TIMESTAMP <= now64() + INTERVAL {lookahead_mins} MINUTE
         """
         try:
+            # Fetch column names dynamically from ClickHouse metadata to avoid hardcoding
+            cols = [
+                row[0]
+                for row in self.db.fetch(f"DESCRIBE TABLE {CURRENT_EXECUTION_TBL}")
+            ]
+
             raw_records = self.db.fetch(sql)
             for r in raw_records:
+                # Convert tuple results to dictionary for named access if necessary
+                record = dict(zip(cols, r)) if isinstance(r, (tuple, list)) else r
+
                 identifier = self.exec_ctx.get_task_identifier(
-                    r["JOB_ID"], r["DATASET_ID"], str(r["RUN_DATE"])
+                    record["JOB_ID"], record["DATASET_ID"], str(record["RUN_DATE"])
                 )
-                self._active_records[identifier] = r
+                self._active_records[identifier] = record
+
+            LOG.info("Successfully refreshed active records", count=len(raw_records))
         except Exception as e:
             LOG.error("Failed to refresh active records", error=str(e))
             # Fallback to empty dict to avoid NoneType errors in Orchestrator loop
@@ -195,8 +205,8 @@ class StateStore:
             df.write_parquet(target_parquet)
             temp_jsonl.unlink()  # JSONL is no longer needed once Parquet is cut
 
-            # 2. Attempt Load for ALL files in stage (Retrying old failures)
-            self.db.stage_data(self.stage_dir, "EXECUTION_LOG")
+            # 2. Synchronously process the stage folder
+            self._process_stage()
 
             self.last_flush = time.time()
             LOG.info("StateStore flush successful", batch=batch_id, rows=df.height)
@@ -209,7 +219,8 @@ class StateStore:
     def _process_stage(self):
         """Iterates through stage folder and moves successful loads to archive"""
         try:
-            self.db.stage_data(self.stage_dir, "EXECUTION_LOG", "parquet")
+            # Load all pending Parquet files into the DB
+            self.db.stage_data(self.stage_dir, "EXECUTION_LOG")
             for pq_file in self.stage_dir.glob("*.parquet"):
                 # Move to archive only on success
                 pq_file.rename(self.archive_dir / pq_file.name)
@@ -254,7 +265,9 @@ class StateStore:
             "END_TIMESTAMP": (
                 manifest.complete.end_timestamp_utc if manifest.complete else None
             ),
-            "LAST_UPDATED_AT_TS": datetime.now().astimezone().isoformat(),
+            "LAST_UPDATED_AT_TS": datetime.now()
+            .astimezone()
+            .isoformat(sep=" ", timespec="milliseconds"),
             "JOB_STATUS": str(metadata.get("status", manifest.status.value)).upper(),
             "CURRENT_STEP": manifest.current_stage.upper(),
             "JOB_BITMASK": manifest.bitmask,
@@ -282,4 +295,5 @@ class StateStore:
 
         line = msgspec.json.encode(event) + b"\n"
         with self.stream_path.open("ab") as f:
+            f.write(line)
             f.write(line)

@@ -1,0 +1,45 @@
+name: 'Atomic Deploy'
+description: 'Syncs artifacts and switches symlinks via SSH'
+inputs:
+  ssh_host: { required: true }
+  ssh_user: { required: true }
+  app_name: { required: true }
+  release_id: { required: true }
+  dist_path: { required: true, default: './dist' }
+
+runs:
+  using: "composite"
+  steps:
+    - name: Sync Artifacts
+      shell: bash
+      env:
+        BASE_PATH: /opt/apps/${{ inputs.app_name }}
+        RELEASE_DIR: /opt/apps/${{ inputs.app_name }}/releases/${{ inputs.release_id }}
+        CURRENT_LINK: /opt/apps/${{ inputs.app_name }}/current
+      run: |
+        ssh ${{ inputs.ssh_user }}@${{ inputs.ssh_host }} "mkdir -p $RELEASE_DIR"
+        rsync -av --delete ${{ inputs.dist_path }}/ ${{ inputs.ssh_user }}@${{ inputs.ssh_host }}:$RELEASE_DIR
+        
+        # Optimization for Slow Networks:
+        # -z: Compress data during transfer
+        # --link-dest: Hard-link unchanged files on the server (huge time saver if deps.pex is the same)
+        # --partial: Allow resuming if the network drops
+        rsync -azP --delete --link-dest=$CURRENT_LINK ${{ inputs.dist_path }}/ ${{ inputs.ssh_user }}@${{ inputs.ssh_host }}:$RELEASE_DIR
+
+
+    - name: Atomic Symlink Switch
+      shell: bash
+      env:
+        RELEASE_DIR: /opt/apps/${{ inputs.app_name }}/releases/${{ inputs.release_id }}
+        CURRENT_LINK: /opt/apps/${{ inputs.app_name }}/current
+      run: |
+        echo "🔗 Switching symlink for ${{ inputs.app_name }}..."
+        ssh ${{ inputs.ssh_user }}@${{ inputs.ssh_host }} "ln -sfn $RELEASE_DIR $CURRENT_LINK"
+
+    - name: Cleanup Old Releases
+      shell: bash
+      env:
+        RELEASES_PATH: /opt/apps/${{ inputs.app_name }}/releases
+      run: |
+        ssh ${{ inputs.ssh_user }}@${{ inputs.ssh_host }} \
+          "cd $RELEASES_PATH && ls -1 | sort | head -n -5 | xargs -r rm -rf"

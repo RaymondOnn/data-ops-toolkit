@@ -12,13 +12,13 @@ services:
       - ../../../sql:/sql
       # - ./clickhouse/init_databases.sh:/docker-entrypoint-initdb.d/init_databases.sh
       - ./clickhouse/clickhouse_settings.xml:/etc/clickhouse-server/config.d/clickhouse_settings.xml
-      - ./clickhouse/cron_next_function.xml:/etc/clickhouse-server/user_defined_functions/cron_next_function.xml
-      - ./clickhouse/udf:/var/lib/clickhouse_scripts
-      - ./tmp/clickhouse:/var/lib/clickhouse
+      - ./clickhouse/cron_next_function.xml:/etc/clickhouse-server/cron_next_function.xml
+      - ./clickhouse/udf:/var/lib/clickhouse/user_scripts
+      - ./.tmp/clickhouse:/var/lib/clickhouse
     ports:
       - "8123:8123"
       - "9000:9000"
-    ulimits:
+    ulimits:       
       nofile:
         soft: 262144
         hard: 262144
@@ -67,7 +67,7 @@ services:
   #     - DOCKER_HOST=unix:///var/run/docker.sock
   #   volumes:
   #     - "/var/run/docker.sock:/var/run/docker.sock"
-  #     - "./tmp/localstack:/var/lib/localstack"
+  #     - "./.tmp/localstack:/var/lib/localstack"
   #   networks:
   #     - ch_ntw
 

@@ -2,8 +2,8 @@ jobs:
   list-apps:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ stages.set-matrix.outputs.matrix }}
-    stages:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
       - id: set-matrix
         run: |
           APPS=$(ls .deploy/ | sed 's/\.yaml//' | jq -R -s -c 'split("\n")[:-1]')
@@ -14,7 +14,7 @@ jobs:
     strategy:
       matrix:
         app: ${{ fromJson(needs.list-apps.outputs.matrix) }}
-    stages:
+    steps:
       - name: Build PEX for ${{ matrix.app }}
         run: |
           uv export --format requirements.txt > requirements.txt
@@ -75,7 +75,7 @@ jobs:
               --runtime-pty \
               --python-shebang="/usr/bin/env python3"
 
-      - name: Build code.pex
+      - name: Build ingestion.pex
         run: |
           pex --sources-directory apps/ingestion/src \
               --sources-directory libs/utils \
@@ -84,7 +84,7 @@ jobs:
               --sources-directory libs/file \
               --no-pypi \
               --entry-point apps.ingestion.__main__:app \
-              -o code.pex \
+              -o ingestion.pex \
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
@@ -92,4 +92,4 @@ jobs:
           name: pex-artifacts
           path: |
             deps.pex
-            code.pex
+            ingestion.pex

@@ -5,8 +5,6 @@ from typing import Any
 
 import msgspec
 import structlog
-from dynaconf import Dynaconf
-
 from apps.ingestion.src.core.contexts.execution import ExecutionContext, ExecutionMode
 from apps.ingestion.src.core.contexts.job import TaskContext
 from apps.ingestion.src.utils.constants import (
@@ -14,6 +12,7 @@ from apps.ingestion.src.utils.constants import (
     APP_CURRENT_ENV,
     DEFAULT_PARTITION_COL,
 )
+from dynaconf import Dynaconf
 
 LOG = structlog.get_logger()
 APP_DEFAULT_CONFIG = APP_CONFIG_ROOT / "app.yaml"

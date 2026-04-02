@@ -3,7 +3,6 @@ from pathlib import Path
 
 import msgspec
 import structlog
-
 from apps.ingestion.src.core.contexts import ExecutionContext, TaskContext
 from apps.ingestion.src.core.models.job import ExecutionStatus, Task
 from apps.ingestion.src.core.models.states.terminal import HoldState

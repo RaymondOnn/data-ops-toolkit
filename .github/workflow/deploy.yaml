@@ -13,8 +13,8 @@ jobs:
     name: Plan Deployment
     runs-on: ubuntu-latest
     outputs:
-      release_id: ${{ stages.gen_id.outputs.release_id }}
-    stages:
+      release_id: ${{ steps.gen_id.outputs.release_id }}
+    steps:
       - uses: actions/checkout@v4
 
       - name: Download Artifacts
@@ -36,18 +36,21 @@ jobs:
 
       - name: Dry Run Rsync
         env:
-          TARGET_DIR: /opt/apps/my-app/releases/${{ stages.gen_id.outputs.release_id }}
+          TARGET_DIR: /opt/apps/my-app/releases/${{ steps.gen_id.outputs.release_id }}
+          CURRENT_DIR: /opt/apps/my-app/current
         run: |
-          echo "🚧 Dry Run: Syncing to $TARGET_DIR"
-          # -a: archive, -v: verbose, -n: dry-run
-          rsync -avn --delete ./dist/ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:$TARGET_DIR
+          echo "### 📋 Deployment Plan" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          # Comparing against 'current' symlink gives a much better diff for the approver
+          rsync -ivn --delete --max-delete=5 ./dist/ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:$CURRENT_DIR >> $GITHUB_STEP_SUMMARY 2>&1 || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
   deploy:
     name: Deploy & Switch
     needs: plan
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }} # 🛑 Approval Gate triggers here
-    stages:
+    steps:
       - uses: actions/checkout@v4
 
       - name: Download Artifacts

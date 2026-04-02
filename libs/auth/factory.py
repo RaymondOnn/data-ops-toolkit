@@ -3,11 +3,9 @@ import os
 from typing import ClassVar
 
 from .provider import (
-    AWSSecretProvider,
-    LocalEncryptedProvider,
-    LocalSecretProvider,
-    SecretProvider,
+    AWSSecretProvider,  # Ensure AWSSecretProvider is imported for direct instantiation
 )
+from .provider import LocalEncryptedProvider, LocalSecretProvider, SecretProvider
 
 LOG = logging.getLogger(__name__)
 MASTER_KEY_ENV_VAR = "MASTER_KEY"
@@ -16,7 +14,7 @@ MASTER_KEY_ENV_VAR = "MASTER_KEY"
 class AuthFactory:
     _provider: SecretProvider | None = None
 
-    _STRATEGIES: ClassVar[dict[str, type]]= {
+    _STRATEGIES: ClassVar[dict[str, type]] = {
         "env_file": LocalSecretProvider,
         "file_encrypted": LocalEncryptedProvider,
         "aws_manager": AWSSecretProvider,
@@ -57,6 +55,9 @@ class AuthFactory:
             )
 
         elif provider_type == "aws_manager":
+            # Ensure AWSSecretProvider is imported for direct instantiation
+            from libs.cloud.aws import AWSSessionManager
+
             if "region" not in config:
                 # Fallback or error
                 config["region"] = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
@@ -64,6 +65,18 @@ class AuthFactory:
                     "AWS Region not in config, using default",
                     extra={"region": config["region"]},
                 )
+
+            session = None
+            if role_arn := config.get("role_arn"):
+                LOG.info(
+                    "Role ARN provided, initializing AWSSessionManager for STS",
+                    extra={"role_arn": role_arn},
+                )
+                session_manager = AWSSessionManager(region=config["region"])
+                session = session_manager.get_assumed_role_session(role_arn)
+
+            cls._provider = AWSSecretProvider(session=session, **config)
+            return cls._provider
 
         elif provider_type == "env_file":
             # Ensure we have a fallback path if none provided
@@ -81,8 +94,10 @@ class AuthFactory:
         LOG.debug(
             "Instantiating provider class", extra={"cls": provider_class.__name__}
         )
-        cls._provider = provider_class(**config)
-        
+        cls._provider = provider_class(
+            **config
+        )  # This will now be skipped if AWSSecretProvider was already instantiated above
+
         if not cls._provider:
             raise ValueError(
                 f"Failed to instantiate provider class: {provider_class.__name__}"

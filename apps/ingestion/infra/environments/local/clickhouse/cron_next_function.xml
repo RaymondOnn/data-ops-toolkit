@@ -2,16 +2,16 @@
     <function>
         <type>executable</type>
         <name>cron_next</name>
-        <return_type>DateTime64(3, 'UTC')</return_type>
+        <return_type>Nullable(DateTime64(3))</return_type>
         <argument>
             <type>String</type>
             <name>cron_expression</name>
         </argument>
         <argument>
-            <type>DateTime64(3, 'UTC')</type>
+            <type>DateTime64(3)</type>
             <name>reference_timestamp</name>
         </argument>
         <format>TabSeparated</format>
-        <command>/var/lib/clickhouse_scripts/cron_next.py</command>
+        <command>cron_next.py</command>
     </function>
 </functions>

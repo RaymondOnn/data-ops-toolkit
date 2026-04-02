@@ -3,6 +3,9 @@
         <default>
             <async_insert>1</async_insert>
             <wait_for_async_insert>1</wait_for_async_insert>
+            <allow_executable_user_defined_functions>1</allow_executable_user_defined_functions>
+            <user_defined_executable_functions_config>/etc/clickhouse-server/user_defined_functions/udf_config.xml</user_defined_executable_functions_config>
+            <allow_experimental_refreshable_materialized_view>1</allow_experimental_refreshable_materialized_view>
         </default>
     </profiles>
 </clickhouse>

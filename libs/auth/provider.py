@@ -58,18 +58,27 @@ class LocalSecretProvider(SecretProvider):
         )
         return "dev_fallback_value"
 
+    def update_secret(self, secret_id: str, value: Any) -> None:
+        self._data[secret_id] = str(value)
+        if self.path:
+            with self.path.open("w") as f:
+                json.dump(self._data, f, indent=4)
+
 
 class AWSSecretProvider(SecretProvider):
     """For Production: Fetches from AWS Secrets Manager."""
 
-    def __init__(self, **config) -> None:
+    def __init__(self, session: Any | None = None, **config) -> None:
         import boto3
 
         self.config = config
         LOG.info(
             "Initializing AWSSecretProvider", extra={"region": config.get("region")}
         )
-        self.client = boto3.client("secretsmanager", region=config["region"])
+        # Use provided STS session or default to global boto3
+        self.client = (session or boto3).client(
+            "secretsmanager", region_name=config["region"]
+        )
 
     def get_secret(self, secret_id: str) -> str:
         LOG.debug(
@@ -78,6 +87,10 @@ class AWSSecretProvider(SecretProvider):
         # Implementation of boto3 get_secret_value
         response = self.client.get_secret_value(SecretId=secret_id)
         return str(response["SecretString"])
+
+    def update_secret(self, secret_id: str, value: Any) -> None:
+        str_val = json.dumps(value) if isinstance(value, dict) else str(value)
+        self.client.put_secret_value(SecretId=secret_id, SecretString=str_val)
 
 
 def encrypt_local_secret(plaintext, key) -> str:

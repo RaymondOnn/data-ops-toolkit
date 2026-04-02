@@ -1,0 +1,48 @@
+name: 'Build PEX'
+description: 'Builds dependency and application PEX files'
+inputs:
+  app_name:
+    description: 'Name of the app to build'
+    required: true
+  force_rebuild_deps:
+    description: 'Force rebuild of deps.pex'
+    default: 'false'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install uv and pex
+      shell: bash
+      run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        pip install pex
+
+    - name: Cache Dependencies
+      id: cache-deps
+      uses: actions/cache@v4
+      with:
+        path: deps.pex
+        key: pex-deps-${{ inputs.app_name }}-${{ hashFiles('uv.lock') }}
+
+    - name: Build deps.pex
+      if: steps.cache-deps.outputs.cache-hit != 'true' || inputs.force_rebuild_deps == 'true'
+      shell: bash
+      run: |
+        uv export --no-dev --project apps/${{ inputs.app_name }} --format requirements.txt > requirements.txt
+        sed -i '/-e/d' requirements.txt
+        pex -r requirements.txt \
+            --platform manylinux2014_x86_64-cp-311-cp311 \
+            -o deps.pex \
+            --runtime-pty \
+            --python-shebang="/usr/bin/env python3"
+
+    - name: Build app.pex
+      shell: bash
+      run: |
+        # Dynamically include all libraries in the libs/ folder
+        LIB_DIRS=$(ls -d libs/*/ | xargs -I {} echo "--sources-directory {}")
+        pex --sources-directory apps/${{ inputs.app_name }}/src \
+            $LIB_DIRS \
+            --no-pypi \
+            --entry-point apps.${{ inputs.app_name }}.__main__:app \
+            -o ${{ inputs.app_name }}.pex
