@@ -1,0 +1,33 @@
+[project]
+name = "validation"
+version = "0.1.0"
+description = "Data Validation Service"
+dependencies = [
+    "auth", # Depends on libs/auth
+    "clients", # Depends on libs/clients
+    "file", # Depends on libs/file
+    "resilience", # Depends on libs/resilience
+    "utils", # Depends on libs/utils
+    "database", # Depends on libs/database
+    # "ray>=2.39.0",
+    "polars",
+    "pandas", # Required by Ray Data
+    "pyarrow",
+    "diskcache",
+    "msgspec",
+    "typer",
+    "structlog",
+    # "filelock",
+    "dynaconf",
+    "boto3",
+]
+requires-python = ">=3.11"
+
+[tool.uv.sources]
+# This tells uv: "Don't look on PyPI, look inside this monorepo"
+auth = { workspace = true }
+clients = { workspace = true }
+database = { workspace = true }
+file = { workspace = true }
+resilience = { workspace = true }
+utils = { workspace = true }

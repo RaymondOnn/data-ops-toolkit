@@ -1,0 +1,7 @@
+
+# 1. Limit CPU to prevent thrashing
+# In K8S, match this to your 'cpu' request/limit
+export POLARS_MAX_THREADS = "2" 
+
+# 2. Tell Polars where the 'Safe' spill zone is
+export POLARS_TEMP_DIR = "/tmp/polars-spill"
