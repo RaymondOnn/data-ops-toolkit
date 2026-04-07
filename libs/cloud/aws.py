@@ -1,9 +1,10 @@
+import logging
+
 import boto3
-import structlog
 from botocore.credentials import RefreshableCredentials
 from botocore.session import get_session
 
-LOG = structlog.get_logger(__name__)
+LOG = logging.getLogger(__name__)
 
 
 class AWSSessionManager:
@@ -26,7 +27,7 @@ class AWSSessionManager:
 
         def refresh_credentials():
             """Internal method to trigger the STS assume_role call."""
-            LOG.info("Refreshing temporary STS credentials", role=role_arn)
+            LOG.info("Refreshing temporary STS credentials", extra={"role": role_arn})
             sts = self._base_session.client("sts")
 
             response = sts.assume_role(RoleArn=role_arn, RoleSessionName=session_name)

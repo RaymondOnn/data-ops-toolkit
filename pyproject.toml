@@ -7,15 +7,11 @@ dependencies = [
     "uv",
     "ruff",
     "pytest>=9.0.2",
+    "rust-just",
     "ingestion",
 ]
 
-[tool.uv.workspace]
-# Define the workspace members
-members = ["apps/*", "libs/*"]
-exclude = ["**/__pycache__", "**/.pytest_cache", "**/node_modules"]
-
-[tool.uv.sources]
+[tool.uv.sources] # local workspace packages
 ingestion = { workspace = true }
 utils = { workspace = true }
 file = { workspace = true }
@@ -23,8 +19,13 @@ database = { workspace = true }
 auth = { workspace = true }
 clients = { workspace = true }
 resilience = { workspace = true }
+cloud = { workspace = true }
 
 
+[tool.uv.workspace]
+# Define the workspace members
+members = ["apps/*", "libs/*"]
+exclude = ["**/__pycache__", "**/.pytest_cache", "**/node_modules"]
 
 
 [tool.pyright] # Using Ty (Pyright)
@@ -91,7 +92,7 @@ extend-select = [
     "Q",        # Linting rules for quites
     "SIM",      # flake8-simplify: Common simplification rules
     "TC",       # Enforce importing certain types in a TYPE_CHECKING block
-    "TD",       # Be diligent with TODO comments
+    # "TD",       # Be diligent with TODO comments
     "TCH",      # Move type only imports to type-checking condition.
     "TID",      # Some good import practices
     "UP",       # Warn if certain things can changed due to newer Python versions

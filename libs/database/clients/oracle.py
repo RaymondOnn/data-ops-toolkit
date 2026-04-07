@@ -13,6 +13,10 @@ LOG = logging.getLogger(__name__)
 class OracleClient(DBClient):
     def __init__(self, **config: Any) -> None:
         super().__init__(**config)
+        
+    @property
+    def type(self) -> str:        
+        return "oracle"
 
     def connect(self) -> Connection:
         import oracledb
@@ -95,21 +99,38 @@ class OracleClient(DBClient):
         finally:
             cursor.close()
 
-    def write_table(
-        self, lf: pl.LazyFrame, table_name: str, batch_size: int = 100_000
-    ) -> None:
-        """
-        Streams LazyFrame in chunks and uses executemany for batch binds.
-        """
-        # 1. Get column names and build the INSERT statement
-        columns = lf.columns
-        placeholders = ", ".join([f":{i + 1}" for i in range(len(columns))])
-        sql = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})"
+    # def write_table(
+    #     self, lf: pl.LazyFrame, table_name: str, batch_size: int = 100_000
+    # ) -> None:
+    #     """
+    #     Streams LazyFrame in chunks and uses executemany for batch binds.
+    #     """
+    #     # 1. Get column names and build the INSERT statement
+    #     columns = lf.columns
+    #     placeholders = ", ".join([f":{i + 1}" for i in range(len(columns))])
+    #     sql = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})"
 
-        # 2. Iterate through the LazyFrame in batches
-        # .iter_slices() prevents the 50M rows from hitting RAM at once
-        for batch_df in lf.collect().iter_slices(n_rows=batch_size):
-            data = batch_df.to_dicts()  # Convert small chunk to list of dicts/tuples
-            cursor = self.connect().cursor()
-            cursor.executemany(sql, [tuple(d.values()) for d in data])
-            self.connect().commit()
+    #     # 2. Iterate through the LazyFrame in batches
+    #     # .iter_slices() prevents the 50M rows from hitting RAM at once
+    #     for batch_df in lf.collect().iter_slices(n_rows=batch_size):
+    #         data = batch_df.to_dicts()  # Convert small chunk to list of dicts/tuples
+    #         cursor = self.connect().cursor()
+    #         cursor.executemany(sql, [tuple(d.values()) for d in data])
+    #         self.connect().commit()
+
+    def get_schema(self, fq_table: str) -> pl.DataFrame:
+        schema, table_name = fq_table.split(".")
+        query = f"""
+            SELECT 
+                column_name, 
+                data_type, 
+                nullable,
+                data_length,
+                data_precision,
+                data_scale
+            FROM all_tab_columns
+            WHERE owner = UPPER('{schema}') 
+            AND table_name = UPPER('{table_name}')
+            ORDER BY column_id;
+        """
+        return pl.concat(self.fetch_df(query), how="vertical")

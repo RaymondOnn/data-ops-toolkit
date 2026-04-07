@@ -1,6 +1,6 @@
 import logging
 from collections.abc import Generator, Sequence
-from typing import Any
+from typing import Any, Literal
 
 import polars as pl
 from clickhouse_connect.driver.client import Client
@@ -9,6 +9,10 @@ from libs.database.clients.base import DBClient
 LOG = logging.getLogger(__name__)
 
 class ClickhouseClient(DBClient):
+    @property
+    def type(self) -> str:        
+            return "clickhouse"
+    
     def connect(self) -> Client:
         # Import inside so that Ray workers can import
         import clickhouse_connect
@@ -65,12 +69,31 @@ class ClickhouseClient(DBClient):
             for pandas_df in result:
                 yield pl.from_pandas(pandas_df)
 
-    def write_table(self, lf: pl.LazyFrame, table_name: str) -> None:
-        """
-        Uses ClickHouse native client to insert data in optimized blocks.
-        """
-        # ClickHouse drivers are highly optimized for Polars/Pandas structures.
-        # We stream the data to the insert method.
-        df = lf.collect()
+    # def write_table(self, lf: pl.LazyFrame, table_name: str) -> None:
+    #     """
+    #     Uses ClickHouse native client to insert data in optimized blocks.
+    #     """
+    #     # ClickHouse drivers are highly optimized for Polars/Pandas structures.
+    #     # We stream the data to the insert method.
+    #     df = lf.collect()
 
-        self.connection.insert_df(table=table_name, df=df)
+    #     self.connection.insert_df(table=table_name, df=df)
+    
+    def get_schema(self, fq_table: str) -> pl.DataFrame:
+        # ClickHouse has a system.columns table we can query for schema info
+        database, table_name = fq_table.split(".")
+        query = f"""
+            SELECT 
+                name AS column_name, 
+                type AS data_type, 
+                is_in_primary_key,
+                -- ClickHouse doesn't use precision/scale for all types, 
+                -- but it's available for Decimal types
+                numeric_precision,
+                numeric_scale
+            FROM system.columns
+            WHERE database = '{database}' 
+            AND table = '{table_name}'
+            ORDER BY position;
+        """
+        return pl.concat(self.fetch_df(query), how="vertical")

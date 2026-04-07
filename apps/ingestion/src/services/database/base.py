@@ -38,13 +38,6 @@ class DatabaseService(Service):
         pass
 
     @protect_service(breaker)
-    def sql(self, query: str) -> list[Sequence[Any]]:
-        """
-        Executes a standard SQL query and returns a list of rows.
-        """
-        return self.client.sql(query)
-
-    @protect_service(breaker)
     def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
         """
         Executes a query and expects dict-like rows.

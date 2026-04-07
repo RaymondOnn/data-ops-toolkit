@@ -15,3 +15,7 @@ __pycache__
 
 # Infrastructure temporary files
 **/infra/**/.tmp/
+
+# direnv
+.envrc
+.direnv/
