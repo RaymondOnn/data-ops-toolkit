@@ -15,25 +15,23 @@ LOG = logging.getLogger(__name__)
 class PostgresClient(DBClient):
     def __init__(self, **config: Any) -> None:
         super().__init__(**config)
-        
+
     @property
-    def type(self) -> str:        
+    def type(self) -> str:
         return "postgres"
 
     def connect(self) -> "Connection":
         # INLINE IMPORT: Prevents pickling the driver across the network
         import adbc_driver_postgresql.dbapi as adbc_pg
 
-        if not self._connection:
-            try:
-                # Support both 'database' and 'db_name' for backward compatibility
-                db_name = self.config.get("database", self.config.get("db_name"))
-                self.uri = f"postgresql://{self.config['user']}:{self.config['password']}@{self.config['host']}/{db_name}"
-                self._connection = adbc_pg.connect(self.uri)
-                self._ping(self._connection)
-            except Exception as e:
-                raise ClientCantConnect("Failed to connect to Postgres") from e
-        return self._connection
+        try:
+            db_name = self.config.get("database", self.config.get("db_name"))
+            uri = f"postgresql://{self.config['user']}:{self.config['password']}@{self.config['host']}/{db_name}"
+            conn = adbc_pg.connect(uri)
+            self._ping(conn)
+            return conn
+        except Exception as e:
+            raise ClientCantConnect("Failed to connect to Postgres") from e
 
     def _ping(self, conn: "Connection") -> None:
         # We don't use self.sql() here to avoid recursive reconnect logic
@@ -43,7 +41,7 @@ class PostgresClient(DBClient):
     def get_load_strategy(
         self,
         table_name: str,
-        num_partitions: int = 10,
+        num_workers: int = 10,
         filter_sql: str | None = None,
     ) -> set[str]:
         # Physical partitioning using Postgres hidden ctid column
@@ -52,9 +50,9 @@ class PostgresClient(DBClient):
             f"""
             SELECT * FROM {table_name} 
             WHERE {filter_sql} 
-            AND abs(hashint4(ctid::text::hashint4)) % {num_partitions} = {i}
+            AND abs(hashint4(ctid::text::hashint4)) % {num_workers} = {i}
             """
-            for i in range(num_partitions)
+            for i in range(num_workers)
         }
 
     def sql(self, query: str) -> list[Sequence[Any]]:
@@ -62,21 +60,23 @@ class PostgresClient(DBClient):
         Executes raw SQL using the package driver.
         Used for commands and small metadata fetches.
         """
-        with self.connect().cursor() as cur:
+        with self.get_connection() as conn, conn.cursor() as cur:
             LOG.debug("Executing SQL query", extra={"query": query})
             cur.execute(query)
             rows = cur.fetchall()
             return [tuple(row) for row in rows]
 
     def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
-        with self.connect().cursor() as cursor:
+        with self.get_connection() as conn, conn.cursor() as cursor:
             LOG.debug("Executing SQL query", extra={"query": query})
             cursor.execute(query)
             # ADBC native streaming to Arrow, then to Polars
             reader = cursor.fetch_record_batch()
             for batch in reader:
                 # ADBC to Arrow to Polars is zero-copy and very fast
-                yield pl.from_arrow(batch)
+                df: pl.DataFrame = pl.from_arrow(batch)
+                if isinstance(df, pl.DataFrame):
+                    yield df
 
     def reconnect(self) -> None:
         super().reconnect()

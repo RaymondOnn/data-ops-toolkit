@@ -1,7 +1,8 @@
 from collections import ChainMap
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import msgspec
 import structlog
@@ -12,6 +13,7 @@ from apps.ingestion.src.utils.constants import (
     APP_CURRENT_ENV,
     DEFAULT_PARTITION_COL,
 )
+from dateutil.relativedelta import relativedelta
 from dynaconf import Dynaconf
 
 LOG = structlog.get_logger()
@@ -101,33 +103,54 @@ class TaskContextBuilder:
         except Exception:
             LOG.warning("Could not serialize app config for logging")
 
-    def _resolve_run_date(
+    def _resolve_partition_date(
         self,
         spec: dict[str, Any],
-        run_date_str: str | None = None,
-    ) -> str:
+        partition_date_str: str | None = None,
+    ) -> str | None:
         """Resolves T-x logic into a formatted string."""
-        if run_date_str:
-            date_val = datetime.strptime(run_date_str, "%Y-%m-%d")
+        if partition_date_str:
+            date_val = datetime.strptime(partition_date_str, "%Y-%m-%d")
+        elif spec:
+            # Use app-level timezone or default to Asia/Singapore
+            tz_name = self.app_settings.get("timezone", "Asia/Singapore")
+            base_date = datetime.now(ZoneInfo(tz_name))
+
+            # Support multi-unit offsets (years, months, days)
+            offset = spec.get("offset", {})
+
+            # We merge with the legacy 'offset_days' for backward compatibility
+            date_val = base_date + relativedelta(
+                years=offset.get("years", 0),
+                months=offset.get("months", 0),
+                days=offset.get("days", spec.get("offset_days", 0)),
+            )
         else:
-            offset = spec.get("offset_days", 0)
-            date_val = datetime.now().astimezone() + timedelta(days=offset)
+            return None
 
         fmt = date_val.strftime(spec.get("format", "%Y-%m-%d"))
-        return f"'{fmt}'" if spec.get("wrap_quotes") else fmt
+        formatted_date = date_val.strftime(fmt)
+        return (
+            f"'{formatted_date}'" if spec.get("wrap_quotes", False) else formatted_date
+        )
 
     def get_execution_context(
         self, mode: ExecutionMode = ExecutionMode.NORMAL
     ) -> ExecutionContext:
         """Resolves the global app settings into a typed context."""
-        workspace = Path(self.app_settings.get("workspace_dir")).expanduser()
+        workspace = Path(self.app_settings.get("workspace_dir")).expanduser().resolve()
 
         # Ensure the base workspace directory exists so lock files
         # and subdirectories can be created safely.
         workspace.mkdir(parents=True, exist_ok=True)
 
+        cache_cfg = self.app_settings.get("cache").to_dict()
+
         return ExecutionContext(
-            workspace_dir=workspace, execution_mode=mode, env=self.env
+            workspace_dir=workspace,
+            execution_mode=mode,
+            env=self.env,
+            cache_config=cache_cfg,
         )
 
     # TODO: Skip archive if enable_archival = False
@@ -238,12 +261,14 @@ class TaskContextBuilder:
         self,
         job_id: str,
         dataset_id: str | None = None,
-        run_date_str: str | None = None,
+        partition_date_str: str | None = None,
         overrides_json: Path | None = None,
         overrides: dict[str, Any] | None = None,
     ) -> list[TaskContext]:
         """Maps merged config into a set of msgspec TaskContext objects."""
-        LOG.debug("Building job contexts", job_id=job_id, run_date=run_date_str)
+        LOG.debug(
+            "Building job contexts", job_id=job_id, partition_date=partition_date_str
+        )
 
         task_cfg_path = APP_CONFIG_ROOT / job_id / "config.yaml"
 
@@ -261,11 +286,13 @@ class TaskContextBuilder:
             load_dotenv=True,
         )
 
-        # 2. Establish run_date
-        # Priority: run_date_str > CLI --set run_date > today
-        run_date = (
-            run_date_str
-            or settings.get("run_date")
+        # 2. Establish partition_date
+        # Priority: partition_date_str > CLI --set partition_date > today
+        partition_date = (
+            self._resolve_partition_date(
+                settings.get("partition_date_spec", {}), partition_date_str
+            )
+            or settings.get("partition_date")
             or datetime.now().astimezone().strftime("%Y-%m-%d")
         )
 
@@ -288,7 +315,7 @@ class TaskContextBuilder:
             ctx = self._create_task_context(
                 job_id=job_id,
                 dataset_id=ds_id,
-                run_date=run_date,
+                partition_date=partition_date,
                 # Pass the full settings object to resolve global service refs
                 settings=settings,
                 overrides=overrides,
@@ -303,7 +330,7 @@ class TaskContextBuilder:
         self,
         job_id: str,
         dataset_id: str,
-        run_date: str,
+        partition_date: str,
         settings: Dynaconf,
         overrides: dict[str, Any] | None = None,
     ) -> TaskContext:
@@ -379,13 +406,13 @@ class TaskContextBuilder:
         ctx_data = {
             "job_id": job_id,
             "dataset_id": dataset_id,
-            "run_date": run_date,
+            "partition_date": partition_date,
             "output_path": f"storage/active/{job_id}/{dataset_id}",
             "extract": {
                 "source_type": source_type,
                 "source_identifier": get_val("extract.source_identifier")
                 or get_val("source_identifier"),
-                "num_partitions": get_val("extract.num_partitions"),
+                "num_workers": get_val("extract.num_workers"),
                 "load_mode": get_val("extract.load_mode"),
                 "source_config": source_svc,
                 "source_params": get_val("extract.source_params", {}),
@@ -401,7 +428,7 @@ class TaskContextBuilder:
                 or get_val("target_destination"),
                 "sink_config": sink_svc,
                 "partition_col": get_val("load.partition_col", DEFAULT_PARTITION_COL),
-                "partition_value": get_val("load.partition_value", run_date),
+                "partition_value": get_val("load.partition_value", partition_date),
                 "load_params": get_val("load.load_params", {}),
             },
             "archive": {

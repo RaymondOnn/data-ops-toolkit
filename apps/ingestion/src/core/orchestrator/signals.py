@@ -5,7 +5,6 @@ import structlog
 from apps.ingestion.src.core.contexts import ExecutionContext
 from apps.ingestion.src.core.orchestrator.engine import IngestionEngine
 from apps.ingestion.src.core.orchestrator.state import StateStore
-from apps.ingestion.src.utils.common import find_path
 
 LOG = structlog.getLogger(__name__)
 
@@ -52,8 +51,8 @@ class SignalProcessor:
                 identifier = None
                 try:
                     # 1. Parse metadata from filename
-                    # Format: {job_id}:{dataset_id}:{run_date}:{run_id}
-                    (job_id, dataset_id, run_date, run_id_from_file) = (
+                    # Format: {job_id}:{dataset_id}:{partition_date}:{run_id}
+                    (job_id, dataset_id, partition_date, run_id_from_file) = (
                         self.exec_ctx.parse_identifier(signal.stem)
                     )
 
@@ -63,7 +62,7 @@ class SignalProcessor:
                         continue
 
                     identifier = self.exec_ctx.get_task_identifier(
-                        job_id, dataset_id, run_date
+                        job_id, dataset_id, partition_date
                     )
                     record = self.state_store.active_records.get(identifier)
 
@@ -74,22 +73,19 @@ class SignalProcessor:
                             "Creating task record",
                             job_id=job_id,
                             dataset_id=dataset_id,
-                            run_date=run_date,
+                            partition_date=partition_date,
                         )
 
                         self.state_store.create_record(
                             job_id=job_id,
                             dataset_id=dataset_id,
-                            run_date=run_date,
+                            partition_date=partition_date,
                         )
 
-                    # 2. Resolve the path dynamically
-                    # The folder might have been moved to FAILED/ or HOLD/ by the worker
-                    # just before/after dropping the signal.
-                    # We search the whole workspace.
-                    task_dir = find_path(self.exec_ctx.workspace_dir, run_id_from_file)
+                    # 2. Resolve the path dynamically (handles moves between active/HOLD/FAILED)
+                    task_dir = self.state_store.resolve_task_path(run_id_from_file)
 
-                    if not task_dir or not task_dir.exists():
+                    if not task_dir:
                         LOG.warning(
                             "Signal received but task directory not found",
                             run_id=run_id_from_file,

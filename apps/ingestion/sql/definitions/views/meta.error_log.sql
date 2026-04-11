@@ -5,7 +5,7 @@ WITH run_summaries AS (
         RUN_ID,
         JOB_ID,
         DATASET_ID, -- Added to the CTE selection
-        RUN_DATE,   -- Added to the CTE selection
+        PARTITION_DATE,   -- Added to the CTE selection
         min(multiIf(JOB_STATUS = 'FAILED', LAST_UPDATED_AT_TS, NULL)) AS ERROR_TIMESTAMP,
         argMax(JOB_STATUS, LAST_UPDATED_AT_TS) AS LATEST_STATUS,
         argMax(FINAL_MANIFEST, multiIf(JOB_STATUS = 'FAILED', LAST_UPDATED_AT_TS, NULL)) AS ERROR_DETAILS
@@ -15,13 +15,13 @@ WITH run_summaries AS (
         RUN_ID, 
         JOB_ID, 
         DATASET_ID, 
-        RUN_DATE
+        PARTITION_DATE
 )
 SELECT
     RUN_ID,
     JOB_ID,
     DATASET_ID,
-    RUN_DATE,
+    PARTITION_DATE,
     ERROR_TIMESTAMP,
     ERROR_DETAILS,
     multiIf(LATEST_STATUS = 'SUCCESS', 1, 0) AS RESOLVED,

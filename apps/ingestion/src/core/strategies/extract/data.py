@@ -7,7 +7,6 @@ import msgspec
 import polars as pl
 import ray
 import structlog
-
 from apps.ingestion.src.services.base import SourceMixin
 from apps.ingestion.src.services.database import DatabaseSource
 
@@ -152,7 +151,7 @@ class FileDataReader(DataReader):
         if not context.source_identifier:
             raise ValueError("source_path is required for FileDataReader")
 
-        return client.get_work_units(context.source_identifier, context.num_partitions)
+        return client.get_work_units(context.source_identifier, context.num_workers)
 
 
 @ReaderFactory.register("database")
@@ -170,6 +169,6 @@ class DBDataReader(DataReader):
 
         filter_sql = context.options.get("filter_sql")
         units = client.get_work_units(
-            context.source_identifier, context.num_partitions, filter_sql
+            context.source_identifier, context.num_workers, filter_sql
         )
         return [str(unit) for unit in units]

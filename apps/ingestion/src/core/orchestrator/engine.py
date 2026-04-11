@@ -3,21 +3,21 @@ import subprocess
 import time
 from typing import Any
 
-import diskcache
 import msgspec
 import ray
 import structlog
-from filelock import FileLock
-
 from apps.ingestion.src.core.contexts import ExecutionContext, RayMode
 from apps.ingestion.src.core.models.job import ExecutionStatus, Task, TaskManifest
 from apps.ingestion.src.core.models.stages.enums import EXEC_STAGES, StageName
 from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.services.registry import ServiceRegistry
 from apps.ingestion.src.utils.common import find_path
-from apps.ingestion.src.utils.constants import DISKCACHE_FILE_PATH, MANIFEST_FILENAME
+from apps.ingestion.src.utils.constants import MANIFEST_FILENAME
 from apps.ingestion.src.utils.dates import epoch_to_iso, get_end_of_day_ts
+from filelock import FileLock
+from libs.cache.utils import get_cache
 from libs.utils.log import setup_logging
+from tenacity import Retrying, stop_after_attempt, wait_exponential
 
 from .enums import TaskMetadata
 
@@ -31,20 +31,12 @@ class Worker:
     def __init__(self, worker_id: str, exec_ctx: ExecutionContext):
         self.worker_id = worker_id
         self.exec_ctx = exec_ctx
-        self.cache = diskcache.Cache(
-            (self.exec_ctx.workspace_dir / DISKCACHE_FILE_PATH).resolve(),
-            timeout=10,  # Increase timeout for slow PV file locks (NFS/EFS)
-            disk_pickle_protocol=4,  # Recommended for Python 3.8+
-            # Unpack settings or just pass them as kwargs directly
-            sqlite_journal_mode="wal",
-            sqlite_synchronous=1,  # 'NORMAL' - better for WAL mode performance
-        )
+
+        # Pass primitives to factory to keep services/ independent of core/
+        self.cache = get_cache(self.exec_ctx.workspace_dir, self.exec_ctx.cache_config)
 
         # Initialize the Secret Provider for this process using the context's config
-        if getattr(self.exec_ctx, "provider_config", None):
-            ServiceFactory.get_provider(
-                self.exec_ctx.env, self.exec_ctx.provider_config
-            )
+        ServiceFactory.get_provider(self.exec_ctx.env, self.exec_ctx.provider_config)
 
         # Share the same cache path with ServiceRegistry so that circuit-breaker
         # state (written by workers) is visible to the Orchestrator's registry.
@@ -58,124 +50,121 @@ class Worker:
         self.is_busy = False
 
     def process_stage(self, key: str) -> None:
-        current_stage, _ = key.split(":", 1)
-        log = structlog.get_logger().bind(worker_id=self.worker_id, stage=current_stage)
+        for attempt in Retrying(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=4, max=10),
+            reraise=True,
+        ):
+            with attempt:
+                current_stage, _ = key.split(":", 1)
+                log = structlog.get_logger().bind(
+                    worker_id=self.worker_id, stage=current_stage
+                )
 
-        # 1. Rehydrate Task
-        with self.lock:
-            raw_meta = self.cache[key]
-            if not isinstance(raw_meta, TaskMetadata):
-                raise ValueError(f"Invalid task metadata for key {key}: {raw_meta}")
-            meta: TaskMetadata = raw_meta
+                # 1. Rehydrate Task
+                with self.lock:
+                    raw_meta = self.cache[key]
+                    if not isinstance(raw_meta, TaskMetadata):
+                        raise ValueError(
+                            f"Invalid task metadata for key {key}: {raw_meta}"
+                        )
+                    meta: TaskMetadata = raw_meta
 
-        # Update status to RUNNING immediately so Engine occupancy tracking is accurate
-        with self.lock:
-            meta.status = ExecutionStatus.RUNNING.value
-            self.cache[key] = meta
+                # Update status to RUNNING immediately so Engine occupancy tracking is accurate
+                with self.lock:
+                    meta.status = ExecutionStatus.RUNNING.value
+                    self.cache[key] = meta
 
-        task: Task = Task(
-            composite_key=f"{meta.job_id}:{meta.dataset_id}",
-            run_id=meta.run_id,
-            run_date=meta.run_date,
-            worker_id=self.worker_id,
-            exec_ctx=self.exec_ctx,
-            target_stage=current_stage,
-        )
-        self.is_busy = True
-        log.info(
-            "Worker started processing stage", run_id=meta.run_id, job_id=meta.job_id
-        )
+                task: Task = Task(
+                    composite_key=f"{meta.job_id}:{meta.dataset_id}",
+                    run_id=meta.run_id,
+                    partition_date=meta.partition_date,
+                    worker_id=self.worker_id,
+                    exec_ctx=self.exec_ctx,
+                    target_stage=current_stage,
+                )
+                self.is_busy = True
+                log.info(
+                    "Worker started processing stage",
+                    run_id=meta.run_id,
+                    job_id=meta.job_id,
+                )
 
-        # Ensure the job's workspace is fully provisioned before check-in
-        _ = task.folder
+                # Ensure the job's workspace is fully provisioned before check-in
+                _ = task.folder
 
-        # 1. OPTION A: Isolated Execution via PEX (Production Mode)
-        if self.exec_ctx.code_pex_path and self.exec_ctx.code_pex_path.exists():
-            log.info(
-                "Launching isolated PEX process", pex=str(self.exec_ctx.code_pex_path)
-            )
-            try:
-                env = os.environ.copy()
-                if self.exec_ctx.deps_pex_path:
-                    env["PEX_PATH"] = str(self.exec_ctx.deps_pex_path)
-
-                cmd = [
-                    "python3",
-                    str(self.exec_ctx.code_pex_path),
-                    "run",
-                    meta.run_date,
-                    "--job-id",
-                    meta.job_id,
-                    "--dataset",
-                    meta.dataset_id,
-                    "--stage",
-                    current_stage,
-                ]
-
-                # This blocks the Ray Actor until the PEX finishes
-                subprocess.run(cmd, env=env, check=True)
-
-                # If successful, we assume the PEX updated the manifest and handled finalization
-                # We return here to avoid executing Option B
-                return
-            except subprocess.CalledProcessError as e:
-                log.error("PEX process failed", exit_code=e.returncode)
-                # Fall through to the except block to mark the task as FAILED in cache
-                raise e
-
-        try:
-            # 2. OPTION B: Direct Import Execution (Dev/Fallback Mode)
-            task.check_in(current_stage)
-
-            # 2.5 Pre-flight validation (Resource & Connectivity check)
-            task.stage.pre_flight(task)
-
-            # 3. Execute and get the next stage signal (returns label or 'FINISH')
-            next_stage = task.execute()
-
-            # 4. Atomic Handoff
-            identifier = self.exec_ctx.get_task_identifier(
-                job_id=meta.job_id,
-                dataset_id=meta.dataset_id,
-                run_date=meta.run_date,
-            )
-
-            with self.lock:
-                # Remove from current queue
-                self.cache.pop(key)
-
-                # Push to next queue if not finished
-                if not next_stage:
-                    log.warning("Step returned no signal", next_stage=next_stage)
-                    return
-
-                if next_stage.casefold() in EXEC_STAGES:
-                    meta.current_stage = next_stage
-                    meta.status = (
-                        ExecutionStatus.PENDING.value
-                    )  # Ready for the next worker pool
-                    new_key = f"{next_stage}:{identifier}:{meta.run_id}"
-                    self.cache[new_key] = meta
+                # 1. OPTION A: Isolated Execution via PEX (Production Mode)
+                if self.exec_ctx.code_pex_path and self.exec_ctx.code_pex_path.exists():
                     log.info(
-                        "Step complete. Task returned to queue.",
-                        next_stage=next_stage,
+                        "Launching isolated PEX process",
+                        pex=str(self.exec_ctx.code_pex_path),
                     )
-                else:
-                    log.info("Task fully completed.")
-                    # Cleanup lookup key used by Orchestrator
-                    lookup_key = f"active_run:{identifier}"
-                    self.cache.pop(lookup_key, None)
+                    try:
+                        env = os.environ.copy()
+                        if self.exec_ctx.deps_pex_path:
+                            env["PEX_PATH"] = str(self.exec_ctx.deps_pex_path)
 
-        except Exception as e:
-            log.error("Task stage failed terminaly", error=str(e))
-            with self.lock:
-                meta.status = ExecutionStatus.FAILED.value
-                meta.last_hb = time.time()
-                self.cache[key] = meta
-            # We do NOT re-raise. The Orchestrator will see the 'FAILED'
-            # status in the cache.
-        finally:
-            self.is_busy = False
+                        cmd = [
+                            "python3",
+                            str(self.exec_ctx.code_pex_path),
+                            "run",
+                            meta.partition_date,
+                            "--job-id",
+                            meta.job_id,
+                            "--dataset",
+                            meta.dataset_id,
+                            "--stage",
+                            current_stage,
+                        ]
+                        subprocess.run(cmd, env=env, check=True)
+                        return
+                    except subprocess.CalledProcessError as e:
+                        log.error("PEX process failed", exit_code=e.returncode)
+                        raise e
+
+                try:
+                    # 2. OPTION B: Direct Import Execution (Dev/Fallback Mode)
+                    task.check_in(current_stage)
+                    task.stage.pre_flight(task)
+                    next_stage = task.execute()
+
+                    # 4. Atomic Handoff
+                    identifier = self.exec_ctx.get_task_identifier(
+                        job_id=meta.job_id,
+                        dataset_id=meta.dataset_id,
+                        partition_date=meta.partition_date,
+                    )
+
+                    with self.lock:
+                        self.cache.pop(key)
+                        if not next_stage:
+                            log.warning(
+                                "Step returned no signal", next_stage=next_stage
+                            )
+                            return
+
+                        if next_stage.casefold() in EXEC_STAGES:
+                            meta.current_stage = next_stage
+                            meta.status = ExecutionStatus.PENDING.value
+                            new_key = f"{next_stage}:{identifier}:{meta.run_id}"
+                            self.cache[new_key] = meta
+                            log.info(
+                                "Step complete. Task returned to queue.",
+                                next_stage=next_stage,
+                            )
+                        else:
+                            log.info("Task fully completed.")
+                            lookup_key = f"active_run:{identifier}"
+                            self.cache.pop(lookup_key, None)
+
+                except Exception as e:
+                    log.error("Task stage failed terminaly", error=str(e))
+                    with self.lock:
+                        meta.status = ExecutionStatus.FAILED.value
+                        meta.last_hb = time.time()
+                        self.cache[key] = meta
+                finally:
+                    self.is_busy = False
 
     def is_idle(self) -> bool:
         return not self.is_busy
@@ -188,15 +177,23 @@ class IngestionEngine:
         # This ensures the shared cache path exists for all Ray workers
         ServiceRegistry.configure(self.exec_ctx.workspace_dir)
         self.registry = ServiceRegistry()
-        cache_path = (self.exec_ctx.workspace_dir / DISKCACHE_FILE_PATH).resolve()
 
-        self.cache = diskcache.Cache(cache_path)
+        # CRITICAL: Create cache directory in the parent process BEFORE
+        # spinning up Ray workers to prevent SQLite race conditions for diskcache.
+        if self.exec_ctx.cache_config.get("type") == "diskcache":
+            cache_filepath = self.exec_ctx.cache_config.get("filepath", ".cache")
+            (self.exec_ctx.workspace_dir / cache_filepath).mkdir(
+                parents=True, exist_ok=True
+            )
+
+        self.cache = get_cache(self.exec_ctx.workspace_dir, self.exec_ctx.cache_config)
         self.lock = FileLock(self.exec_ctx.lock_file)
 
         if not ray.is_initialized():
             local_mode = self.exec_ctx.ray_mode == RayMode.LOCAL
             ray.init(ignore_reinit_error=True, local_mode=local_mode)
 
+        self.is_degraded = False
         # Configuration for stage limits
         self.stage_limits: dict[StageName, dict[str, Any]] = {
             StageName.START: {"limit": 5, "pool": "io"},
@@ -211,14 +208,23 @@ class IngestionEngine:
             StageName.COMPLETE: {"limit": 5, "pool": "io"},
         }
 
-        # Initialize specialized pools
-        self.io_pool: list[ray.actor.ActorHandle] = [
-            Worker.remote(f"io_{i}", self.exec_ctx) for i in range(IO_POOL_SIZE)  # type: ignore
-        ]
-        self.cpu_pool: list[ray.actor.ActorHandle] = [
-            Worker.remote(f"cpu_{i}", self.exec_ctx) for i in range(CPU_POOL_SIZE)  # type: ignore
-        ]
-
+        try:
+            self.exec_ctx.check_serializability()
+            # Initialize specialized pools
+            self.io_pool: list[ray.actor.ActorHandle] = [
+                Worker.remote(f"io_{i}", self.exec_ctx) for i in range(IO_POOL_SIZE)  # type: ignore
+            ]
+            self.cpu_pool: list[ray.actor.ActorHandle] = [
+                Worker.remote(f"cpu_{i}", self.exec_ctx) for i in range(CPU_POOL_SIZE)  # type: ignore
+            ]
+        except Exception as e:
+            # If the context is not serializable, we cannot proceed with Ray workers.
+            # Log the error and raise an exception to prevent silent failures.
+            LOG.error(
+                "Failed to initialize Ray workers due to unserializable context",
+                error=str(e),
+            )
+            raise TypeError(f"ExecutionContext is not serializable: {e}") from e
         # Local tracker for active Ray tasks to avoid blocking RPC calls
         self._active_tasks: dict[ray.ObjectRef, ray.actor.ActorHandle] = {}
 
@@ -241,7 +247,7 @@ class IngestionEngine:
         # Always start in the 'start' queue
         current_stage = current_stage or "start"
         queue_key = f"{current_stage}:{identifier}:{run_id}"
-        job_id, dataset_id, run_date = identifier.split(":")
+        job_id, dataset_id, partition_date = identifier.split(":")
 
         # Logic to determine if this is a snapshot (e.g., based on
         # job naming convention)
@@ -259,7 +265,7 @@ class IngestionEngine:
                     job_id=job_id,
                     run_id=run_id,
                     dataset_id=dataset_id,
-                    run_date=run_date,
+                    partition_date=partition_date,
                     status=ExecutionStatus.PENDING.value,
                     config_file=config_file_path,
                     current_stage=current_stage,
@@ -305,6 +311,16 @@ class IngestionEngine:
                 task_meta: TaskMetadata = raw_meta
 
                 if task_meta.status == ExecutionStatus.PENDING.value:
+                    # --- BACKPRESSURE LOGIC ---
+                    # If the system is degraded (high memory), we pause new EXTRACTIONs
+                    # to allow the LOAD/WRITE stages to clear the disk/memory backlog.
+                    if self.is_degraded and stage_enum == StageName.EXTRACT:
+                        LOG.warning(
+                            "System DEGRADED: Pausing EXTRACT task",
+                            job_id=task_meta.job_id,
+                        )
+                        continue
+
                     limit = self.stage_limits[stage_enum]["limit"]
                     # 2. Check if the specific stage has room
                     if current_occupancy[stage_enum] < limit:
@@ -474,7 +490,7 @@ class IngestionEngine:
         This is the definitive proof of success in our new structure.
         """
         # Find active path
-        # Logic: active/{job_id}:{dataset_id}_{run_date}/run_id/stage_name
+        # Logic: active/{job_id}:{dataset_id}_{partition_date}/run_id/stage_name
         active_root = self.exec_ctx.active_path
 
         active_path = find_path(active_root, run_id)

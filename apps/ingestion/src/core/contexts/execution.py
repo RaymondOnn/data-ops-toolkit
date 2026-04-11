@@ -1,7 +1,12 @@
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 import msgspec
+import structlog
+
+LOG = structlog.getLogger(__name__)
+
 
 
 class ExecutionMode(StrEnum):
@@ -33,8 +38,10 @@ class ExecutionContext(msgspec.Struct):
     ray_mode: RayMode = RayMode.CLUSTER
     env: str = "local"
     always_on: bool = False
+    timezone: str = "Asia/Singapore"
     code_pex_path: Path | None = None
     deps_pex_path: Path | None = None
+    cache_config: dict[str, Any] = {}
     provider_config: dict[str, str] = {}  # Config for secret provider
 
     @property
@@ -77,15 +84,17 @@ class ExecutionContext(msgspec.Struct):
     def is_prod(self) -> bool:
         return self.env == ExecutionMode.NORMAL
 
-    def get_task_identifier(self, job_id: str, dataset_id: str, run_date: str) -> str:
+    def get_task_identifier(
+        self, job_id: str, dataset_id: str, partition_date: str
+    ) -> str:
         """Standard format for parent folder names and cache keys."""
-        return f"{job_id}:{dataset_id}:{run_date}"
+        return f"{job_id}:{dataset_id}:{partition_date}"
 
     def get_run_path(
         self,
         job_id: str,
         dataset_id: str,
-        run_date: str,
+        partition_date: str,
         run_id: str,
         category: str = "active",
     ) -> Path:
@@ -93,14 +102,19 @@ class ExecutionContext(msgspec.Struct):
         Standardizes the nested folder structure:
         {workspace}/{category}/{job_id}:{dataset}:{date}/{run_id}
         """
-        identifier = self.get_task_identifier(job_id, dataset_id, run_date)
+        identifier = self.get_task_identifier(job_id, dataset_id, partition_date)
         return self.workspace_dir / category / identifier / run_id
 
     def get_signal_name(
-        self, job_id: str, dataset_id: str, run_date: str, run_id: str, extension: str
+        self,
+        job_id: str,
+        dataset_id: str,
+        partition_date: str,
+        run_id: str,
+        extension: str,
     ) -> str:
         """Generates the standardized signal filename."""
-        identifier = self.get_task_identifier(job_id, dataset_id, run_date)
+        identifier = self.get_task_identifier(job_id, dataset_id, partition_date)
         return f"{identifier}:{run_id}{extension}"
 
     def parse_identifier(self, full_string: str) -> tuple[str, str, str, str]:
@@ -108,5 +122,29 @@ class ExecutionContext(msgspec.Struct):
         parts = full_string.split(":")
         if len(parts) != 4:
             raise ValueError(f"Malformed identifier string: {full_string}")
-        # Returns: job_id, dataset_id, run_date, run_id
+        # Returns: job_id, dataset_id, partition_date, run_id
         return parts[0], parts[1], parts[2], parts[3]
+
+    def check_serializability(self) -> bool:
+        """
+        Validates that the context can be serialized for Ray/Distributed execution.
+        Throws an informative error if a non-picklable object has been injected.
+        """
+        import pickle
+
+        try:
+            # Step 1: Test individual attributes to find the culprit
+            for field in self.__struct_fields__:
+                val = getattr(self, field)
+                try:
+                    pickle.dumps(val)
+                except Exception as e:
+                    raise TypeError(f"Attribute '{field}' is not picklable: {e}") from e
+            
+            # Step 2: Test the whole object
+            pickle.dumps(self)
+            LOG.debug("ExecutionContext is serializable and ready for distributed execution.")
+            return True
+        except Exception as e:
+            # We raise a descriptive error to make debugging easier in Ray
+            raise TypeError(f"ExecutionContext is not picklable: {e}") from e

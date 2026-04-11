@@ -11,13 +11,14 @@ INSERT INTO META.JOB_SCHEDULES (
     , CONCURRENCY_LIMIT
     , MISFIRE_GRACE_SECS
     , WATCH_FILE_PATH
-    , RUN_DATE
-    , NEXT_RUN_TS
-    , PREV_RUN_TS
+    -- , PARTITION_DATE
+    -- , NEXT_RUN_TS
+    -- , PREV_RUN_TS
     , LAST_UPDATED_AT_TS
     , CREATED_AT_TS
 ) VALUES (
     'test_job', 'orders', 'Customer Orders', '* * * * *', TRUE, TRUE,
-    1, 3600, 1, 300,
-    NULL, today(), now64(), now64(), now64(), now64()
+    1, 3600, 1, 300, NULL, 
+    -- today(), now64(), now64(), 
+    now64(3), now64(3)
 );

@@ -3,6 +3,7 @@ from collections import ChainMap
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import msgspec
 import polars as pl
@@ -10,11 +11,14 @@ import structlog
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
 from apps.ingestion.src.core.contexts.job import TaskContext
 from apps.ingestion.src.core.models.job import ExecutionStatus, TaskManifest
+from apps.ingestion.src.core.orchestrator.enums import JobRecord
 from apps.ingestion.src.services.database import DatabaseSink
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 LOG = structlog.getLogger(__name__)
-CURRENT_EXECUTION_TBL = "META.CURRENT_EXECUTION"
+SOURCE_TBL = "META.CURRENT_EXECUTION"
+DESTINATION_TBL = "META.EXECUTION_LOG"
 
 
 # TODO: Logging to Error Log? Workflow for refresh current_execution for the day
@@ -27,7 +31,7 @@ class StateStore:
         self.stage_dir = self.workspace_dir / "stage"
         self.archive_dir = self.workspace_dir / "archive"
         # Attribute to store the queried records (The Hot Cache)
-        self._active_records: dict[str, dict[str, Any]] = {}
+        self._active_records: dict[str, JobRecord] = {}
 
         # Ensure directories exist
         for d in [self.stage_dir, self.archive_dir]:
@@ -37,14 +41,14 @@ class StateStore:
         self.last_flush = 0
 
     @property
-    def active_records(self) -> dict[str, dict[str, Any]]:
+    def active_records(self) -> dict[str, JobRecord]:
         if not self._active_records and self.exec_ctx.always_on:
             self.get_latest_state()
         return self._active_records
 
     def get_latest_state(
         self, force_refresh: bool = False, lookahead_mins: int = 60
-    ) -> dict[str, dict[str, Any]]:
+    ) -> dict[str, JobRecord]:
         """
         Returns the map of active/pending/blocked/deferred records.
         If _active_records is None or force_refresh is True, it queries the DB view.
@@ -59,27 +63,53 @@ class StateStore:
         active_statuses = [f"'{s.value}'" for s in ExecutionStatus.active_statuses()]
         status_filter = ", ".join(active_statuses)
 
+        # Debug: Check the ClickHouse "Now" to ensure no timezone drift
+        tz = self.exec_ctx.timezone
+        ch_now = self.db.fetch(f"SELECT now64(3, '{tz}')")[0][0]
+
         sql = f"""
-            SELECT * FROM {CURRENT_EXECUTION_TBL} 
+            SELECT * FROM {SOURCE_TBL} 
             WHERE JOB_STATUS IN ({status_filter})
-            AND SCHEDULED_TIMESTAMP <= now64() + INTERVAL {lookahead_mins} MINUTE
+            AND SCHEDULED_TIMESTAMP <= now64(3, '{tz}') + INTERVAL {lookahead_mins} MINUTE
         """
+
+        LOG.debug(
+            "Querying active records",
+            lookahead=lookahead_mins,
+            ch_now=ch_now,
+            status_filter=status_filter,
+        )
+
         try:
             # Fetch column names dynamically from ClickHouse metadata to avoid hardcoding
             cols = [
                 row[0]
-                for row in self.db.fetch(f"DESCRIBE TABLE {CURRENT_EXECUTION_TBL}")
+                for row in self.db.fetch(f"DESCRIBE TABLE {SOURCE_TBL}")
             ]
 
             raw_records = self.db.fetch(sql)
             for r in raw_records:
                 # Convert tuple results to dictionary for named access if necessary
-                record = dict(zip(cols, r)) if isinstance(r, (tuple, list)) else r
+                raw_dict = dict(zip(cols, r)) if isinstance(r, (tuple, list)) else r
+
+                # Instantiate the structured model (Validation happens here)
+                record = msgspec.convert(raw_dict, JobRecord)
 
                 identifier = self.exec_ctx.get_task_identifier(
-                    record["JOB_ID"], record["DATASET_ID"], str(record["RUN_DATE"])
+                    record.JOB_ID, record.DATASET_ID, record.PARTITION_DATE or ""
                 )
                 self._active_records[identifier] = record
+
+            if not raw_records:
+                # Check if the table is actually empty or just filtered
+                total_rows = self.db.fetch(
+                    f"SELECT count() FROM {SOURCE_TBL}"
+                )[0][0]
+                LOG.warning(
+                    "No active records found after filtering",
+                    total_in_table=total_rows,
+                    sql=sql,
+                )
 
             LOG.info("Successfully refreshed active records", count=len(raw_records))
         except Exception as e:
@@ -89,20 +119,29 @@ class StateStore:
 
         return self._active_records
 
-    def create_record(self, job_id: str, dataset_id: str, run_date: str):
+    def resolve_task_path(self, identifier: str) -> Path | None:
+        """Locates the physical directory for a task identifier or run_id."""
         from apps.ingestion.src.utils.common import find_path
 
-        # Use existing find_path utility to locate the directory anywhere in the workspace
-        identifier = self.exec_ctx.get_task_identifier(job_id, dataset_id, run_date)
-        active_path = find_path(self.exec_ctx.workspace_dir, identifier)
+        path = find_path(self.exec_ctx.workspace_dir, identifier)
+        return path if path and path.exists() else None
 
-        if active_path and active_path.exists():
+    def create_record(self, job_id: str, dataset_id: str, partition_date: str) -> None:
+        identifier = self.exec_ctx.get_task_identifier(
+            job_id, dataset_id, partition_date
+        )
+        task_path = self.resolve_task_path(identifier)
+
+        if task_path:
             # Minimal record to satisfy the sync requirements
-            self.active_records[identifier] = {
-                "JOB_ID": job_id,
-                "DATASET_ID": dataset_id,
-                "RUN_DATE": run_date,
-            }
+            self.active_records[identifier] = JobRecord(
+                JOB_ID=job_id,
+                DATASET_ID=dataset_id,
+                PARTITION_DATE=partition_date,
+                IS_SCHEDULED=0,
+                SCHEDULED_TIMESTAMP=datetime.now(ZoneInfo(self.exec_ctx.timezone)),
+                JOB_STATUS="PENDING",
+            )
 
     # TODO:
     def update_status(self, job_id: str, status: str) -> None:
@@ -127,11 +166,26 @@ class StateStore:
         LOG.warning("Skipping misfired run", job_id=job_id)
         # Update DB next_run_time logic would go here
 
-    def sync_from_folder(self, folder_path: Path, deep_sync: bool = False) -> None:
+    def sync_from_folder(
+        self, folder_path: Path | str, deep_sync: bool = False
+    ) -> None:
         """
         Reads the manifest.json from a physical folder and
         syncs the internal state/database mirror.
         """
+        # Handle case where a run_id or identifier is passed instead of a full path
+        if isinstance(folder_path, str) and not Path(folder_path).exists():
+            resolved = self.resolve_task_path(folder_path)
+            if not resolved:
+                LOG.warning(
+                    "Sync failed: path could not be resolved from identifier",
+                    path=folder_path,
+                )
+                return
+            folder_path = resolved
+
+        folder_path = Path(folder_path)
+
         manifest_file = folder_path / MANIFEST_FILENAME
         config_file = folder_path / CONFIG_FILENAME
 
@@ -187,6 +241,11 @@ class StateStore:
             mask |= 8
         return mask
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        reraise=True,
+    )
     def flush(self) -> None:
         """
         Rotates JSONL to Parquet and loads into Database.
@@ -202,6 +261,10 @@ class StateStore:
             # 1. Rotate & Convert
             self.stream_path.rename(temp_jsonl)
             df = pl.read_ndjson(temp_jsonl)
+
+            if df.is_empty():
+                return
+
             df.write_parquet(target_parquet)
             temp_jsonl.unlink()  # JSONL is no longer needed once Parquet is cut
 
@@ -220,7 +283,7 @@ class StateStore:
         """Iterates through stage folder and moves successful loads to archive"""
         try:
             # Load all pending Parquet files into the DB
-            self.db.stage_data(self.stage_dir, "EXECUTION_LOG")
+            self.db.stage_data(self.stage_dir, "META.EXECUTION_LOG")
             for pq_file in self.stage_dir.glob("*.parquet"):
                 # Move to archive only on success
                 pq_file.rename(self.archive_dir / pq_file.name)
@@ -248,31 +311,37 @@ class StateStore:
 
         metadata = metadata or {}
         identifier = self.exec_ctx.get_task_identifier(
-            manifest.job_id, manifest.dataset_id, context.run_date
+            manifest.job_id, manifest.dataset_id, context.partition_date
         )
-        record = self.active_records.get(identifier) or {}
+        record = self.active_records.get(identifier)
+        record_dict = msgspec.to_builtins(record) if record else {}
 
         # Align keys with your execution_log.sql columns
         incoming_update = {
             "RUN_ID": manifest.run_id,
             "JOB_ID": manifest.job_id,
-            "SCHEDULED_TIMESTAMP": record.get("SCHEDULED_TIMESTAMP"),
+            "SCHEDULED_TIMESTAMP": record.SCHEDULED_TIMESTAMP if record else None,
             "DATASET_ID": manifest.dataset_id,
-            "RUN_DATE": context.run_date,
+            "PARTITION_DATE": context.partition_date,
             "START_TIMESTAMP": (
                 manifest.start.start_timestamp_utc if manifest.start else None
             ),
             "END_TIMESTAMP": (
                 manifest.complete.end_timestamp_utc if manifest.complete else None
             ),
-            "LAST_UPDATED_AT_TS": datetime.now()
-            .astimezone()
-            .isoformat(sep=" ", timespec="milliseconds"),
+            "LAST_UPDATED_AT_TS": datetime.now(
+                ZoneInfo(self.exec_ctx.timezone)
+            ).isoformat(sep=" ", timespec="milliseconds"),
             "JOB_STATUS": str(metadata.get("status", manifest.status.value)).upper(),
             "CURRENT_STEP": manifest.current_stage.upper(),
             "JOB_BITMASK": manifest.bitmask,
-            "WATCH_FILE_PATH": record.get("WATCH_FILE_PATH"),
-            "RUNTIME_OVERRIDES": context.custom_overrides,
+            "IS_SCHEDULED": record.IS_SCHEDULED if record else 0,
+            "WATCH_FILE_PATH": record.WATCH_FILE_PATH if record else None,
+            "RUNTIME_OVERRIDES": (
+                msgspec.json.encode(context.custom_overrides).decode()
+                if context.custom_overrides
+                else None
+            ),
             "RETRY_ATTEMPTS": manifest.retry_count,
             "SOURCE_ROW_COUNT": (
                 manifest.extract.source_row_count if manifest.extract else None
@@ -288,12 +357,12 @@ class StateStore:
         # 2. Chain them: current_transition takes priority, record is the fallback
         # We use .copy() at the end to turn it back into a plain dict for
         # JSON serialization
-        event = dict(ChainMap(incoming_update, record))
+
+        event = dict(ChainMap(incoming_update, record_dict))
 
         # 3. Update the Hot Cache so the next call sees the combined state
-        self._active_records[identifier] = event
+        self._active_records[identifier] = msgspec.convert(event, JobRecord)
 
         line = msgspec.json.encode(event) + b"\n"
         with self.stream_path.open("ab") as f:
-            f.write(line)
             f.write(line)

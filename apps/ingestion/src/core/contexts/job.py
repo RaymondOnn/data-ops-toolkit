@@ -2,6 +2,7 @@ from typing import Any, Literal
 
 import msgspec
 import structlog
+
 from apps.ingestion.src.core.models.stages.enums import StageName
 
 LOG = structlog.getLogger(__name__)
@@ -12,7 +13,7 @@ class ExtractConfig(msgspec.Struct):
 
     source_type: str  # e.g. "postgres", "s3", "local"
     source_identifier: str  # path, table, or API endpoint
-    num_partitions: int = 10  # parallelism level
+    num_workers: int = 10  # parallelism level
     load_mode: Literal["snapshot", "delta"] = "snapshot"
     source_config: dict[str, Any] = msgspec.field(
         default_factory=dict
@@ -63,7 +64,7 @@ class TaskContext(msgspec.Struct):
     # Core identifiers
     job_id: str
     dataset_id: str
-    run_date: str
+    partition_date: str
 
     # Paths
     output_path: str

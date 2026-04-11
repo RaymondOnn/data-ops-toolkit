@@ -1,25 +1,45 @@
 import contextlib
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Generator, Sequence
 from typing import Any
 
 import polars as pl
 
+from ..pool.base import ConnectionPool, LockPool
+
 
 class DBClient(ABC):
     def __init__(self, **config: Any) -> None:
         self.config = config
-        self._connection: Any = None
-    
+        # Base lock to prevent concurrent access to process-level singletons
+        self._lock = threading.Lock()
+        self._pool: ConnectionPool | None = None
+
     @property
-    def type(self) -> str:        
+    def pool(self) -> ConnectionPool:
+        """Lazy initialization of the pool strategy."""
+        if self._pool is None:
+            self._pool = self._init_pool()
+        return self._pool
+
+    def _init_pool(self) -> ConnectionPool:
+        """Default fallback to the LockPool (Lean Mode)."""
+        return LockPool(connector=self.connect)
+
+    @property
+    def type(self) -> str:
         """Returns a string identifier for the database type (e.g., 'clickhouse', 'oracle')."""
         raise NotImplementedError("Subclasses must implement this property")
 
-    @property
-    def connection(self) -> Any:
-        """Convenience property to access the connection, ensuring it's established."""
-        return self.connect()
+    @contextlib.contextmanager
+    def get_connection(self) -> Generator[Any, None, None]:
+        """
+        Standardized context manager for leasing connections.
+        Subclasses can override this to implement pooling.
+        """
+        with self.pool.lease() as conn:
+            yield conn
 
     @abstractmethod
     def connect(self) -> Any:
@@ -35,16 +55,9 @@ class DBClient(ABC):
         Ensures that a broken pipe during a folder-load
         resets the session entirely.
         """
-        if self._connection:
-            with contextlib.suppress(Exception):
-                # Handle different closing methods for different drivers
-                if hasattr(self._connection, "close"):
-                    self._connection.close()
-                elif hasattr(self._connection, "disconnect"):
-                    self._connection.disconnect()
-
-        self._connection = None
-        self.connect()
+        if self._pool:
+            self._pool.close_all()
+        # Connection will re-initialize lazily on next lease
 
     @abstractmethod
     def sql(self, query: str) -> list[Sequence[Any]]:
@@ -61,14 +74,13 @@ class DBClient(ABC):
         Default implementation that wraps the existing fetch_df generator
         into a Polars LazyFrame.
         """
-        # We use pl.from_generator to turn the chunked batches into a stream
         return pl.concat(self.fetch_df(query), how="vertical").lazy()
 
     @abstractmethod
     def get_load_strategy(
         self,
         table_name: str,
-        num_partitions: int = 10,
+        num_workers: int = 10,
         filter_sql: str | None = None,
     ) -> set[str]:
         """

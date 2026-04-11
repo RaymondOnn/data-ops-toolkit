@@ -11,7 +11,7 @@ __pycache__
 .DS_STORE     
 .cache
 *.egg-info/
-.secrets.json
+**/.secrets.json
 
 # Infrastructure temporary files
 **/infra/**/.tmp/

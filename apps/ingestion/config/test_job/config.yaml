@@ -9,7 +9,7 @@ default:
       type: default
     load:
       service_ref: clickhouse
-    num_partitions: 1
+    num_workers: 1
     archive:
       enable_archival: true
       service_ref: "standard_archive"
@@ -17,18 +17,21 @@ default:
   # ── Datasets (each key = dataset_id, values override job defaults) ─────────
   datasets:
     orders:
-      num_partitions: 1          # overrides job-level num_partitions if different
+      num_workers: 1          # overrides job-level num_workers if different
+      partition_date:
+        offset:
+          days: -1
       extract:
         load_mode: "snapshot"    
         source_params:
-          filter_sql: ""         # e.g. "WHERE order_date = {{run_date}}"
+          filter_sql: ""         # e.g. "WHERE order_date = {{partition_date}}"
           bind_params: {}
           schema_file: "schema.csv"
       transform:
         type: default
         options:
       load:
-        sink_identifier: test.orders
+        sink_identifier: TEST.ORDERS
         service_ref: "clickhouse"
       archive:
         enable_archival: false    # per-dataset archival override

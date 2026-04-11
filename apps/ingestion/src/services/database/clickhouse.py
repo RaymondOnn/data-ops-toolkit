@@ -125,7 +125,7 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             SELECT * {exclude_str}
             FROM {other}
         """
-        results = self.sql(sql)
+        results = self.client.sql(sql)
         is_match = len(results) == 0
         LOG.info(
             "Comparing tables", reference=reference, other=other, is_match=is_match
@@ -141,5 +141,4 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             WHERE 1 = 0
         """
         LOG.info("Cloning table structure", source=reference, destination=other)
-        self.client.sql(sql)
         self.client.sql(sql)

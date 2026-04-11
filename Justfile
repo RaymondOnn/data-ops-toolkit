@@ -3,6 +3,9 @@ set shell := ["bash", "-cu"]
 # Path to the local infrastructure stack
 docker_compose_file := "apps/ingestion/infra/environments/local/local.docker-compose.yaml"
 
+# Unique project name to prevent worktree collisions
+project_name := "toolkit-" + file_name(justfile_directory())
+
 # Display all available recipes
 help:
     @just --list
@@ -59,11 +62,11 @@ lock:
 # Start the Docker containers in detached mode
 docker-up:
     @ls -ld apps/ingestion/infra/environments/local/garage/garage.toml > /dev/null
-    docker compose -f {{docker_compose_file}} up -d --remove-orphans
+    docker compose -p {{project_name}} -f {{docker_compose_file}} up -d --remove-orphans
 
 # Stop and remove the Docker containers
 docker-down:
-    docker compose -f {{docker_compose_file}} down
+    docker compose -p {{project_name}} -f {{docker_compose_file}} down
 
 # Stop and then start the Docker containers again
 docker-restart:

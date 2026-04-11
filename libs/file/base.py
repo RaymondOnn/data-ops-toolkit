@@ -49,15 +49,15 @@ class FileSystemClient(BaseIOClient, ABC):
 
     def resolve_path(self, path: str) -> str:
         """The fsspec equivalent of Path.resolve()."""
-        if "://" in path and self.fs:
+        if (
+            "://" in path or self.url.startswith(("s3://", "abfs://", "az://"))
+        ) and self.fs:
             stripped = self.fs._strip_protocol(path)
-            # Ensure stripped is a string (fsspec can return a list for some protocols)
             path_str = stripped[0] if isinstance(stripped, list) else stripped
-            # Normalize slashes and remove internal '.' or '..'
-            normalized = "/".join(
-                [p for p in path_str.split("/") if p not in (".", "")]
-            )
-            return str(self.fs.unstrip_protocol(normalized))
+
+            # Use fsspec's internal path cleaning to handle dots and double slashes
+            clean_path = self.fs._parent(path_str + "/a")
+            return str(self.fs.unstrip_protocol(clean_path))
         return str(Path(path).resolve())
 
     def walk_paths(self, path: str, pattern: str = "*") -> Generator[str, None, None]:
@@ -72,19 +72,18 @@ class FileSystemClient(BaseIOClient, ABC):
             LOG.warning(f"Path does not exist: {resolved}")
             return
 
-        # fsspec glob behavior can vary; check if the resolved path itself is a file first
         if self.fs.isfile(resolved):
             if pattern == "*" or Path(resolved).match(pattern):
                 yield resolved
         else:
-            # Handle Directory globbing
-            # We use a recursive glob by default for landing zones
-            search_pattern = f"{resolved.rstrip('/')}/**/{pattern}"
-            for p in self.fs.glob(search_pattern):
-                # glob() often returns directories; we strictly yield files
-                if self.fs.isfile(p):
-                    path_str = p[0] if isinstance(p, list) else p
-                    yield str(self.fs.unstrip_protocol(path_str))
+            # Use fs.find() for optimized recursive discovery.
+            # fs.find() returns a dict of path: info or a list of paths.
+            # It is generally much more performant than glob for cloud providers.
+            for p in self.fs.find(resolved):
+                path_str = p[0] if isinstance(p, list) else p
+                full_path = str(self.fs.unstrip_protocol(path_str))
+                if pattern == "*" or Path(full_path).match(pattern):
+                    yield full_path
 
     def smart_transfer(self, local_source: str, remote_dest: str) -> None:
         """Handles local-to-cloud or cloud-to-cloud transfers safely."""
@@ -97,6 +96,10 @@ class FileSystemClient(BaseIOClient, ABC):
 
     def exists(self, path: str | Path) -> bool:
         return self.fs.exists(self.resolve_path(str(path)))
+
+    def info(self, path: str | Path) -> dict[str, Any]:
+        """Returns detailed metadata (size, mtime, type) using fsspec."""
+        return self.fs.info(self.resolve_path(str(path)))
 
     def delete_dir(self, path: str | Path) -> None:
         full_path = self.resolve_path(str(path))

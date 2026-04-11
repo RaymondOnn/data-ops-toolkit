@@ -1,3 +1,4 @@
+import contextlib
 from abc import abstractmethod
 from collections.abc import Generator, Sequence
 from pathlib import Path
@@ -37,6 +38,12 @@ class DatabaseService(Service):
         """Subclasses must initialize their specific DB client."""
         pass
 
+    @contextlib.contextmanager
+    def connection(self) -> Generator[Any, None, None]:
+        """Exposes the underlying client's pooled connection lease."""
+        with self.client.get_connection() as conn:
+            yield conn
+
     @protect_service(breaker)
     def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
         """
@@ -66,10 +73,10 @@ class DatabaseService(Service):
 
 class DatabaseSource(DatabaseService, SourceMixin):
     def get_work_units(
-        self, target: str, num_partitions: int, filter_sql: str | None = None
+        self, target: str, num_workers: int, filter_sql: str | None = None
     ) -> set[str]:
         # All DBs use the client's load strategy (e.g., ORA_HASH, ctid)
-        return self.client.get_load_strategy(target, num_partitions, filter_sql)
+        return self.client.get_load_strategy(target, num_workers, filter_sql)
 
     @protect_service(breaker)
     def fetch_data(self, unit: str) -> pl.DataFrame:
@@ -119,6 +126,4 @@ class DatabaseSink(DatabaseService, SinkMixin):
     @abstractmethod
     def clone(self, reference: str, other: str) -> None:
         """Clone a table to a new table."""
-        pass
-        pass
         pass

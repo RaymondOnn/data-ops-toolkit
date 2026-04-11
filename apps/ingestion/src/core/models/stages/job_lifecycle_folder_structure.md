@@ -22,7 +22,7 @@ workspace_dir/
 When a new ingestion job is triggered, the engine provisions a dedicated isolated space for its metadata in the `active/` directory. 
 
 **Folder Path:**
-`active/{job_id}:{dataset_id}_{run_date}/{run_id}/`
+`active/{job_id}:{dataset_id}_{partition_date}/{run_id}/`
 
 **Initial Files Created:**
 1. `manifest.json`: Single source of truth tracking the current state, stage, and status. It is atomically updated throughout the job.
@@ -111,7 +111,7 @@ Assuming a job runs successfully through the entire pipeline and finishes its fi
 ```text
 workspace_dir/
 ├── active/
-│   └── {job_id}:{dataset_id}_{run_date}/
+│   └── {job_id}:{dataset_id}_{partition_date}/
 │       └── {run_id}/
 │           ├── manifest.json       (status=COMPLETED)
 │           └── {job_id}_{run_id}_config.json
@@ -125,7 +125,7 @@ workspace_dir/
             └── transform/          (Persisted transformed data)
 ```
 
-1. **The Active Folder remains:** `active/{job_id}:{dataset_id}_{run_date}/{run_id}/` is kept alive until it naturally expires (TTL) or is swept by the Janitor.
+1. **The Active Folder remains:** `active/{job_id}:{dataset_id}_{partition_date}/{run_id}/` is kept alive until it naturally expires (TTL) or is swept by the Janitor.
 2. **Inside the Active Folder:** You will still see the `manifest.json` (with its status as `COMPLETED`/`FINISH`) and the `config.json`.
 3. **Cleaned Intermediate Data:** The `extract` and `transform` physical data directories (and their symlinks) are intentionally purged from the local high-speed disk to reclaim space.
 4. **Archived Data:** If archiving was enabled in the job context, the data that was in `data/extract` and `data/transform` is safely moved to the long-term object store (e.g., S3 or a local archive path).

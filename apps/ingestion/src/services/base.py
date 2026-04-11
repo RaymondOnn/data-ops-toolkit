@@ -19,7 +19,7 @@ class Service:
 
 class SourceMixin(ABC):
     @abstractmethod
-    def get_work_units(self, target: str, num_partitions: int) -> set[Any]:
+    def get_work_units(self, target: str, num_workers: int) -> set[Any]:
         """How this service splits 50M rows into chunks."""
         pass
 

@@ -20,6 +20,7 @@ auth = { workspace = true }
 clients = { workspace = true }
 resilience = { workspace = true }
 cloud = { workspace = true }
+cache = { workspace = true }
 
 
 [tool.uv.workspace]

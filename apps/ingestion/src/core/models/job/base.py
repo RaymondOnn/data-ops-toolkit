@@ -7,7 +7,6 @@ from typing import Any, Self
 
 import msgspec
 import structlog
-
 from apps.ingestion.src.core.contexts import ExecutionContext, TaskContext
 from apps.ingestion.src.core.models.job.manifest import TaskManifest
 from apps.ingestion.src.core.models.job.status import ExecutionStatus
@@ -28,7 +27,7 @@ class Task:
         self,
         run_id: str,
         composite_key: str,
-        run_date: str,
+        partition_date: str,
         worker_id: str,
         exec_ctx: ExecutionContext,
         target_stage: str = StageName.START.label,
@@ -36,14 +35,14 @@ class Task:
     ) -> None:
         self.job_id, self.dataset_id = composite_key.split(":", 1)
         self.run_id = run_id
-        self.run_date = run_date
+        self.partition_date = partition_date
         self.worker_id = worker_id
         self.exec_ctx = exec_ctx
         self.target_stage = target_stage
 
         # 1. Resolve physical folder location
         self._folder = folder_path or self.exec_ctx.get_run_path(
-            self.job_id, self.dataset_id, self.run_date, self.run_id
+            self.job_id, self.dataset_id, self.partition_date, self.run_id
         )
         self._manifest_path = self._folder / "manifest.json"
 
@@ -67,8 +66,8 @@ class Task:
         active_path = Path(folder_path)
         run_id = active_path.name
 
-        # The parent name is the full identifier: job_id:dataset_id:run_date
-        job_id, dataset_id, run_date, _ = exec_ctx.parse_identifier(
+        # The parent name is the full identifier: job_id:dataset_id:partition_date
+        job_id, dataset_id, partition_date, _ = exec_ctx.parse_identifier(
             f"{active_path.parent.name}:{run_id}"
         )
         composite_key = f"{job_id}:{dataset_id}"
@@ -85,7 +84,7 @@ class Task:
         return cls(
             composite_key=composite_key,
             run_id=run_id,
-            run_date=run_date,
+            partition_date=partition_date,
             worker_id="recovery",
             exec_ctx=exec_ctx,
             target_stage=current_stage,
@@ -95,14 +94,14 @@ class Task:
     @property
     def id(self) -> str:
         return self.exec_ctx.get_task_identifier(
-            self.job_id, self.dataset_id, self.run_date
+            self.job_id, self.dataset_id, self.partition_date
         )
 
     @property
     def folder(self) -> Path:
         """
         Lazily creates the composite structure:
-        active/[job_id]:[dataset]_[run_date]/[run_id]
+        active/[job_id]:[dataset]_[partition_date]/[run_id]
         """
         # 1. Physically create the folder if missing
         if not self._folder.exists():
@@ -222,7 +221,7 @@ class Task:
     def _make_folder(self) -> None:
         # 1. Assignment (Ensures paths are correctly calculated)
         self._folder = self.exec_ctx.get_run_path(
-            self.job_id, self.dataset_id, self.run_date, self.run_id
+            self.job_id, self.dataset_id, self.partition_date, self.run_id
         )
 
         # 2. Physically create the folder if missing
@@ -324,7 +323,11 @@ class Task:
         # Target: e.g., /opt/app/stages/HOLD/123/run_abc
         new_path = Path(self.exec_ctx.workspace_dir) / stage / self.id / self.run_id
         new_path = self.exec_ctx.get_run_path(
-            self.job_id, self.dataset_id, self.run_date, self.run_id, category=stage
+            self.job_id,
+            self.dataset_id,
+            self.partition_date,
+            self.run_id,
+            category=stage,
         )
         new_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -364,7 +367,7 @@ class Task:
         # might not even need to open the manifest for simple status updates.
         # Filename contains run_id for Orchestrator lookup
         signal_filename = self.exec_ctx.get_signal_name(
-            self.job_id, self.dataset_id, self.run_date, self.run_id, ext
+            self.job_id, self.dataset_id, self.partition_date, self.run_id, ext
         )
         signal_path = signal_dir / signal_filename
 
@@ -387,4 +390,5 @@ class Task:
     #         is_done = bool(current_mask & stage.bitmask_flag)
     #         report[stage.label] = "DONE" if is_done else "PENDING"
 
+    #     return report
     #     return report

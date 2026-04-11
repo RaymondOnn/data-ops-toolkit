@@ -3,7 +3,7 @@
 job:
   name: daily_ingestion_sync # job_id
   raw:
-    num_partitions: 16
+    num_workers: 16
   archive:
     enable_archival: true
     service_ref: "s3_archive"  # archive_type
@@ -23,7 +23,7 @@ datasets:
       load_mode: delta # Loading Strategy: delta | snapshot 
       params:
         # For DatabaseReader
-        filter_sql: "status = 'COMPLETED' AND updated_at >= {{run_date}}"
+        filter_sql: "status = 'COMPLETED' AND updated_at >= {{partition_date}}"
 
         # For APIReader
         query_params:

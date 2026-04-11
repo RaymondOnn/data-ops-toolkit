@@ -5,9 +5,9 @@ CREATE TABLE IF NOT EXISTS TEST.ORDERS (
     order_date Date,
     amount Float64,
     status LowCardinality(String),
-    updated_at DateTime64(3, 'UTC'),
+    updated_at DateTime64(3),
     -- Metadata Columns
-    _created_at_ts DateTime64(3, 'UTC') DEFAULT now(),
+    _created_at_ts DateTime64(3) DEFAULT now(),
     _partition String,
     _source LowCardinality(String),
     _run_id String,

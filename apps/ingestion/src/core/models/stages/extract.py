@@ -54,18 +54,18 @@ class ExtractStage(ExecutionStage):
             # Resolve partition_date in filter_sql
             options = task_ctx.extract.source_params.copy()
             if "filter_sql" in options:
-                # Suggestion: {partition_date} replaces {run_date}
+                # Suggestion: {partition_date} replaces {partition_date}
                 options["filter_sql"] = options["filter_sql"].replace(
-                    "{partition_date}", task_ctx.run_date
+                    "{partition_date}", task_ctx.partition_date
                 )
 
             ctx = ReaderContext(
                 source_type=task_ctx.extract.source_type,
                 source_identifier=task_ctx.extract.source_identifier,
-                num_partitions=task_ctx.extract.num_partitions or 10,
+                num_workers=task_ctx.extract.num_workers or 10,
                 schema_items=task_ctx.extract.schema_items,
                 run_id=task.run_id,
-                run_date=task_ctx.run_date,
+                partition_date=task_ctx.partition_date,
                 job_id=task.job_id,
                 workspace_dir=str(task.exec_ctx.workspace_dir),
                 options=options,
@@ -222,4 +222,6 @@ class ExtractStage(ExecutionStage):
                 # In a real engine, you might add logic to handle
                 # type conflicts (e.g., Float vs Int)
                 merged[col] = str(dtype)
+        return merged
+        return merged
         return merged

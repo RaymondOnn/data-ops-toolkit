@@ -114,22 +114,22 @@ class LifecycleManager:
         # List to prevent 'dictionary changed size during iteration'
         runs_to_check = list(self.state_store.active_records.values())
 
-        for data in runs_to_check:
+        for run in runs_to_check:
             # We only expire jobs that are stuck in a non-terminal state
-            status = data.get("JOB_STATUS")
+            status = run.JOB_STATUS
             if status and status in ExecutionStatus.active_statuses():
                 try:
-                    job_id = data.get("JOB_ID")
-                    run_id = data.get("RUN_ID")
-                    dataset_id = data.get("DATASET_ID")
-                    run_date = str(data.get("RUN_DATE", ""))
+                    job_id = run.JOB_ID
+                    run_id = run.RUN_ID
+                    dataset_id = run.DATASET_ID
+                    partition_date = str(run.PARTITION_DATE)
 
-                    if not all([job_id, run_id, dataset_id, run_date]):
+                    if not all([job_id, run_id, dataset_id, partition_date]):
                         continue
 
                     # Standardize path resolution from database metadata
                     job_path = self.exec_ctx.get_run_path(
-                        job_id, dataset_id, run_date, run_id
+                        job_id, dataset_id, partition_date, run_id
                     )
                     if not job_path.exists():
                         continue
@@ -156,13 +156,13 @@ class LifecycleManager:
                 except (OSError, msgspec.DecodeError) as e:
                     LOG.error(
                         "Expiry check failed due to IO or malformed config",
-                        run_id=data.get("run_id"),
+                        run_id=run.RUN_ID,
                         error=str(e),
                     )
                 except Exception:
                     LOG.exception(
                         "Unexpected failure during expiry check",
-                        run_id=data.get("run_id"),
+                        run_id=run.RUN_ID,
                     )
 
         self.state_store.flush()
@@ -205,4 +205,6 @@ class LifecycleManager:
         for stage_dir in data_root.iterdir():
             if stage_dir.is_dir():
                 for physical_folder in stage_dir.glob(f"{job_id}_*"):
+                    shutil.rmtree(physical_folder)
+                    shutil.rmtree(physical_folder)
                     shutil.rmtree(physical_folder)

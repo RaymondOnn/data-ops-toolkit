@@ -2,7 +2,6 @@ import time
 
 import polars as pl
 import structlog
-
 from apps.ingestion.src.core.strategies.extract import ReaderContext
 from libs.database import TypeResolver
 
@@ -38,7 +37,7 @@ def apply_schema_contract(df: pl.DataFrame, context: ReaderContext) -> pl.DataFr
                 continue
 
             if t_col == "_partition":
-                expr = pl.lit(context.run_date)
+                expr = pl.lit(context.partition_date)
                 continue
 
             if t_col == "_run_id":
@@ -77,4 +76,5 @@ def apply_schema_contract(df: pl.DataFrame, context: ReaderContext) -> pl.DataFr
 #     report_sample = lf.filter(pl.col("_is_quarantined")).limit(100).collect()
 
 #     # This matches your 'masked_samples' requirement without loading 50M rows
+#     return report_sample.to_dicts()
 #     return report_sample.to_dicts()

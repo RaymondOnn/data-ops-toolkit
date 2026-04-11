@@ -1,10 +1,12 @@
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, ClassVar
 
 import structlog
 
 from libs.auth.factory import AuthFactory
 from libs.auth.models import Secret
+from libs.cache.base import KeyValueCache
 
 from .base import ArchiveMixin, SinkMixin, SourceMixin
 
@@ -113,4 +115,23 @@ class ServiceFactory:
             raise TypeError(f"Service {service_type} does not implement ArchiveMixin.")
         return service
         # return cast(ArchiveMixin, service)
-        # return cast(ArchiveMixin, service)
+
+    @classmethod
+    def get_cache(cls, workspace_dir: Path, cache_cfg: dict[str, Any]) -> KeyValueCache:
+        """
+        Returns a normalized CacheService instance.
+        Dependency-free: uses primitive Path and Dict instead of ExecutionContext.
+        """
+        from libs.cache import DiskCache, RedisCache
+
+        if cache_cfg["type"] == "redis":
+            # Return a Redis client or a wrapper that matches the diskcache API
+            return RedisCache(
+                host=cache_cfg.get("host", "localhost"),
+                port=cache_cfg.get("port", 6379),
+                db=cache_cfg.get("db", 0),
+            )
+
+        # Default to lean mode (Diskcache)
+        cache_filepath = cache_cfg.get("filepath", ".cache")
+        return DiskCache(cache_path=(workspace_dir / cache_filepath).resolve())

@@ -123,7 +123,7 @@ def test_impact(job_id: str, dataset: str, baseline_tag: str = "latest-master"):
 @test_app.command(name="run")
 def test(
     # Main Argument
-    run_date: datetime = typer.Argument(
+    partition_date: datetime = typer.Argument(
         ..., formats=["%Y-%m-%d"], help="The target date for processing (YYYY-MM-DD)"
     ),
     # Required/Common Options
@@ -143,6 +143,6 @@ def test(
 ) -> None:
     """Developer test mode. Allows slicing the pipeline."""
     _execute_pipeline(
-        run_date, job_id, dataset, from_stage=from_stage, to_stage=to_stage, force=force
+        partition_date, job_id, dataset, from_stage=from_stage, to_stage=to_stage, force=force
     )
     )

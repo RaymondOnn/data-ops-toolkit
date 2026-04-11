@@ -31,7 +31,7 @@ datasets:
     target_destination: "public.orders" # Source DB table
     read_mode: delta # delta | snapshot
     expires_at: null              # or unix epoch (e.g. 1735776000)
-    num_partitions: 16
+    num_workers: 16
     filter_clause: 
     schema: orders.csv
     source_path: null             # Only used for file/s3 source types
@@ -56,7 +56,7 @@ datasets:
     target_destination: "public.sales" # Source DB table
     read_mode: snapshot # delta | snapshot
     expires_at: null              # or unix epoch (e.g. 1735776000)
-    num_partitions: 16
+    num_workers: 16
     filter_clause: 
     schema: sales.csv
     # target_destination: "s3://raw-bucket/orders/"

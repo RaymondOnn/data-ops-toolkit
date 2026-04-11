@@ -36,6 +36,10 @@ for db in "${DATABASES[@]}"; do
     ch_client -q "CREATE DATABASE IF NOT EXISTS $db"
 done
 
+# 1.5 Global Stop Refreshes
+# This prevents background tasks from conflicting with object creation/replacement.
+echo "🛑 Pausing background refreshes to prevent race conditions..."
+ch_client -q "SYSTEM STOP VIEW REFRESHES" || true
 
 # 2. Define the EXPLICIT order of SQL execution
 # Add your table definitions here in the order they should be created
@@ -62,5 +66,9 @@ for f in "${SQL_FILES[@]}"; do
         echo "⚠️ Warning: SQL file not found at $f. Skipping..."
     fi
 done
+
+# 3. Resume Refreshes
+echo "▶️ Resuming background refreshes..."
+ch_client -q "SYSTEM START VIEWS" || true
 
 echo "✅ ClickHouse initialization complete."

@@ -24,7 +24,7 @@ from apps.ingestion.src.services.factory import ServiceFactory
 def main():
     job_id = "csv_ingestion"
     dataset_id = "orders"
-    run_date = "2023-10-27"
+    partition_date = "2023-10-27"
     run_id = "migration_test_001"
 
     # 1. Initialize Execution Context using the Builder
@@ -36,9 +36,9 @@ def main():
     ctx = TaskContext(
         job_id=job_id,
         dataset_id=dataset_id,
-        run_date=run_date,
+        partition_date=partition_date,
         output_path=str(
-            exec_ctx.active_path / f"{job_id}:{dataset_id}_{run_date}_{run_id}"
+            exec_ctx.active_path / f"{job_id}:{dataset_id}_{partition_date}_{run_id}"
         ),
         extract=ExtractConfig(
             source_type="flat_file",
@@ -46,7 +46,7 @@ def main():
             source_config={
                 "url": f"file://{os.getcwd()}/apps/ingestion",
             },
-            num_partitions=1,
+            num_workers=1,
             load_mode="snapshot",
         ),
         transform=TransformConfig(),
@@ -70,7 +70,7 @@ def main():
     job = Task(
         run_id=run_id,
         composite_key=composite_key,
-        run_date=run_date,
+        partition_date=partition_date,
         worker_id="migration_worker",
         exec_ctx=exec_ctx,
         target_stage="start",
@@ -80,7 +80,7 @@ def main():
     # Normally the Orchestrator does this.
     active_root = exec_ctx.active_path
     active_root.mkdir(parents=True, exist_ok=True)
-    prefix = f"{job_id}:{dataset_id}_{run_date}_{run_id}"
+    prefix = f"{job_id}:{dataset_id}_{partition_date}_{run_id}"
     config_path = exec_ctx.active_path / f"{prefix}_config.json"
 
     with config_path.open("wb") as f:

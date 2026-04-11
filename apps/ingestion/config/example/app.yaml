@@ -3,8 +3,16 @@ defaults:
   retention_days: 2555 # 7-year default
   enable_archival: true
   archive_type: "standard_archive"
-  num_partitions: 10
+  num_workers: 10
   read_mode: "snapshot"
+  timezone: "Asia/Singapore"
+  partition_date:
+    offset:
+      years: 0
+      months: 0
+      days: 0
+    format: "%Y-%m-%d"
+    wrap_quotes: false
 
 
 accounts:

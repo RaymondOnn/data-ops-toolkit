@@ -45,7 +45,7 @@ def global_options(
 @app.command()
 def run(
     # Main Argument - '...' indicates it is required
-    run_date: Annotated[
+    partition_date: Annotated[
         datetime,
         typer.Argument(
             formats=["%Y-%m-%d"], help="The target date for processing (YYYY-MM-DD)"
@@ -110,7 +110,7 @@ def run(
         task = Task(
             run_id=job_id,  # Simplified for isolated run
             composite_key=f"{job_id}:{dataset}",
-            run_date=run_date.strftime("%Y-%m-%d"),
+            partition_date=partition_date.strftime("%Y-%m-%d"),
             worker_id="pex-subprocess",
             exec_ctx=orchestrator.exec_ctx,
             target_stage=stage,
@@ -118,14 +118,14 @@ def run(
         task.execute()
         return
 
-    typer.echo(f"🚀 Initializing {dataset} for {run_date.date()} (ID: {job_id})")
+    typer.echo(f"🚀 Initializing {dataset} for {partition_date.date()} (ID: {job_id})")
 
     # 3. Hand off to Orchestrator
     def _execute_orchestrator():
         orchestrator.run(
             job_id=job_id,
             dataset_id=dataset,
-            run_date_str=run_date.strftime("%Y-%m-%d"),
+            partition_date_str=partition_date.strftime("%Y-%m-%d"),
             overrides=overrides,
         )
 
@@ -178,7 +178,7 @@ def recover(
     dataset: Annotated[
         str | None, typer.Option("--dataset", "-d", help="Specific dataset to recover")
     ] = None,
-    run_date: Annotated[
+    partition_date: Annotated[
         str | None, typer.Option("--run-date", help="Specific run date to recover")
     ] = None,
     run_id: Annotated[
@@ -215,7 +215,7 @@ def recover(
                     continue
                 if dataset and p_ds != dataset:
                     continue
-                if run_date and p_date != run_date:
+                if partition_date and p_date != partition_date:
                     continue
                 if run_id and r_id != run_id:
                     continue

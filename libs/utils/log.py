@@ -93,3 +93,7 @@ def setup_logging(
 
     # 5. Suppress noisy third-party libraries
     logging.getLogger("filelock").setLevel(logging.WARNING)
+    # Suppress APScheduler info logs unless explicitly in debug mode
+    logging.getLogger("apscheduler").setLevel(
+        logging.DEBUG if is_debug else logging.WARNING
+    )

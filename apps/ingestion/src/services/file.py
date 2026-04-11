@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import structlog
+
 from libs.clients.base import ClientCantConnect
 from libs.file import FileSystemClient, FileSystemSkills, FormatFactory
 from libs.resilience.circuit_breaker import CircuitBreaker
@@ -67,7 +68,7 @@ class BaseStorageService(Service):
 
 class StorageSource(BaseStorageService, SourceMixin):
     @protect_service(breaker)
-    def get_work_units(self, target: str, num_partitions: int) -> list[dict[str, Any]]:
+    def get_work_units(self, target: str, num_workers: int) -> list[dict[str, Any]]:
         """
         Uses the internal client to split 50M rows.
         Works across S3, Azure, GCS, or Local.
@@ -95,9 +96,9 @@ class StorageSource(BaseStorageService, SourceMixin):
             "Generating work units",
             target=target,
             files_found=len(files),
-            partitions=num_partitions,
+            partitions=num_workers,
         )
-        return [{"files": files[i::num_partitions]} for i in range(num_partitions)]
+        return [{"files": files[i::num_workers]} for i in range(num_workers)]
 
     @protect_service(breaker)
     def fetch_data(self, unit: list[str] | str) -> pl.DataFrame | pl.LazyFrame:
@@ -309,3 +310,4 @@ class DataLakeService(StorageSource, StorageSink):
             storage_options=storage_options,
             **config,
         )
+
