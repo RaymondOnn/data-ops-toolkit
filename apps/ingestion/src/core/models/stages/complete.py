@@ -4,9 +4,10 @@ from datetime import datetime, timedelta
 
 import msgspec
 import structlog
+
 from apps.ingestion.src.core.models.job import Task
 from apps.ingestion.src.core.models.job.manifest import CompletePayload
-from apps.ingestion.src.services.base import ArchiveMixin
+from apps.ingestion.src.services.base import Archive
 from apps.ingestion.src.services.factory import ServiceFactory
 
 from .base import ExecutionStage
@@ -98,7 +99,7 @@ class CompleteStage(ExecutionStage):
             self.finalize(task, exception=e)
             raise
 
-    def _archive_parquet_data(self, object_store: ArchiveMixin, task: Task) -> None:
+    def _archive_parquet_data(self, object_store: Archive, task: Task) -> None:
         """
         Decision: Move files to the Archive location defined in the Context.
         Standardizing on: archive/{job_id}/{run_id}/{stage}/

@@ -1,5 +1,6 @@
 # src/core/services/base.py
 from abc import ABC, abstractmethod
+from collections.abc import Generator, Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -16,8 +17,20 @@ class Service:
         self.name = name
         self.config = config
 
+    def fetch(self, query: str) -> list[Sequence[Any]]:
+        """Base signature for executing SQL commands."""
+        raise NotImplementedError
 
-class SourceMixin(ABC):
+    def fetch_df(self, query: str) -> Generator["pl.DataFrame", Any, None]:
+        """Base signature for streaming DataFrames."""
+        raise NotImplementedError
+
+    def exists(self, identifier: str) -> bool:
+        """Base signature for checking if an artifact/table exists."""
+        raise NotImplementedError
+
+
+class Source(Service, ABC):
     @abstractmethod
     def get_work_units(self, target: str, num_workers: int) -> set[Any]:
         """How this service splits 50M rows into chunks."""
@@ -29,7 +42,7 @@ class SourceMixin(ABC):
         pass
 
 
-class SinkMixin(ABC):
+class Sink(Service, ABC):
     @abstractmethod
     def stage_data(
         self,
@@ -69,7 +82,7 @@ class SinkMixin(ABC):
         pass
 
 
-class ArchiveMixin(ABC):
+class Archive(Service, ABC):
     @abstractmethod
     def archive_data(self, source_dir: Any, archive_path: str) -> None:
         """Archive data to a persistent destination."""

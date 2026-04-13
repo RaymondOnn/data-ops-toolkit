@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import structlog
-from apps.ingestion.src.services.base import Service, SinkMixin, SourceMixin
+from apps.ingestion.src.services.base import Service, Sink, Source
 from apps.ingestion.src.services.registry import protect_service
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreaker
@@ -71,7 +71,7 @@ class DatabaseService(Service):
             )
 
 
-class DatabaseSource(DatabaseService, SourceMixin):
+class DatabaseSource(DatabaseService, Source):
     def get_work_units(
         self, target: str, num_workers: int, filter_sql: str | None = None
     ) -> set[str]:
@@ -81,7 +81,7 @@ class DatabaseSource(DatabaseService, SourceMixin):
     @protect_service(breaker)
     def fetch_data(self, unit: str) -> pl.DataFrame:
         """
-        Implementation of SourceMixin.fetch_data for Databases.
+        Implementation of Source.fetch_data for Databases.
         Consumes the generator from the client and returns a single DataFrame.
         """
         # We iterate through the client's generator. If a connection error occurs
@@ -92,7 +92,7 @@ class DatabaseSource(DatabaseService, SourceMixin):
         return pl.concat(batches)
 
 
-class DatabaseSink(DatabaseService, SinkMixin):
+class DatabaseSink(DatabaseService, Sink):
     @abstractmethod
     def stage_data(
         self,
@@ -126,4 +126,8 @@ class DatabaseSink(DatabaseService, SinkMixin):
     @abstractmethod
     def clone(self, reference: str, other: str) -> None:
         """Clone a table to a new table."""
-        pass
+
+    @protect_service(breaker)
+    def exists(self, identifier: str) -> bool:
+        """Implementation of Sink.exists for Databases."""
+        return self.client.exists(identifier)

@@ -7,7 +7,8 @@ import msgspec
 import polars as pl
 import ray
 import structlog
-from apps.ingestion.src.services.base import SourceMixin
+
+from apps.ingestion.src.services.base import Source
 from apps.ingestion.src.services.database import DatabaseSource
 
 from .base import Reader, ReaderContext
@@ -23,7 +24,7 @@ class DataReader(Reader):
     """
 
     def fetch(
-        self, service: SourceMixin, context: ReaderContext, target_folder: Path
+        self, service: Source, context: ReaderContext, target_folder: Path
     ) -> Generator[dict[str, Any], None, None]:
         """Emits metadata for each file artifact as it is created."""
         df_generator = self._get_ray_generator(service, context)
@@ -31,7 +32,7 @@ class DataReader(Reader):
 
     def _get_ray_generator(
         self,
-        service: SourceMixin,
+        service: Source,
         context: ReaderContext,
     ) -> Generator[pl.DataFrame, None, None]:
         # 1. Slice the work into parts (e.g., ORA_HASH queries)
@@ -63,6 +64,7 @@ class DataReader(Reader):
             from pathlib import Path
 
             import msgspec
+
             from apps.ingestion.src.core.schema import apply_schema_contract
             from apps.ingestion.src.core.strategies.extract.base import ReaderContext
             from apps.ingestion.src.services.factory import ServiceFactory

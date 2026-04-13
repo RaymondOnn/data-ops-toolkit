@@ -5,6 +5,7 @@ from typing import Any
 import polars as pl
 from clickhouse_connect.driver.client import Client
 
+from ..pool.base import ConnectionPool
 from ..pool.queue import QueueConnectionPool
 from .base import DBClient
 
@@ -107,3 +108,12 @@ class ClickhouseClient(DBClient):
             ORDER BY position;
         """
         return pl.concat(self.fetch_df(query), how="vertical")
+
+    def exists(self, fq_table: str) -> bool:
+        """Uses ClickHouse EXISTS TABLE command."""
+        database, table = (
+            fq_table.split(".") if "." in fq_table else ("default", fq_table)
+        )
+        # EXISTS TABLE returns 1 or 0
+        res = self.sql(f"EXISTS TABLE {database}.{table}")
+        return bool(res[0][0]) if res else False

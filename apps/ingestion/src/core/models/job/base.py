@@ -315,6 +315,19 @@ class Task:
         )
         LOG.debug("Task checked in to stage", run_id=self.run_id, stage=stage_name)
 
+    def reset_for_retry(self, stage_to_clear: str | None = None) -> None:
+        """
+        Prepares a task for re-execution by resetting status and optionally
+        clearing payload metadata for a specific stage.
+        """
+        updates = {
+            "status": ExecutionStatus.PENDING,
+            "last_active": datetime.now().astimezone().isoformat(),
+        }
+        if stage_to_clear:
+            updates[stage_to_clear] = None
+        self.update_manifest(updates)
+
     def move_to_folder(self, stage: str) -> None:
         """
         Physically relocates the metadata folder (active -> HOLD/FAILED).
@@ -390,5 +403,4 @@ class Task:
     #         is_done = bool(current_mask & stage.bitmask_flag)
     #         report[stage.label] = "DONE" if is_done else "PENDING"
 
-    #     return report
     #     return report

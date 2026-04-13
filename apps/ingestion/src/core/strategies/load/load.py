@@ -2,7 +2,8 @@ from pathlib import Path
 
 import structlog
 from msgspec import Struct
-from apps.ingestion.src.services.base import SinkMixin
+
+from apps.ingestion.src.services.base import Sink
 
 LOG = structlog.getLogger(__name__)
 
@@ -28,7 +29,7 @@ class Loader:
 
     def load(
         self,
-        service: SinkMixin,
+        service: Sink,
         source_dir: Path,
         target_table: str,
         partition_col: str,
@@ -43,7 +44,7 @@ class Loader:
         return service.stage_data(source_dir, target_table, file_ext)
 
     def promote(
-        self, service: SinkMixin, staging_identifier: str, write_ctx: WriteContext
+        self, service: Sink, staging_identifier: str, write_ctx: WriteContext
     ) -> None:
         """
         Phase 2: Moves data from 'Staging' to the 'Production' destination.

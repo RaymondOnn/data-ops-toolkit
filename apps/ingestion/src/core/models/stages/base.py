@@ -66,6 +66,20 @@ class ExecutionStage(ABC):
             return next_stage.label
         return "FINISH"
 
+    def _rewind(self, task: "Task", target_stage: StageName) -> str:
+        """
+        Generalized self-healing: Rewinds the task to a previous stage.
+        The engine will automatically re-queue the task into the target queue.
+        """
+        LOG.warning(
+            "Self-healing: Artifact missing, rewinding stage",
+            run_id=task.run_id,
+            from_stage=self.name,
+            to_stage=target_stage.label,
+        )
+        task.reset_for_retry(stage_to_clear=target_stage.label)
+        return target_stage.label
+
     def move_to_folder(self, task: "Task", category: str) -> None:
         """
         Physically moves the metadata folder to HOLD or QUARANTINE.

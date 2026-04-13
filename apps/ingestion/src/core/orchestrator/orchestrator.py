@@ -36,7 +36,7 @@ DEFAULT_SYNC_TIMEOUT_SECS = 1800  # 1 Hour default
 INTERVAL_HEARTBEAT_SECS = 30
 INTERVAL_DB_POLL_SECS = 60
 INTERVAL_STATE_SYNC_SECS = 30
-INTERVAL_ENGINE_SCAN_SECS = 10
+INTERVAL_ENGINE_SCAN_SECS = 5
 INTERVAL_RECOVERY_SWEEP_SECS = 300
 
 
@@ -209,12 +209,12 @@ class Orchestrator:
 
     def _drive_engine(self) -> None:
         """Drives the ingestion engine queues."""
-        self.engine.scan_and_recover()
         self.engine._process_jobs()
 
     def _perform_maintenance(self) -> None:
         """Performs scheduled recovery and expiry sweeps."""
         try:
+            self.engine.scan_and_recover()
             self.lifecycle.handle_recovery()
             self.lifecycle.handle_expiry()
         except Exception as e:

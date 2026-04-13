@@ -223,5 +223,3 @@ class ExtractStage(ExecutionStage):
                 # type conflicts (e.g., Float vs Int)
                 merged[col] = str(dtype)
         return merged
-        return merged
-        return merged

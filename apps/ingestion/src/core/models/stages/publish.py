@@ -12,6 +12,7 @@ from .enums import StageName
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.job import Task
+    from apps.ingestion.src.services.base import Sink
 
 
 LOG = structlog.getLogger(__name__)
@@ -26,20 +27,41 @@ class PublishStage(ExecutionStage):
     name = StageName.PUBLISH.label
 
     manifest: PublishPayload
+    service: Sink
+
+    def pre_flight(self, task: "Task") -> None:
+        """
+        Bypass global pre-flight checks (like disk pressure).
+        Publishing is a priority stage to reclaim resources.
+        """
+        pass
 
     def execute(self, task: "Task") -> str:
+        self.pre_flight(task)
+
         task_ctx = task.context
         start_ts = datetime.now().astimezone().isoformat()
 
         try:
-            write_meta = task.manifest.write
-            if not write_meta:
-                raise ValueError("Write metadata not found in manifest.")
-
-            # 1. Get the Service (Securely initialized on Ray worker via ServiceFactory)
-            service = ServiceFactory.get_sink(
+            # 1. Initialize Service & Check Connectivity
+            # (This logic is the 'new' pre-flight abstraction)
+            self.service = ServiceFactory.get_sink(
                 task_ctx.load.sink_type, **task_ctx.load.sink_config
             )
+
+            write_meta = task.manifest.write
+            if not write_meta or not write_meta.staging_artifact:
+                LOG.warning("Missing write metadata. Rewinding to WRITE stage.")
+                return self._rewind(task, StageName.WRITE)
+
+            # 2. Check Staging Artifact (Self-Healing Rewind)
+            staging_id = write_meta.staging_artifact
+            if not self.service.exists(staging_id):
+                LOG.warning(
+                    "Staging artifact lost. Rewinding to WRITE stage.",
+                    artifact=staging_id,
+                )
+                return self._rewind(task, StageName.WRITE)
 
             # 2. Get the behavioral Strategy
             loader = Loader()
@@ -61,7 +83,7 @@ class PublishStage(ExecutionStage):
             # 2. FINISH THE JOB
             # Move from staging to production
             loader.promote(
-                service=service,
+                service=self.service,
                 staging_identifier=write_meta.staging_artifact,
                 write_ctx=context,
             )

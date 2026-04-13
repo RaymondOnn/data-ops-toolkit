@@ -136,33 +136,34 @@ class Worker:
                     )
 
                     with self.lock:
-                        self.cache.pop(key)
-                        if not next_stage:
-                            log.warning(
-                                "Step returned no signal", next_stage=next_stage
-                            )
-                            return
+                        # Every execution ends the "Current" stage lease.
+                        # We pop it regardless of what comes next.
+                        self.cache.pop(key, None)
 
-                        if next_stage.casefold() in EXEC_STAGES:
-                            meta.current_stage = next_stage
-                            meta.status = ExecutionStatus.PENDING.value
-                            new_key = f"{next_stage}:{identifier}:{meta.run_id}"
-                            self.cache[new_key] = meta
-                            log.info(
-                                "Step complete. Task returned to queue.",
-                                next_stage=next_stage,
-                            )
-                        else:
-                            log.info("Task fully completed.")
-                            lookup_key = f"active_run:{identifier}"
-                            self.cache.pop(lookup_key, None)
+                        if next_stage:
+                            if next_stage.casefold() in EXEC_STAGES:
+                                # Progressing to next queue
+                                meta.current_stage = next_stage
+                                meta.status = ExecutionStatus.PENDING.value
+                                new_key = f"{next_stage}:{identifier}:{meta.run_id}"
+                                self.cache[new_key] = meta
+                                log.info(
+                                    "Step complete. Progressing.", next_stage=next_stage
+                                )
+                            else:
+                                # Task fully reached SUCCESS/FINISH
+                                log.info("Task fully completed.")
+                                self.cache.pop(f"active_run:{identifier}", None)
 
                 except Exception as e:
-                    log.error("Task stage failed terminaly", error=str(e))
+                    log.error("Task stage reached terminal failure/hold", error=str(e))
                     with self.lock:
-                        meta.status = ExecutionStatus.FAILED.value
-                        meta.last_hb = time.time()
-                        self.cache[key] = meta
+                        # For terminal failures, we remove the key from the active cache.
+                        # The folder structure (HOLD/FAILED) becomes the source of truth.
+                        self.cache.pop(key, None)
+                        # We keep 'active_run' key so the Orchestrator doesn't
+                        # re-trigger the same partition while a failed run is present.
+
                 finally:
                     self.is_busy = False
 
@@ -468,7 +469,7 @@ class IngestionEngine:
                 to_stage=next_stage,
             )
 
-            del self.cache[key]
+            self.cache.delete(key)
             if next_stage.casefold() != EXEC_STAGES[-1].casefold():
                 task_meta.status = ExecutionStatus.PENDING.value
                 self.cache[f"{next_stage}:{rest_of_key}"] = task_meta
@@ -480,6 +481,19 @@ class IngestionEngine:
                 job_id=job_id,
                 stage=stage_name,
             )
+
+            # Rehydrate the Task to perform a proper manifest reset
+            task = Task(
+                composite_key=f"{task_meta.job_id}:{task_meta.dataset_id}",
+                run_id=task_meta.run_id,
+                partition_date=task_meta.partition_date,
+                worker_id="engine-recovery",
+                exec_ctx=self.exec_ctx,
+                target_stage=stage_name,
+            )
+            task.reset_for_retry()
+
+            # Sync the engine cache with the new manifest state
             task_meta.status = ExecutionStatus.PENDING.value
             task_meta.last_hb = time.time()
             self.cache[key] = task_meta

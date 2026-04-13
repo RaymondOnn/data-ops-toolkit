@@ -92,3 +92,8 @@ class DBClient(ABC):
     def get_schema(self, fq_table: str) -> pl.DataFrame:
         """Returns a physical schema report from the DB system tables."""
         raise NotImplementedError()
+
+    @abstractmethod
+    def exists(self, identifier: str) -> bool:
+        """Checks if a table or artifact exists."""
+        raise NotImplementedError()

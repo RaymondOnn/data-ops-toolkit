@@ -18,7 +18,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 LOG = structlog.getLogger(__name__)
 SOURCE_TBL = "META.CURRENT_EXECUTION"
-DESTINATION_TBL = "META.EXECUTION_LOG"
+DESTINATION_TBL = "META.EXECUTION_LOG_CLONE"
 
 
 # TODO: Logging to Error Log? Workflow for refresh current_execution for the day

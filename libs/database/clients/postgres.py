@@ -119,3 +119,13 @@ class PostgresClient(DBClient):
             ORDER BY ordinal_position;
         """
         return pl.concat(self.fetch_df(query), how="vertical")
+
+    def exists(self, fq_table: str) -> bool:
+        """Checks information_schema for table existence."""
+        schema, table = fq_table.split(".") if "." in fq_table else ("public", fq_table)
+        query = f"""
+            SELECT 1 FROM information_schema.tables 
+            WHERE table_schema = '{schema}' 
+            AND table_name = '{table}'
+        """
+        return len(self.sql(query)) > 0

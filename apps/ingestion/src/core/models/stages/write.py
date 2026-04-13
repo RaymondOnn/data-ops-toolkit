@@ -23,7 +23,6 @@ class WriteStage(ExecutionStage):
 
     def pre_flight(self, task: "Task") -> None:
         """Verify sink connectivity from the execution node."""
-        super().pre_flight(task)
         # Factory initialization already validates basic params and Secret resolution
         self.service = ServiceFactory.get_sink(
             task.context.load.sink_type, **task.context.load.sink_config

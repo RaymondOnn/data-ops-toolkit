@@ -9,7 +9,7 @@ from libs.clients.base import ClientCantConnect
 from libs.file import FileSystemClient, FileSystemSkills, FormatFactory
 from libs.resilience.circuit_breaker import CircuitBreaker
 
-from .base import ArchiveMixin, Service, SinkMixin, SourceMixin
+from .base import Archive, Service, Sink, Source
 from .factory import ServiceFactory
 from .registry import protect_service
 
@@ -66,7 +66,7 @@ class BaseStorageService(Service):
         )
 
 
-class StorageSource(BaseStorageService, SourceMixin):
+class StorageSource(BaseStorageService, Source):
     @protect_service(breaker)
     def get_work_units(self, target: str, num_workers: int) -> list[dict[str, Any]]:
         """
@@ -131,7 +131,7 @@ class StorageSource(BaseStorageService, SourceMixin):
         return pl.concat(lfs)
 
 
-class StorageSink(BaseStorageService, SinkMixin):
+class StorageSink(BaseStorageService, Sink):
     @protect_service(breaker)
     def stage_data(
         self,
@@ -230,7 +230,7 @@ class StorageSink(BaseStorageService, SinkMixin):
         self.client.copy_dir(reference, other)
 
 
-class StorageArchive(BaseStorageService, ArchiveMixin):
+class StorageArchive(BaseStorageService, Archive):
     @protect_service(breaker)
     def archive_data(self, source_dir: Path, archive_path: str) -> None:
         """
@@ -310,4 +310,3 @@ class DataLakeService(StorageSource, StorageSink):
             storage_options=storage_options,
             **config,
         )
-

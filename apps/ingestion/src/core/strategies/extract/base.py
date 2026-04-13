@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import msgspec
-from apps.ingestion.src.services.base import SourceMixin
+from apps.ingestion.src.services.base import Source
 
 
 class ReaderContext(msgspec.Struct, frozen=True):
@@ -32,7 +32,8 @@ class ReaderContext(msgspec.Struct, frozen=True):
 class Reader(ABC):
     @abstractmethod
     def fetch(
-        self, service: SourceMixin, context: ReaderContext, target_folder: Path
+        self, service: Source, context: ReaderContext, target_folder: Path
     ) -> Generator[dict[str, Any], None, None]:
+        raise NotImplementedError("Subclasses must implement this method")
         raise NotImplementedError("Subclasses must implement this method")
         raise NotImplementedError("Subclasses must implement this method")

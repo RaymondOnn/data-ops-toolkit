@@ -8,7 +8,7 @@ from libs.auth.factory import AuthFactory
 from libs.auth.models import Secret
 from libs.cache.base import KeyValueCache
 
-from .base import ArchiveMixin, SinkMixin, SourceMixin
+from .base import Archive, Sink, Source
 
 LOG = structlog.getLogger(__name__)
 
@@ -93,28 +93,28 @@ class ServiceFactory:
         return cls._INSTANCES[instance_key]
 
     @classmethod
-    def get_source(cls, service_type: str, **config: Any) -> SourceMixin:
+    def get_source(cls, service_type: str, **config: Any) -> Source:
         service = cls.get_service(service_type, **config)
-        if not isinstance(service, SourceMixin):
-            raise TypeError(f"Service {service_type} does not implement SourceMixin.")
+        if not isinstance(service, Source):
+            raise TypeError(f"Service {service_type} does not implement Source.")
         return service
-        # return cast(SourceMixin, service)
+        # return cast(Source, service)
 
     @classmethod
-    def get_sink(cls, service_type: str, **config: Any) -> SinkMixin:
+    def get_sink(cls, service_type: str, **config: Any) -> Sink:
         service = cls.get_service(service_type, **config)
-        if not isinstance(service, SinkMixin):
-            raise TypeError(f"Service {service_type} does not implement SinkMixin.")
+        if not isinstance(service, Sink):
+            raise TypeError(f"Service {service_type} does not implement Sink.")
         return service
-        # return cast(SinkMixin, service)
+        # return cast(Sink, service)
 
     @classmethod
-    def get_archive(cls, service_type: str, **config: Any) -> ArchiveMixin:
+    def get_archive(cls, service_type: str, **config: Any) -> Archive:
         service = cls.get_service(service_type, **config)
-        if not isinstance(service, ArchiveMixin):
-            raise TypeError(f"Service {service_type} does not implement ArchiveMixin.")
+        if not isinstance(service, Archive):
+            raise TypeError(f"Service {service_type} does not implement Archive.")
         return service
-        # return cast(ArchiveMixin, service)
+        # return cast(Archive, service)
 
     @classmethod
     def get_cache(cls, workspace_dir: Path, cache_cfg: dict[str, Any]) -> KeyValueCache:
@@ -134,4 +134,6 @@ class ServiceFactory:
 
         # Default to lean mode (Diskcache)
         cache_filepath = cache_cfg.get("filepath", ".cache")
+        return DiskCache(cache_path=(workspace_dir / cache_filepath).resolve())
+        return DiskCache(cache_path=(workspace_dir / cache_filepath).resolve())
         return DiskCache(cache_path=(workspace_dir / cache_filepath).resolve())

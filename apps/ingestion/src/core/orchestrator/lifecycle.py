@@ -81,15 +81,15 @@ class LifecycleManager:
             # 3. Move back to 'active' folder (Atomic handover)
             task.move_to_folder("active")
 
-            # 4. Reset manifest status and increment retry if recovering from failure
-            updates = {
-                "status": ExecutionStatus.PENDING,
-                "worker_id": "recovery-janitor",
-            }
-            if category == "FAILED":
-                updates["retry_count"] = task.manifest.retry_count + 1
+            # 4. Reset manifest status
+            # If we are recovering from FAILED, we clear the current stage's data to be safe
+            stage_to_reset = (
+                task.manifest.current_stage if category == "FAILED" else None
+            )
+            task.reset_for_retry(stage_to_clear=stage_to_reset)
 
-            task.update_manifest(updates)
+            if category == "FAILED":
+                task.update_manifest({"retry_count": task.manifest.retry_count + 1})
 
             # 5. Re-queue into the Ingestion Engine
             # Use standardized config name 'config.json'
@@ -205,6 +205,4 @@ class LifecycleManager:
         for stage_dir in data_root.iterdir():
             if stage_dir.is_dir():
                 for physical_folder in stage_dir.glob(f"{job_id}_*"):
-                    shutil.rmtree(physical_folder)
-                    shutil.rmtree(physical_folder)
                     shutil.rmtree(physical_folder)

@@ -54,6 +54,7 @@ SQL_FILES=(
     "/sql/definitions/views/meta.current_schedules.sql"
     "/sql/definitions/views/meta.work_queue_trigger.sql"
     "/sql/adhoc/seed_metadata.sql"
+    "/sql/definitions/tables/meta.execution_log_clone.sql"
 )
 
 
