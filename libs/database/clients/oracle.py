@@ -1,8 +1,10 @@
 import logging
 from collections.abc import Generator, Sequence
+from pathlib import Path
 from typing import Any
 
 import polars as pl
+import pyarrow.parquet as pq
 from libs.database.clients.base import DBClient
 from oracledb import Connection
 
@@ -27,7 +29,7 @@ class OracleClient(DBClient):
             conn = oracledb.connect(
                 user=self.config["user"],
                 password=self.config["password"],
-                dsn=self.config["dsn"],
+                dsn=f"{self.config['host']}:{self.config.get('port', 1521)}/{self.config['service']}",
             )
             self._ping(conn)
             return conn
@@ -57,6 +59,22 @@ class OracleClient(DBClient):
             """
             queries.append(sql)
         return set(queries)
+
+    def copy_from_file(
+        self, table: str, source_dir: str, file_ext: str = "parquet"
+    ) -> None:
+        with self.get_connection() as conn, conn.cursor() as cur:
+            for file_path in Path(source_dir).glob(f"*.{file_ext}"):
+                parquet_file = pq.ParquetFile(file_path)
+                for batch in parquet_file.iter_batches(batch_size=50000):
+                    # Convert Arrow batch to a list of tuples for Oracle
+                    data = batch.to_pylist()
+
+                    # Use executemany for bulk binding
+                    cur.executemany(
+                        f"INSERT INTO {table} (col1, col2) VALUES (:1, :2)", data
+                    )
+                    conn.commit()
 
     def sql(self, query: str) -> list[Sequence[Any]]:
         """

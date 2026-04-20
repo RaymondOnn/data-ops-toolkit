@@ -4,18 +4,18 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import msgspec
-import structlog
 from apps.ingestion.src.core.models.job.manifest import ErrorPayload
 from apps.ingestion.src.core.models.stages.enums import EXEC_STAGES, StageName
 from apps.ingestion.src.utils.constants import DISK_THRESHOLD_HALT
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreakerTripped
 from libs.utils.system import get_disk_usage
+from loguru import logger
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.job import Task
 
-LOG = structlog.getLogger(__name__)
+LOG = logger
 
 
 class ExecutionStage(ABC):
@@ -66,6 +66,7 @@ class ExecutionStage(ABC):
             return next_stage.label
         return "FINISH"
 
+    # TODO: Bitmask, recovery path 
     def _rewind(self, task: "Task", target_stage: StageName) -> str:
         """
         Generalized self-healing: Rewinds the task to a previous stage.

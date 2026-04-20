@@ -17,7 +17,6 @@ dependencies = [
     "msgspec",
     "nanoid",
     "typer",
-    "structlog",
     "filelock",
     "dynaconf",
     "boto3",

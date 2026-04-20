@@ -1,13 +1,8 @@
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar
 
-import structlog
-
 if TYPE_CHECKING:
     from .base import Transformer
-
-
-LOG = structlog.getLogger(__name__)
 
 
 class TransformFactory:

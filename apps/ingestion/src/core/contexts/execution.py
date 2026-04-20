@@ -3,10 +3,9 @@ from pathlib import Path
 from typing import Any
 
 import msgspec
-import structlog
+from loguru import logger
 
-LOG = structlog.getLogger(__name__)
-
+LOG = logger
 
 
 class ExecutionMode(StrEnum):
@@ -140,10 +139,12 @@ class ExecutionContext(msgspec.Struct):
                     pickle.dumps(val)
                 except Exception as e:
                     raise TypeError(f"Attribute '{field}' is not picklable: {e}") from e
-            
+
             # Step 2: Test the whole object
             pickle.dumps(self)
-            LOG.debug("ExecutionContext is serializable and ready for distributed execution.")
+            LOG.debug(
+                "ExecutionContext is serializable and ready for distributed execution."
+            )
             return True
         except Exception as e:
             # We raise a descriptive error to make debugging easier in Ray

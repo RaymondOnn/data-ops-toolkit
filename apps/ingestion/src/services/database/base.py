@@ -5,17 +5,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
-import structlog
 from apps.ingestion.src.services.base import Service, Sink, Source
 from apps.ingestion.src.services.registry import protect_service
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreaker
+from loguru import logger
 
 if TYPE_CHECKING:
     from libs.database.clients.base import DBClient
 
 
-LOG = structlog.get_logger(__name__)
+LOG = logger
 
 breaker = CircuitBreaker(
     failure_threshold=3,

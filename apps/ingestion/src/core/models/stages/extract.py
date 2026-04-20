@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 import msgspec
 import polars as pl
-import structlog
 from apps.ingestion.src.core.models.job.manifest import ExtractPayload, FileInfo
 from apps.ingestion.src.core.strategies.extract import (
     Reader,
@@ -17,6 +16,7 @@ from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.utils.exceptions import TaskBlocked
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreakerTripped
+from loguru import logger
 
 from .base import ExecutionStage
 from .enums import StageName
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from apps.ingestion.src.core.models.job import Task
 
 
-LOG = structlog.getLogger(__name__)
+LOG = logger
 
 
 class ExtractStage(ExecutionStage):
@@ -184,13 +184,13 @@ class ExtractStage(ExecutionStage):
             # 4. State Transition
             return str(self._transit(task))
         except ClientCantConnect as ccc:
-            LOG.error("Halt by client connection.", stage=self.name, error=str(ccc))
+            LOG.exception("Halt by client connection.", stage=self.name)
             raise TaskBlocked(str(ccc)) from ccc
         except CircuitBreakerTripped as cb:
-            LOG.error("Halt by circuit breaker.", stage=self.name, error=str(cb))
+            LOG.exception("Halt by circuit breaker.", stage=self.name)
             raise
         except Exception as e:
-            LOG.error("Extract Step failed", stage=self.name, error=str(e))
+            LOG.exception("Extract Step failed", stage=self.name)
             self.finalize(task, exception=e)
             raise
 

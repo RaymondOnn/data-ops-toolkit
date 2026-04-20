@@ -53,6 +53,7 @@ local:
       port: 8123
       user: default
       secret_key: CLICKHOUSE_PASSWORD
+      secure: false
     local_s3:
       <<: *s3_service_base
       type: data_lake

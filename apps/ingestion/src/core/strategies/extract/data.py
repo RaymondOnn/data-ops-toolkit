@@ -6,15 +6,14 @@ from typing import Any
 import msgspec
 import polars as pl
 import ray
-import structlog
-
 from apps.ingestion.src.services.base import Source
 from apps.ingestion.src.services.database import DatabaseSource
+from loguru import logger
 
 from .base import Reader, ReaderContext
 from .factory import ReaderFactory
 
-LOG = structlog.getLogger(__name__)
+LOG = logger
 
 
 class DataReader(Reader):
@@ -64,13 +63,11 @@ class DataReader(Reader):
             from pathlib import Path
 
             import msgspec
-
             from apps.ingestion.src.core.schema import apply_schema_contract
             from apps.ingestion.src.core.strategies.extract.base import ReaderContext
             from apps.ingestion.src.services.factory import ServiceFactory
             from apps.ingestion.src.services.registry import ServiceRegistry
-
-            log = structlog.get_logger()
+            from loguru import logger as worker_logger
 
             # map_batches receives a batch (dict of lists). With batch_size=1,
             # we extract our single task payload from the first index.
@@ -84,7 +81,7 @@ class DataReader(Reader):
 
             service = ServiceFactory.get_source(context.source_type, **config)
 
-            log.info("Ray worker starting extraction task", unit=unit)
+            worker_logger.info("Ray worker starting extraction task", unit=unit)
 
             # 1. Extraction
             # Support both DB query string and File list dict
@@ -96,7 +93,7 @@ class DataReader(Reader):
             # Convert LazyFrame to DataFrame for Ray compatibility
             df = result.collect() if isinstance(result, pl.LazyFrame) else result
 
-            log.info(
+            worker_logger.info(
                 "Ray worker completed extraction task",
                 rows=len(df),
             )

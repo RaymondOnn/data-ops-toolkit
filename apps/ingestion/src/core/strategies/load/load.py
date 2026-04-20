@@ -1,17 +1,18 @@
 from pathlib import Path
 
-import structlog
+from loguru import logger
 from msgspec import Struct
 
 from apps.ingestion.src.services.base import Sink
 
-LOG = structlog.getLogger(__name__)
+LOG = logger
 
 
-class WriteContext(Struct):
+class LoadContext(Struct):
     sink_identifier: str  # Table name or S3 Prefix
     partition_col: str
     partition_value: str
+    expected_count: int
 
 
 class StagingResult(Struct):
@@ -31,33 +32,56 @@ class Loader:
         self,
         service: Sink,
         source_dir: Path,
-        target_table: str,
-        partition_col: str,
-        partition_val: str,
+        load_ctx: LoadContext,
         file_ext: str = "parquet",
     ) -> tuple[str, int]:
         """
         Phase 1: Moves data from Silver (Parquet) to a temporary 'Staging' area.
         Returns metadata about the staged data (staging_artifact, rows_loaded).
         """
-        LOG.info("staging_started", table=target_table)
-        return service.stage_data(source_dir, target_table, file_ext)
+        try:
+            LOG.info(
+                "Staging data into {table} for {partition_col}={partition_val}",
+                table=load_ctx.sink_identifier,
+                partition_col=load_ctx.partition_col,
+                partition_val=load_ctx.partition_value,
+            )
+            result = service.stage_data(
+                source_dir=source_dir,
+                target_table=load_ctx.sink_identifier,
+                file_ext=file_ext,
+                expected_count=load_ctx.expected_count,
+            )
+
+            if result is None:
+                raise ValueError(
+                    f"Service {type(service).__name__} returned None for staging results. "
+                    "Ensure the service implementation returns (staging_identifier, row_count)."
+                )
+            return result
+        except Exception as exc:
+            LOG.exception("Error during staging data")
+            raise exc
 
     def promote(
-        self, service: Sink, staging_identifier: str, write_ctx: WriteContext
+        self, service: Sink, staging_identifier: str, load_ctx: LoadContext
     ) -> None:
         """
         Phase 2: Moves data from 'Staging' to the 'Production' destination.
         This is where 'Atomic Swaps' or 'Merges' happen.
         """
         LOG.info(
-            "promotion_started",
+            "Promoting data from {from_table} to {to_table} "
+            "for {partition_col}={partition_val}",
             from_table=staging_identifier,
-            to_table=write_ctx.sink_identifier,
+            to_table=load_ctx.sink_identifier,
+            partition_col=load_ctx.partition_col,
+            partition_val=load_ctx.partition_value,
         )
         service.promote_data(
             staging_table=staging_identifier,
-            target_table=write_ctx.sink_identifier,
-            partition_col=write_ctx.partition_col,
-            partition_val=write_ctx.partition_value,
+            target_table=load_ctx.sink_identifier,
+            partition_col=load_ctx.partition_col,
+            partition_val=load_ctx.partition_value,
+            expected_count=load_ctx.expected_count,
         )

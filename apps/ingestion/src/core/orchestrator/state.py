@@ -7,16 +7,17 @@ from zoneinfo import ZoneInfo
 
 import msgspec
 import polars as pl
-import structlog
+from loguru import logger
+from tenacity import retry, stop_after_attempt, wait_exponential
+
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
 from apps.ingestion.src.core.contexts.job import TaskContext
 from apps.ingestion.src.core.models.job import ExecutionStatus, TaskManifest
 from apps.ingestion.src.core.orchestrator.enums import JobRecord
 from apps.ingestion.src.services.database import DatabaseSink
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
-from tenacity import retry, stop_after_attempt, wait_exponential
 
-LOG = structlog.getLogger(__name__)
+LOG = logger
 SOURCE_TBL = "META.CURRENT_EXECUTION"
 DESTINATION_TBL = "META.EXECUTION_LOG_CLONE"
 
@@ -82,10 +83,7 @@ class StateStore:
 
         try:
             # Fetch column names dynamically from ClickHouse metadata to avoid hardcoding
-            cols = [
-                row[0]
-                for row in self.db.fetch(f"DESCRIBE TABLE {SOURCE_TBL}")
-            ]
+            cols = [row[0] for row in self.db.fetch(f"DESCRIBE TABLE {SOURCE_TBL}")]
 
             raw_records = self.db.fetch(sql)
             for r in raw_records:
@@ -102,18 +100,16 @@ class StateStore:
 
             if not raw_records:
                 # Check if the table is actually empty or just filtered
-                total_rows = self.db.fetch(
-                    f"SELECT count() FROM {SOURCE_TBL}"
-                )[0][0]
+                total_rows = self.db.fetch(f"SELECT count() FROM {SOURCE_TBL}")[0][0]
                 LOG.warning(
-                    "No active records found after filtering",
+                    "No active records found after filtering (Total in table: {total_in_table})",
                     total_in_table=total_rows,
                     sql=sql,
                 )
 
-            LOG.info("Successfully refreshed active records", count=len(raw_records))
+            LOG.info("Received {count} active records", count=len(raw_records))
         except Exception as e:
-            LOG.error("Failed to refresh active records", error=str(e))
+            LOG.exception("Failed to refresh active records")
             # Fallback to empty dict to avoid NoneType errors in Orchestrator loop
             self._active_records = self._active_records or {}
 

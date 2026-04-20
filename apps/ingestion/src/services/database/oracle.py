@@ -1,16 +1,16 @@
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import structlog
 from apps.ingestion.src.services.database.base import DatabaseSink, DatabaseSource
 from apps.ingestion.src.services.factory import ServiceFactory
 from libs.database.clients.oracle import OracleClient
+from loguru import logger
 
 if TYPE_CHECKING:
     from libs.auth.models import Secret
 
 
-LOG = structlog.get_logger(__name__)
+LOG = logger
 
 
 @ServiceFactory.register("oracle_db")

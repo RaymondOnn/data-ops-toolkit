@@ -2,7 +2,6 @@ import shutil
 from pathlib import Path
 
 import msgspec
-import structlog
 from apps.ingestion.src.core.contexts import ExecutionContext, TaskContext
 from apps.ingestion.src.core.models.job import ExecutionStatus, Task
 from apps.ingestion.src.core.models.states.terminal import HoldState
@@ -11,8 +10,9 @@ from apps.ingestion.src.core.orchestrator.state import StateStore
 from apps.ingestion.src.utils.common import find_path
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
 from apps.ingestion.src.utils.dates import is_expired
+from loguru import logger
 
-LOG = structlog.getLogger(__name__)
+LOG = logger
 
 
 class LifecycleManager:
@@ -103,8 +103,8 @@ class LifecycleManager:
             # 6. Signal the state change to observers (Heartbeat)
             task.request_status_sync()
             self.state_store.flush()
-        except Exception as e:
-            LOG.error("Recovery failed", path=str(folder_path), error=str(e))
+        except Exception:
+            LOG.exception("Recovery failed", path=str(folder_path))
             raise
 
     def handle_expiry(self) -> None:

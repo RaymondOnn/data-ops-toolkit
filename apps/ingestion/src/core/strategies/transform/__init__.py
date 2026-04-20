@@ -2,12 +2,12 @@ import importlib
 import pkgutil
 from pathlib import Path
 
-import structlog
+from loguru import logger
 
 from .base import TransformContext, Transformer
 from .factory import TransformFactory
 
-LOG = structlog.getLogger(__name__)
+LOG = logger
 
 
 # 1. Discover CORE transformers (bitmask, default, etc.)

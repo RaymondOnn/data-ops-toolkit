@@ -1,10 +1,10 @@
-import structlog
+from loguru import logger
 import typer
 
 from apps.ingestion.src.core.contexts.builder import TaskContextBuilder
 from apps.ingestion.src.features.regression.regression import run_comparison
 
-LOG = structlog.get_logger(__name__)
+LOG = logger
 
 test_app = typer.Typer(help="Testing and validation utilities.")
 
@@ -65,7 +65,7 @@ def clone_sink(
         run_skeleton_clone(job_id, dataset, target_path)
         print(f"✅ Successfully created skeleton at: {target_path}")
     except Exception as e:
-        LOG.error("Clone failed", error=str(e))
+        LOG.exception("Attempt to clone failed")
         raise typer.Exit(code=1)
 
 

@@ -2,9 +2,11 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 import msgspec
-import structlog
+from loguru import logger
+
 from apps.ingestion.src.core.models.job.manifest import PublishPayload
-from apps.ingestion.src.core.strategies.load.load import Loader, WriteContext
+from apps.ingestion.src.core.strategies.load.load import LoadContext, Loader
+from apps.ingestion.src.services.base import Sink
 from apps.ingestion.src.services.factory import ServiceFactory
 
 from .base import ExecutionStage
@@ -12,10 +14,9 @@ from .enums import StageName
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.job import Task
-    from apps.ingestion.src.services.base import Sink
 
 
-LOG = structlog.getLogger(__name__)
+LOG = logger
 
 
 class PublishStage(ExecutionStage):
@@ -58,7 +59,7 @@ class PublishStage(ExecutionStage):
             staging_id = write_meta.staging_artifact
             if not self.service.exists(staging_id):
                 LOG.warning(
-                    "Staging artifact lost. Rewinding to WRITE stage.",
+                    "Staging artifact '{artifact}' lost. Rewinding to WRITE stage.",
                     artifact=staging_id,
                 )
                 return self._rewind(task, StageName.WRITE)
@@ -67,10 +68,11 @@ class PublishStage(ExecutionStage):
             loader = Loader()
 
             # 3. Create Context
-            context = WriteContext(
+            context = LoadContext(
                 sink_identifier=task_ctx.load.sink_identifier,
                 partition_col=task_ctx.load.partition_col,
                 partition_value=task_ctx.load.partition_value,
+                expected_count=write_meta.rows_inserted,
             )
 
             LOG.info(
@@ -85,7 +87,7 @@ class PublishStage(ExecutionStage):
             loader.promote(
                 service=self.service,
                 staging_identifier=write_meta.staging_artifact,
-                write_ctx=context,
+                load_ctx=context,
             )
 
             # 3. PAYLOAD: The 'Success Receipt'
@@ -108,4 +110,6 @@ class PublishStage(ExecutionStage):
 
         except Exception as e:
             self.finalize(task, exception=e)
+            raise
+            raise
             raise

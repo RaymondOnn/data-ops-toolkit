@@ -3,11 +3,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
-import structlog
-
 from libs.clients.base import ClientCantConnect
 from libs.file import FileSystemClient, FileSystemSkills, FormatFactory
 from libs.resilience.circuit_breaker import CircuitBreaker
+from loguru import logger
 
 from .base import Archive, Service, Sink, Source
 from .factory import ServiceFactory
@@ -17,7 +16,7 @@ if TYPE_CHECKING:
     from libs.auth.models import Secret
     from libs.file.formats.base import FormatHandler
 
-LOG = structlog.get_logger(__name__)
+LOG = logger
 
 breaker = CircuitBreaker(
     failure_threshold=3,

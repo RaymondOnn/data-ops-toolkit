@@ -1,12 +1,12 @@
 import shutil
 from collections.abc import Callable
 
-import structlog
 from apps.ingestion.src.core.contexts import ExecutionContext
 from apps.ingestion.src.core.orchestrator.engine import IngestionEngine
 from apps.ingestion.src.core.orchestrator.state import StateStore
+from loguru import logger
 
-LOG = structlog.getLogger(__name__)
+LOG = logger
 
 
 # TODO: Stray signals

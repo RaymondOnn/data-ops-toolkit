@@ -4,12 +4,12 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 import polars as pl
 import ray
-import structlog
 from apps.ingestion.src.core.models.job.manifest import TransformPayload
 from apps.ingestion.src.core.strategies.transform import (
     TransformContext,
     TransformFactory,
 )
+from loguru import logger
 
 from .base import ExecutionStage
 from .enums import StageName
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from apps.ingestion.src.core.models.job import Task
 
 
-LOG = structlog.getLogger(__name__)
+LOG = logger
 APP_TRANSFORM_OUTPUT_EXT = "parquet"
 
 
@@ -80,7 +80,7 @@ class TransformStage(ExecutionStage):
             )
 
             # 2. Parallel Transformation via Ray Data
-            # This reads all part_*.parquet files from the extract stage 
+            # This reads all part_*.parquet files from the extract stage
             # into a distributed dataset
             ds = ray.data.read_parquet(str(extract_path))
 
@@ -134,7 +134,7 @@ class TransformStage(ExecutionStage):
                 logic_version=getattr(transformer, "version", "1.0.0"),
                 transform_type=task.context.transform.transform_type,
                 artifact_folder=str(data_store),
-                output_row_count=output_rows,
+                output_row_count=output_rows or 0,
                 schema_validation_pass=True,
                 refined_schema={k: str(v) for k, v in final_schema_dict.items()},
                 start_timestamp_utc=start_ts,
@@ -158,4 +158,3 @@ class TransformStage(ExecutionStage):
         except Exception as e:
             self.finalize(task=task, exception=e)
             raise
-

@@ -4,16 +4,15 @@ from collections.abc import Callable
 from typing import Any, ClassVar
 
 import diskcache
-import structlog
-
 from apps.ingestion.src.utils.constants import DISKCACHE_FILE_PATH
 from libs.resilience.circuit_breaker import (
     CircuitBreaker,
     CircuitBreakerState,
     CircuitBreakerTripped,
 )
+from loguru import logger
 
-LOG = structlog.getLogger(__name__)
+LOG = logger
 
 
 class ServiceRegistry:

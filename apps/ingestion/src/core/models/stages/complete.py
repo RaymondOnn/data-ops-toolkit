@@ -3,17 +3,16 @@ import time
 from datetime import datetime, timedelta
 
 import msgspec
-import structlog
-
 from apps.ingestion.src.core.models.job import Task
 from apps.ingestion.src.core.models.job.manifest import CompletePayload
 from apps.ingestion.src.services.base import Archive
 from apps.ingestion.src.services.factory import ServiceFactory
+from loguru import logger
 
 from .base import ExecutionStage
 from .enums import StageName
 
-LOG = structlog.getLogger(__name__)
+LOG = logger
 
 
 class CompleteStage(ExecutionStage):
@@ -95,7 +94,7 @@ class CompleteStage(ExecutionStage):
             return "FINISH"
 
         except Exception as e:
-            LOG.error("CompleteStage failed during cleanup", error=str(e))
+            LOG.exception("CompleteStage failed during cleanup")
             self.finalize(task, exception=e)
             raise
 

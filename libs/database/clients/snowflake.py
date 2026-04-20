@@ -1,6 +1,6 @@
+import polars as pl
 from apps.ingestion.src.core.db.base import DBClient
 
-import polars as pl
 
 class SnowflakeADBCClient(DBClient):
     """Snowflake client using ADBC (bypasses slow row-based drivers)."""

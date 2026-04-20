@@ -48,6 +48,7 @@ class Sink(Service, ABC):
         self,
         source_dir: Any,
         target_table: str,
+        expected_count: int,
         file_ext: str = "parquet",
     ) -> tuple[str, int]:
         """
@@ -63,6 +64,7 @@ class Sink(Service, ABC):
         target_table: str,
         partition_col: str,
         partition_val: str,
+        expected_count: int,
     ) -> None:
         """Phase 2: Moves data to production (Swap/Merge/Append)."""
         pass

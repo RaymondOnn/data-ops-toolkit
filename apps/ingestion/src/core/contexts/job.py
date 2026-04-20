@@ -1,11 +1,7 @@
 from typing import Any, Literal
 
 import msgspec
-import structlog
-
 from apps.ingestion.src.core.models.stages.enums import StageName
-
-LOG = structlog.getLogger(__name__)
 
 
 class ExtractConfig(msgspec.Struct):

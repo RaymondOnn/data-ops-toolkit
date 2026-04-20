@@ -1,13 +1,84 @@
 import logging
 import sys
-from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-import structlog
+from loguru import logger
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
+# Internal state to track strings that must be redacted
+_MASK_STRINGS: set[str] = set()
+
+
+def _mask_sensitive_data(record):
+    msg = record["message"]
+    for secret in _MASK_STRINGS:
+        if secret and secret in msg:
+            msg = msg.replace(secret, "[MASKED_SECRET]")
+    record["message"] = msg
+
+
+def _console_formatter(record):
+    """
+    Dynamic formatter that appends extra context to the end of the line
+    only if extra data exists.
+    """
+    fmt = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
+
+    # Check for extra context (excluding internal loguru keys if any)
+    extras = {k: v for k, v in record["extra"].items() if k not in ["run_id"]}
+
+    # We handle run_id separately to highlight it
+    run_id = record["extra"].get("run_id")
+    prefix = f" <magenta>[{run_id}]</magenta>" if run_id else ""
+
+    # Format extras for console display without using braces
+    # (which would trigger Loguru's internal format_map KeyError)
+    if extras:
+        display_parts = []
+        for k, v in extras.items():
+            val = str(v)
+            # Truncate long SQL queries for cleaner console output
+            if k == "query" and len(val) > 100:
+                val = val[:97] + "..."
+
+            # Escape curly braces to prevent Loguru from interpreting them as placeholders
+            val = val.replace("{", "{{").replace("}", "}}")
+            display_parts.append(f"{k}={val}")
+
+        extras_str = ", ".join(display_parts)
+        return f"{fmt}{prefix} <light-magenta>({extras_str})</light-magenta>\n"
+    return f"{fmt}{prefix}\n"
+
+
+class InterceptHandler(logging.Handler):
+    """
+    Standard python logging handler interceptor to redirect
+    library logs (apscheduler, ray, etc) to loguru.
+    """
+
+    def emit(self, record):
+        # Get corresponding Loguru level if it exists
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+
+        # Find caller from where originated the logged message
+        frame, depth = logging.currentframe(), 2
+        while frame.f_code.co_filename == logging.__file__:
+            frame = frame.f_back
+            depth += 1
+
+        # Extract 'extra' from standard logging record
+        # Standard logging merges 'extra' into the record's __dict__
+        std_extra = {
+            k: v
+            for k, v in record.__dict__.items()
+            if k not in logging.makeLogRecord({}).__dict__
+        }
+
+        logger.opt(depth=depth, exception=record.exc_info).bind(**std_extra).log(
+            level, record.getMessage()
+        )
 
 
 def setup_logging(
@@ -18,82 +89,61 @@ def setup_logging(
 ):
     # Ensure the log directory exists before initializing handlers
     log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / filename
 
-    # 1. The JSON File Handler
-    # We use a standard Formatter that just outputs the message
-    # (which structlog will provide as JSON)
-    file_handler = TimedRotatingFileHandler(
-        filename=log_dir / filename, when="midnight", backupCount=7
-    )
-    file_handler.setLevel(logging.DEBUG)
+    # 1. Clear default handlers
+    logger.remove()
 
-    # 2. The Console Handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.DEBUG if is_debug else logging.INFO)
+    # 2. Configure global patcher for redacting
+    logger.configure(patcher=_mask_sensitive_data)
 
-    # 3. Define the Shared Processors
-    # These run for BOTH the console and the file
-    shared_processors: list[Callable] = [
-        structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S"),
-        structlog.processors.add_log_level,
-        # Adds the name of the logger (e.g. apps.ingestion.src.services.file)
-        structlog.stdlib.add_logger_name,
-        # Adds the filename, function name, and line number
-        structlog.processors.CallsiteParameterAdder(
-            {
-                structlog.processors.CallsiteParameter.FILENAME,
-                structlog.processors.CallsiteParameter.MODULE,
-                structlog.processors.CallsiteParameter.FUNC_NAME,
-                structlog.processors.CallsiteParameter.LINENO,
-            }
-        ),
-        structlog.contextvars.merge_contextvars,
-        structlog.processors.dict_tracebacks,
-    ]
-
-    structlog.configure(
-        processors=[
-            *shared_processors,
-            # This is the bridge: it sends the log to the standard logging module
-            structlog.stdlib.filter_by_level,
-            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
-        ],
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        wrapper_class=structlog.stdlib.BoundLogger,
-        cache_logger_on_first_use=True,
+    # 2. Add Console Handler
+    logger.add(
+        # sys.stdout,
+        sys.stderr,
+        level="DEBUG" if is_debug else "INFO",
+        format=_console_formatter,
+        colorize=True,
+        serialize=is_prod,
+        backtrace=True,
+        diagnose=is_debug,
     )
 
-    # 4. Use ProcessorFormatter to split the rendering styles
-    # FILE gets JSON
-    file_formatter = structlog.stdlib.ProcessorFormatter(
-        processor=structlog.processors.JSONRenderer(),
-        foreign_pre_chain=shared_processors,
+    # 3. Add JSON File Handler with Rotation
+    logger.add(
+        str(log_file),
+        level="DEBUG",
+        serialize=True,  # Always JSON in files
+        rotation="00:00",
+        retention="7 days",
+        compression="zip",
     )
-    file_handler.setFormatter(file_formatter)
 
-    # CONSOLE gets Pretty (if not prod) or JSON
-    console_formatter = structlog.stdlib.ProcessorFormatter(
-        processor=(
-            structlog.processors.JSONRenderer()
-            if is_prod
-            else structlog.dev.ConsoleRenderer(colors=True, event_key="event")
-        ),
-        foreign_pre_chain=shared_processors,
-    )
-    console_handler.setFormatter(console_formatter)
+    # 4. Intercept standard logging calls
+    logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
 
-    root = logging.getLogger()
-
-    # Clear existing handlers to prevent duplicate logs in Ray workers
-    if root.hasHandlers():
-        root.handlers.clear()
-
-    root.handlers = [file_handler, console_handler]
-    root.setLevel(logging.DEBUG)
-
-    # 5. Suppress noisy third-party libraries
+    # Silent noisy libraries by setting their levels at the source
+    # Standard logging levels are respected before reaching the Interceptor
     logging.getLogger("filelock").setLevel(logging.WARNING)
-    # Suppress APScheduler info logs unless explicitly in debug mode
-    logging.getLogger("apscheduler").setLevel(
-        logging.DEBUG if is_debug else logging.WARNING
-    )
+    # APScheduler is very noisy at INFO level; lock to WARNING even in debug mode
+    logging.getLogger("apscheduler").setLevel(logging.WARNING)
+    # logging.getLogger("ray").setLevel(logging.WARNING)
+
+
+def register_log_masking(secrets: str | list[str]) -> None:
+    """
+    Public API to add new sensitive values to the global redact list.
+    """
+    if isinstance(secrets, str):
+        secrets = [secrets]
+
+    for s in secrets:
+        if s:
+            _MASK_STRINGS.add(str(s))
+
+
+def is_masked(secret: str) -> bool:
+    """
+    Returns True if the given string is registered in the global redact list.
+    """
+    return secret in _MASK_STRINGS

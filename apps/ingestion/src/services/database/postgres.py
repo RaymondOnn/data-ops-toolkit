@@ -3,16 +3,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
-import structlog
-
 from apps.ingestion.src.services.database.base import DatabaseSink, DatabaseSource
 from apps.ingestion.src.services.factory import ServiceFactory
 from libs.database.clients.postgres import PostgresClient
+from loguru import logger
 
 if TYPE_CHECKING:
     from libs.auth.models import Secret
 
-LOG = structlog.get_logger(__name__)
+LOG = logger
 
 
 @ServiceFactory.register("postgres_db")
@@ -108,7 +107,7 @@ class PostgresService(DatabaseSource, DatabaseSink):
             SELECT * {exclude_str}
             FROM {other}
         """
-        results = self.sql(sql)
+        results = self.client.sql(sql)
         is_match = len(results) == 0
         LOG.info(
             "Comparing tables", reference=reference, other=other, is_match=is_match

@@ -1,8 +1,8 @@
 import logging
-import os
-import ray
-import diskcache
 from abc import ABC, abstractmethod
+
+import diskcache
+import ray
 
 
 class BaseRegistry(ABC):

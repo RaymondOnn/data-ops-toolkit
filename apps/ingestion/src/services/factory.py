@@ -2,15 +2,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
-import structlog
-
 from libs.auth.factory import AuthFactory
 from libs.auth.models import Secret
 from libs.cache.base import KeyValueCache
+from loguru import logger
 
 from .base import Archive, Sink, Source
 
-LOG = structlog.getLogger(__name__)
+LOG = logger
 
 
 class ServiceNotFound(Exception):

@@ -3,9 +3,8 @@ import time
 from typing import Any
 
 import fsspec
-from s3fs import S3FileSystem
-
 from libs.file.base import FileSystemClient
+from s3fs import S3FileSystem
 
 LOG = logging.getLogger(__name__)
 

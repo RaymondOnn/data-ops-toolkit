@@ -2,9 +2,11 @@ import logging
 import random
 import threading
 import time
-from typing import Any, Optional
+from typing import Any
 
-from libs.auth.provider import SecretProvider
+from libs.utils.log import register_log_masking
+
+from .provider import SecretProvider
 
 LOG = logging.getLogger(__name__)
 
@@ -17,12 +19,16 @@ class Secret:
         self.provider = provider
         self._value = None
 
-    def resolve(self, sanitize: bool = False, force_refresh: bool = False) -> str:
+    def resolve(self, sanitize: bool = True, force_refresh: bool = False) -> str:
         """Fetch the actual string. Used by DB Clients right before connection."""
         if not self._value or force_refresh:
             if not self.provider:
                 raise ValueError(f"Provider not set for secret: {self.secret_id}")
             self._value = self.provider.get_secret(self.secret_id)
+
+            # Automatically register the plaintext for global log masking
+            if self._value:
+                register_log_masking(self._value)
 
         if sanitize:
             import urllib.parse
@@ -30,6 +36,13 @@ class Secret:
             self._value = urllib.parse.quote_plus(self._value)
 
         return str(self._value)
+
+    @property
+    def is_redacted(self) -> bool:
+        """Checks if this secret's value is currently protected by the global log masker."""
+        from libs.utils.log import is_masked
+
+        return self._value is not None and is_masked(self._value)
 
     def __repr__(self) -> str:
         # This shows up in debugger and logs
@@ -47,11 +60,9 @@ class RotatingSecret(Secret):
     A thread-safe wrapper for cloud secrets that supports automatic rotation via TTL.
     Ensures that credentials stay fresh without requiring application restarts.
     """
+
     def __init__(
-        self, 
-        secret_id: str, 
-        provider: Optional[Any] = None,
-        ttl_seconds: int = 3600
+        self, secret_id: str, provider: Any | None = None, ttl_seconds: int = 3600
     ):
         super().__init__(secret_id, provider)
         self.ttl = ttl_seconds
@@ -67,14 +78,18 @@ class RotatingSecret(Secret):
         now = time.time()
 
         # 1. Fast path: Use memory cache if fresh
-        if self._value and (now - self._last_fetch_time) < self.ttl and not force_refresh:
+        if (
+            self._value
+            and (now - self._last_fetch_time) < self.ttl
+            and not force_refresh
+        ):
             return super().resolve(sanitize=sanitize)
 
         # 2. Slow path: Acquire lock and refresh
         with self._lock:
             if not self._value or (now - self._last_fetch_time) >= self.ttl:
                 self._value = self.provider.get_secret(self.secret_id)
-                
+
                 # Apply Jitter to prevent synchronized API hits
                 jitter = self.ttl * 0.1
                 self._last_fetch_time = time.time() + random.uniform(-jitter, jitter)
@@ -85,5 +100,5 @@ class RotatingSecret(Secret):
     def update(self, new_value: str | dict[str, Any]) -> None:
         """Update the value in the provider and invalidate cache."""
         self.provider.update_secret(self.secret_id, new_value)
-        self._value = None # Invalidate
+        self._value = None  # Invalidate
         self._last_fetch_time = 0

@@ -1,11 +1,8 @@
 import time
 
 import polars as pl
-import structlog
 from apps.ingestion.src.core.strategies.extract import ReaderContext
 from libs.database import TypeResolver
-
-LOG = structlog.getLogger(__name__)
 
 
 # TODO: Masking: Hash, Redact, Last_4

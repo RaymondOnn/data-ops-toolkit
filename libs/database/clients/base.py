@@ -97,3 +97,10 @@ class DBClient(ABC):
     def exists(self, identifier: str) -> bool:
         """Checks if a table or artifact exists."""
         raise NotImplementedError()
+
+    @abstractmethod
+    def copy_from_file(
+        self, table: str, source_dir: str, file_ext: str = "parquet"
+    ) -> None:
+        """Default file copy method, can be overridden by databases with native support."""
+        raise NotImplementedError("Subclasses must implement this method")

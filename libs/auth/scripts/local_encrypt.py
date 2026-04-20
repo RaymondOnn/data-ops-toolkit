@@ -1,6 +1,6 @@
-from libs.auth.provider import encrypt_local_secret
 import json
-import os
+
+from libs.auth.provider import encrypt_local_secret
 
 # 1. Generate a Key (Save this in your MASTER_KEY env var)
 # from cryptography.fernet import Fernet

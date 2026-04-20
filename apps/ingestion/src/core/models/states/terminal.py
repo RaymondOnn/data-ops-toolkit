@@ -2,15 +2,15 @@ from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-import structlog
 from apps.ingestion.src.core.models.job.status import ExecutionStatus
 from apps.ingestion.src.services.registry import ServiceRegistry
+from loguru import logger
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.job import Task
 
 
-LOG = structlog.getLogger(__name__)
+LOG = logger
 
 
 class LifecycleState(ABC):
@@ -100,7 +100,7 @@ class SuccessState(LifecycleState):
 
     def on_enter(self, data: dict[str, Any]) -> None:
         """
-        Finalizes the manifest status. 
+        Finalizes the manifest status.
         Physical cleanup is deferred to the CompleteStage.
         """
         try:
@@ -111,7 +111,7 @@ class SuccessState(LifecycleState):
                 }
             )
         except Exception as e:
-            LOG.error("Failed to update success status", error=str(e))
+            LOG.exception("Failed to update success status")
             self.job.move_to_folder("FAILED")
 
     def can_recover(self) -> bool:

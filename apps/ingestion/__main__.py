@@ -3,7 +3,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
-import structlog
 import typer
 
 # from apps.ingestion.src.cli.test import test_app
@@ -27,7 +26,6 @@ def _configure_runtime(debug: bool, dry_run: bool, ray_mode: str = "cluster") ->
     state["ray_mode"] = RayMode(ray_mode.lower())
 
     if debug:
-        structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(10))
         typer.secho("🔧 DEBUG MODE: ON", fg=typer.colors.CYAN)
 
 

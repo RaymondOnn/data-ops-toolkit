@@ -1,13 +1,14 @@
-import time
+from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import structlog
 from apps.ingestion.src.services.database.base import DatabaseSink, DatabaseSource
 from apps.ingestion.src.services.factory import ServiceFactory
 from libs.database.clients.clickhouse import ClickhouseClient
+from loguru import logger
 
-LOG = structlog.get_logger(__name__)
+LOG = logger
 
 
 @ServiceFactory.register("clickhouse_db")
@@ -34,37 +35,65 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         self,
         source_dir: Path,
         target_table: str,
+        expected_count: int,
         file_ext: str = "parquet",
-    ) -> tuple[str, int]:
+    ) -> tuple[str, int] | None:
         name = target_table.split(".", 1)[
             -1
         ]  # Use table name as part of staging table for clarity
-        staging_table = f"stg_{name}_{int(time.time())}"
+        staging_table = (
+            f"stg_{name}_{int(datetime.now().astimezone().strftime('%Y%m%d%H%M%S'))}"
+        )
 
+        success = False
         try:
-            self.client.sql(f"CREATE TEMPORARY TABLE {staging_table} AS {target_table}")
+            # Different stages use separate sessions. Hence, TEMP Table approach not feasible.
+            tmp_sql = f"""CREATE OR REPLACE TABLE {staging_table} 
+                    ENGINE = MergeTree() 
+                    ORDER BY tuple()
+                    AS {target_table} 
+                """
+            LOG.debug(
+                "Creating staging table from target",
+                staging_table=staging_table,
+                target_table=target_table,
+            )
+            self.client.sql(tmp_sql)
 
-            # ClickHouse pulls the folder directly - no Python RAM used
-            path_pattern = source_dir / f"*.{file_ext}"
-            sql = f"""
-                INSERT INTO {staging_table} 
-                SELECT * FROM file('{path_pattern}', '{file_ext}')
-            """
+            self.client.copy_from_file(
+                table=staging_table,
+                source_dir=str(source_dir),
+                file_ext=file_ext
+            )
+            rows_staged = self.get_row_count(staging_table)
 
-            self.client.sql(sql)
-            res = self.client.sql(f"SELECT COUNT(*) FROM {staging_table}")
-            rows_staged = int(res[0][0]) if res and res[0] else 0
             LOG.info(
                 "Staged data to ClickHouse",
                 table=staging_table,
                 rows=rows_staged,
             )
+
+            if rows_staged != expected_count:
+                raise ValueError(
+                    f"Row count mismatch after staging. "
+                    f"Expected {expected_count}, got {rows_staged}."
+                )
+
+            success = True
             return staging_table, rows_staged
 
-        except Exception:
-            # Cleanup staging on failure to prevent orphan temp tables
-            self.client.sql(f"DROP TABLE IF EXISTS {staging_table}")
-            raise
+        except Exception as exc:
+            LOG.exception("Error during staging data to ClickHouse")
+            raise exc
+        finally:
+            # CRITICAL: Only drop on failure.
+            # On success, the table must persist for the PublishStage to find it.
+            if not success:
+                drop_sql = f"DROP TABLE IF EXISTS {staging_table}"
+                self.client.sql(drop_sql)
+                LOG.warning(
+                    "Staging failed. Cleaned up table {table}", table=staging_table
+                )
 
     def promote_data(
         self,
@@ -72,6 +101,7 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         target_table: str,
         partition_col: str,
         partition_val: str,
+        expected_count: int,
     ) -> None:
         """
         Atomic metadata swap.
@@ -83,29 +113,63 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         staging_schema = self.client.sql(f"DESCRIBE TABLE {staging_table}")
 
         LOG.info(
-            "Promotion Schema Audit",
+            "Auditing schemas before promotion",
             target=target_table,
             target_columns=[row[0] for row in target_schema],
             staging=staging_table,
             staging_columns=[row[0] for row in staging_schema],
         )
 
-        delete_sql = (
-            f"DELETE FROM {target_table} WHERE {partition_col} = '{partition_val}'"
-        )
-        insert_sql = f"INSERT INTO {target_table} SELECT * FROM {staging_table}"
-
+        success = False
         try:
+            delete_sql = (
+                f"DELETE FROM {target_table} WHERE {partition_col} = '{partition_val}'"
+            )
             self.client.sql(delete_sql)
+            LOG.debug(
+                "Deleted existing partition from target table",
+                table=target_table,
+                partition_col=partition_col,
+                partition_val=partition_val,
+                sql=delete_sql,
+            )
+
+            insert_sql = f"INSERT INTO {target_table} SELECT * FROM {staging_table}"
             self.client.sql(insert_sql)
-        finally:
             LOG.info(
-                "Promoted partition",
+                "Promoted data to ClickHouse",
                 table=target_table,
                 partition=partition_val,
+                sql=insert_sql,
             )
+
+            rows_promoted = self.get_row_count(target_table)
+            if rows_promoted != expected_count:
+                raise ValueError(
+                    f"Row count mismatch after promotion. Expected {expected_count}, got {rows_promoted}."
+                )
+
+            LOG.success(
+                "Promoted {partition_col}={partition_val} to {table}",
+                table=target_table,
+                partition_col=partition_col,
+                partition_val=partition_val,
+            )
+            success = True
+
+        except Exception:
+            LOG.exception("Error during promotion to ClickHouse")
+            raise
+        finally:
             # Always drop the staging table after the swap attempt
-            self.client.sql(f"DROP TABLE IF EXISTS {staging_table}")
+            if success:
+                drop_sql = f"DROP TABLE IF EXISTS {staging_table}"
+                self.client.sql(drop_sql)
+                LOG.info(
+                    "Promotion successful. Cleaning up staging table.",
+                    staging_table=staging_table,
+                    sql=drop_sql,
+                )
 
     def is_equal(
         self,
@@ -136,9 +200,19 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
 
     def clone(self, reference: str, other: str) -> None:
         sql = f"""
-            CREATE TEMPORARY TABLE {other} ENGINE = MergeTree() AS 
-            SELECT * FROM {reference}
-            WHERE 1 = 0
+            CREATE TEMPORARY TABLE {other} 
+            ENGINE = MergeTree() AS 
+                SELECT * FROM {reference}
+                WHERE 1 = 0
         """
         LOG.info("Cloning table structure", source=reference, destination=other)
         self.client.sql(sql)
+
+    def get_row_count(self, table_name: str) -> int:
+        """Returns the total row count for a specified table."""
+        res = self.client.sql(f"SELECT COUNT(*) FROM {table_name}")
+        return int(res[0][0]) if res and res[0] else 0
+
+    def fetch(self, query: str) -> list[Sequence[Any]]:
+        """Proxy to the client's sql method for standard DB access."""
+        return self.client.sql(query)

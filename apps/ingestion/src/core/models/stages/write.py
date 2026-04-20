@@ -2,10 +2,10 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 import msgspec
-import structlog
 from apps.ingestion.src.core.models.job.manifest import WritePayload
-from apps.ingestion.src.core.strategies.load.load import Loader
+from apps.ingestion.src.core.strategies.load.load import LoadContext, Loader
 from apps.ingestion.src.services.factory import ServiceFactory
+from loguru import logger
 
 from .base import ExecutionStage
 from .enums import StageName
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from apps.ingestion.src.core.models.job import Task
 
 
-LOG = structlog.getLogger(__name__)
+LOG = logger
 
 
 class WriteStage(ExecutionStage):
@@ -31,6 +31,11 @@ class WriteStage(ExecutionStage):
     def execute(self, task: "Task") -> str:
         start_ts = datetime.now().astimezone().isoformat()
         task_ctx = task.context
+        transform_meta = task.manifest.transform
+        if not transform_meta:
+            raise ValueError(
+                "Transform metadata is required in the manifest for the WRITE stage."
+            )
 
         try:
             # 1. Resolve logical input (The partitioned parquet files)
@@ -43,7 +48,7 @@ class WriteStage(ExecutionStage):
                 )
 
             LOG.info(
-                "Starting load",
+                "Starting load into {target}",
                 stage=self.name,
                 sink_type=task_ctx.load.sink_type,
                 target=task_ctx.load.sink_identifier,
@@ -52,13 +57,19 @@ class WriteStage(ExecutionStage):
             # 2. Get the behavioral Strategy
             loader = Loader()
 
+            # 3. Create Context
+            context = LoadContext(
+                sink_identifier=task_ctx.load.sink_identifier,
+                partition_col=task_ctx.load.partition_col,
+                partition_value=task_ctx.load.partition_value,
+                expected_count=transform_meta.output_row_count or 0,
+            )
+
             # 2. PHASE 1: LOAD TO STAGING
             staging_artifact, rows_loaded = loader.load(
                 service=self.service,
                 source_dir=source_dir,
-                target_table=task_ctx.load.sink_identifier,
-                partition_col=task_ctx.load.partition_col,
-                partition_val=task_ctx.load.partition_value,
+                load_ctx=context,
             )
 
             # 3. Finalize Manifest
@@ -83,5 +94,4 @@ class WriteStage(ExecutionStage):
 
         except Exception as exc:
             self.finalize(task, exception=exc)
-            raise
-
+            raise exc

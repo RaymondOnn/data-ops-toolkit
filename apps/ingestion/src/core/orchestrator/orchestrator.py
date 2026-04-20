@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import msgspec
-import structlog
 from apps.ingestion.src.core.contexts import TaskContextBuilder
 from apps.ingestion.src.core.models.job import ExecutionStatus, Task
 from apps.ingestion.src.core.models.stages.enums import StageName
@@ -18,6 +17,7 @@ from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 from libs.resilience.heartbeat import Heartbeat
 from libs.utils.system import get_disk_usage, get_system_vitals
+from loguru import logger
 from nanoid import generate
 
 from .engine import IngestionEngine
@@ -30,7 +30,7 @@ from .trigger import FileTriggerEvent, TimeTriggerEvent, TriggerEvent
 if TYPE_CHECKING:
     from .enums import TaskMetadata
 
-LOG = structlog.getLogger(__name__)
+LOG = logger
 
 DEFAULT_SYNC_TIMEOUT_SECS = 1800  # 1 Hour default
 INTERVAL_HEARTBEAT_SECS = 30
@@ -56,6 +56,8 @@ def generate_run_id() -> str:
 # TODO: Regression Testing
 # TODO: Feature Toggles
 # TODO: Cancel Task
+# TODO: Dynamic Stage Order (e.g. Archive before Write)
+
 
 
 class Orchestrator:
@@ -76,6 +78,12 @@ class Orchestrator:
         ServiceFactory.get_provider(self.exec_ctx.env, self.exec_ctx.provider_config)
         self.db_service = ServiceFactory.get_service(service_name, **db_config)
         self.state_store = StateStore(self.db_service, self.exec_ctx)
+
+        # Logic to register initial sensitive values (e.g. DB passwords)
+        from libs.utils.log import register_log_masking
+
+        if "password" in db_config:
+            register_log_masking([db_config["password"]])
 
         # Initialize background scheduler
         # We limit max_workers to reduce DB contention and prevent thundering herd issues
@@ -178,11 +186,18 @@ class Orchestrator:
         )
 
         self.scheduler.start()
-        LOG.info("Background scheduler started")
+        # Trigger initial poll immediately so we don't wait for the first interval
+        self._poll_and_evaluate()
+        LOG.info(
+            "Background scheduler started",
+            env=self.exec_ctx.env,
+            timezone=self.exec_ctx.timezone,
+        )
 
         try:
             while True:
                 self.signals._process_worker_signals()
+                # self._drive_engine()
                 # Small sleep to prevent 100% CPU usage
                 time.sleep(1)
         except KeyboardInterrupt:
@@ -204,21 +219,32 @@ class Orchestrator:
     def _poll_and_evaluate(self) -> None:
         """Polls the DB view and evaluates triggers."""
         if self.exec_ctx.always_on:
+            # Clear builder cache to pick up any manual config changes during this poll
+            self.builder._settings_cache.clear()
             active_definitions = self.state_store.get_latest_state(force_refresh=True)
             self._evaluate_triggers(list(active_definitions.values()))
 
     def _drive_engine(self) -> None:
         """Drives the ingestion engine queues."""
+        # Only drive the engine if there are actually tasks in the queue.
+        # DiskCache len() is an O(1) operation.
+        if self.engine.cache.is_empty():
+            return
+
         self.engine._process_jobs()
 
     def _perform_maintenance(self) -> None:
         """Performs scheduled recovery and expiry sweeps."""
         try:
+            # Skip recovery and expiry logic if no active records are tracked.
+            if not self.state_store.active_records:
+                return
+
             self.engine.scan_and_recover()
             self.lifecycle.handle_recovery()
             self.lifecycle.handle_expiry()
-        except Exception as e:
-            LOG.error("Maintenance sweep failed", error=str(e))
+        except Exception:
+            LOG.exception("Maintenance sweep failed")
 
     def _run_synchronous_task(
         self,
@@ -389,11 +415,15 @@ class Orchestrator:
                 LOG.info(
                     "Trigger condition met",
                     job_id=record.JOB_ID,
+                    dataset_id=record.DATASET_ID,
+                    partition_date=record.PARTITION_DATE,
+                    scheduled_time=record.SCHEDULED_TIMESTAMP.isoformat(),
                     trigger=trigger_type,
                 )
                 self._trigger_job(
                     job_id=record.JOB_ID,
                     dataset_id=record.DATASET_ID,
+                    partition_date_str=record.PARTITION_DATE,
                 )
 
     def stop(self) -> None:
@@ -411,10 +441,9 @@ class Orchestrator:
         overrides: dict[str, Any] | None = None,
     ) -> set[str]:
 
-        log = LOG.bind(job_id=job_id, dataset_id=dataset_id)
         run_ids = set()
 
-        log.debug("Building task contexts", partition_date=partition_date_str)
+        LOG.debug("Building task contexts", partition_date=partition_date_str)
         # 1. Get the list of dataset configurations for this Task ID
         # Uses the injected builder which already has app_settings loaded
         task_contexts = self.builder.build(
@@ -427,6 +456,7 @@ class Orchestrator:
         for task_ctx in task_contexts:
             # B. Generate the Unique Identity for this Run
             run_id = generate_run_id()
+            log = LOG.bind(run_id=run_id, job_id=job_id, dataset_id=dataset_id)
             identifier = self.exec_ctx.get_task_identifier(
                 job_id=task_ctx.job_id,
                 dataset_id=task_ctx.dataset_id,

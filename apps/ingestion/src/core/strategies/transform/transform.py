@@ -1,12 +1,12 @@
 from typing import Any, ClassVar
 
 import polars as pl
-import structlog
+from loguru import logger
 
 from .base import TransformContext, Transformer
 from .factory import TransformFactory
 
-LOG = structlog.getLogger(__name__)
+LOG = logger
 
 
 @TransformFactory.register("skip")

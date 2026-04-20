@@ -1,5 +1,4 @@
-from enum import Enum, auto
-from typing import ClassVar
+from enum import Enum
 
 import polars as pl
 
@@ -73,7 +72,7 @@ class TypeResolver:
         Factory method to convert a DB-specific string to a TypeGroup.
         """
         # Clean the input (e.g., 'varchar(255)' -> 'varchar')
-        base_type = raw_type.split("(")[0].lower().strip()
+        base_type = raw_type.split("(", maxsplit=1)[0].lower().strip()
         
         provider_map = cls._MAPS.get(provider.lower())
         if not provider_map:

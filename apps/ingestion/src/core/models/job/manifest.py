@@ -2,11 +2,8 @@ from datetime import datetime
 from typing import Any
 
 import msgspec
-import structlog
 from apps.ingestion.src.core.models.job.status import ExecutionStatus
 from msgspec import field
-
-LOG = structlog.getLogger(__name__)
 
 
 class FileInfo(msgspec.Struct):
@@ -40,7 +37,7 @@ class BasePayload(msgspec.Struct, kw_only=True):
 
 
 class ExtractPayload(msgspec.Struct, kw_only=True):
-    file_count: int = 0 # Number of files detected
+    file_count: int = 0  # Number of files detected
     files: list[FileInfo] = []  # List of file metadata
     artifact_folder: str = ""
     source_row_count: int = 0  # Number of rows detected
@@ -144,4 +141,3 @@ __sll__ = [
     ErrorPayload,
     TaskManifest,
 ]
-

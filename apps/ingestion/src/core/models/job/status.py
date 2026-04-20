@@ -35,3 +35,7 @@ class ExecutionStatus(StrEnum):
     @classmethod
     def terminal_statuses(cls) -> set["ExecutionStatus"]:
         return {cls.SUCCESS, cls.FAILED, cls.CANCELLED}
+
+    @classmethod
+    def dispatched_statuses(cls) -> set["ExecutionStatus"]:
+        return {cls.PROVISIONING, cls.RUNNING}

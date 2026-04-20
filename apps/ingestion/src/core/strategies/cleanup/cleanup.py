@@ -1,10 +1,9 @@
 from abc import ABC, abstractmethod
 
-import structlog
-
 from apps.ingestion.src.core.contexts.job import TaskContext
+from loguru import logger
 
-LOG = structlog.get_logger(__name__)
+LOG = logger
 
 
 # delete / move / keep

@@ -1,22 +1,38 @@
 # Stage 1: Use uv to prepare dependencies in a separate build stage
-FROM ghcr.io/astral-sh/uv:latest AS builder
+FROM python:3.12-slim AS builder
+
+# Copy the uv binary from the official image into a shell-enabled environment
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # Install croniter into a specific target directory
 # This avoids needing a virtualenv inside the ClickHouse image
-RUN uv pip install --no-cache --target /packages croniter
+RUN uv pip install --no-cache --target /packages croniter && \
+    find /packages -name "__pycache__" -type d -exec rm -rf {} + && \
+    find /packages -name "*.pyc" -delete && \
+    find /packages -name "*.dist-info" -type d -exec rm -rf {} +
 
 # Stage 2: Final ClickHouse image
 FROM clickhouse/clickhouse-server:latest
 
+# Suppress Python from writing pyc files and buffering logs
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/usr/local/lib/python3.12/dist-packages
+
 # Install only the minimal Python runtime (no pip, no build tools)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends python3-minimal && \
+    apt-get purge -y --auto-remove && \
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* /usr/share/doc/* /usr/share/man/*
 
 # Copy the pre-installed packages from the builder stage
 # We target dist-packages which is a standard path for Debian/Ubuntu
 COPY --from=builder /packages /usr/local/lib/python3.12/dist-packages/
 
-# Set PYTHONPATH so ClickHouse UDFs can find the libraries
-ENV PYTHONPATH=/usr/local/lib/python3.12/dist-packages
+# Healthcheck to ensure the server is ready to accept queries
+HEALTHCHECK --interval=5s --timeout=5s --retries=5 \
+    CMD clickhouse-client \
+        --user "${CLICKHOUSE_USER:-default}" \
+        --password "${CLICKHOUSE_PASSWORD:-password}" \
+        --query "SELECT 1" || exit 1

@@ -1,3 +1,4 @@
+import fnmatch
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -7,8 +8,10 @@ from .base import KeyValueCache
 
 class DiskCache(KeyValueCache):
     """Wraps diskcache.Cache to adhere to CacheService interface."""
+
     def __init__(self, cache_path: Path, **kwargs):
         import diskcache
+
         self._cache = diskcache.Cache(str(cache_path.resolve()), **kwargs)
 
     def get(self, key: str, default: Any = None) -> Any:
@@ -23,8 +26,10 @@ class DiskCache(KeyValueCache):
     def delete(self, key: str) -> None:
         del self._cache[key]
 
-    def iterkeys(self) -> Iterable[str]:
-        yield from self._cache.iterkeys()
+    def iterkeys(self, pattern: str = "*") -> Iterable[str]:
+        for key in self._cache.iterkeys():
+            if fnmatch.fnmatch(str(key), pattern):
+                yield key
 
     def __getitem__(self, key: str) -> Any:
         return self._cache[key]
@@ -35,4 +40,8 @@ class DiskCache(KeyValueCache):
     def __contains__(self, key: str) -> bool:
         return key in self._cache
 
+    def __len__(self) -> int:
+        return len(self._cache)
 
+    def is_empty(self) -> bool:
+        return len(self._cache) == 0

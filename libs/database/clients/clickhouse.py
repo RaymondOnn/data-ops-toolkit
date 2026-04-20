@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Generator, Sequence
+from pathlib import Path
 from typing import Any
 
 import polars as pl
@@ -30,7 +31,6 @@ class ClickhouseClient(DBClient):
     def connect(self) -> Client:
         # Import inside so that Ray workers can import
         import clickhouse_connect
-
         from libs.clients.base import ClientCantConnect
 
         try:
@@ -63,6 +63,15 @@ class ClickhouseClient(DBClient):
             """
             for i in range(num_workers)
         }
+
+    def copy_from_file(
+        self, table: str, source_dir: str, file_ext: str = "parquet"
+    ) -> None:
+        with self.get_connection() as conn:
+            for file_path in Path(source_dir).glob(f"*.{file_ext}"):
+                with file_path.open("rb") as f:
+                    # Streams the binary data directly
+                    conn.raw_insert(table, f, fmt=file_path.suffix.lstrip(".").title())
 
     def sql(self, query: str) -> list[Sequence[Any]]:
         # Returns a list of tuples by default

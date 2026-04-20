@@ -1,13 +1,12 @@
 from pathlib import Path
 
 import msgspec
-import structlog
-
 from apps.ingestion.src.core.contexts import TaskContext, TaskContextBuilder
 from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.utils.constants import APP_CONFIG_ROOT
+from loguru import logger
 
-LOG = structlog.getLogger(__name__)
+LOG = logger
 
 
 def get_task_ctx(job_id: str, dataset_id: str) -> TaskContext:
@@ -115,8 +114,4 @@ def find_affected_peers(
         except Exception:
             continue
 
-    return peers
-    return peers
-    return peers
-    return peers
     return peers

@@ -2,8 +2,7 @@ import sys
 from pathlib import Path
 
 import polars as pl
-
-from apps.ingestion.src.core.strategies.load.load import Loader, WriteContext
+from apps.ingestion.src.core.strategies.load.load import LoadContext, Loader
 from apps.ingestion.src.services.database import ClickHouseService
 
 
@@ -86,7 +85,7 @@ def main():
     print(f"Partitions in staging table: {[p[0] for p in staging_parts]}")
 
     print("\n--- Step 4: Executing Loader.promote (Atomic Swap) ---")
-    write_ctx = WriteContext(
+    load_ctx = LoadContext(
         target_destination=target_table,
         partition_col="updated_at",
         partition_value="20260310",  # This should match a partition for testing
@@ -95,7 +94,7 @@ def main():
     # Note: ClickHouseService.promote_data uses 'REPLACE PARTITION' which requires specific partition ID
     # In our sample data, we have multiple days. We'll just test the mechanism.
     try:
-        loader.promote(service, staging_result, write_ctx)
+        loader.promote(service, staging_result, load_ctx)
         print("Promotion successful.")
     except Exception as e:
         print(f"Promotion failed (as expected if partition value didn't match): {e}")
@@ -108,5 +107,7 @@ def main():
 
 
 if __name__ == "__main__":
+    main()
+    main()
     main()
     main()

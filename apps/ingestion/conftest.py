@@ -1,6 +1,6 @@
-import pytest
-import os
 from pathlib import Path
+
+import pytest
 
 # Make fixtures available project-wide
 pytest_plugins = [

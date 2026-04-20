@@ -5,7 +5,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import msgspec
-import structlog
+from dateutil.relativedelta import relativedelta
+from dynaconf import Dynaconf
+from loguru import logger
+
 from apps.ingestion.src.core.contexts.execution import ExecutionContext, ExecutionMode
 from apps.ingestion.src.core.contexts.job import TaskContext
 from apps.ingestion.src.utils.constants import (
@@ -13,10 +16,8 @@ from apps.ingestion.src.utils.constants import (
     APP_CURRENT_ENV,
     DEFAULT_PARTITION_COL,
 )
-from dateutil.relativedelta import relativedelta
-from dynaconf import Dynaconf
 
-LOG = structlog.get_logger()
+LOG = logger
 APP_DEFAULT_CONFIG = APP_CONFIG_ROOT / "app.yaml"
 
 
@@ -90,6 +91,7 @@ class TaskContextBuilder:
             env=self.env,
             load_dotenv=True,
         )
+        self._settings_cache: dict[str, Dynaconf] = {}
 
         # --- DEBUG INSTRUMENTATION ---
         LOG.debug(f"DEBUG: Config Path Absolute: {Path(self.app_cfg_path).resolve()}")
@@ -272,19 +274,23 @@ class TaskContextBuilder:
 
         task_cfg_path = APP_CONFIG_ROOT / job_id / "config.yaml"
 
-        # 1. Initialize Dynaconf with job-specific overrides
-        settings_files = [task_cfg_path]
-        if overrides_json:
-            settings_files.append(overrides_json)
+        # 1. Initialize Dynaconf with job-specific overrides (cached)
+        cache_key = f"{job_id}:{overrides_json}"
+        if cache_key not in self._settings_cache:
+            settings_files = [task_cfg_path]
+            if overrides_json:
+                settings_files.append(overrides_json)
 
-        settings = Dynaconf(
-            envvar_prefix="APP",
-            argv_prefix="--APP",
-            settings_files=settings_files,
-            environments=True,
-            env=self.env,
-            load_dotenv=True,
-        )
+            self._settings_cache[cache_key] = Dynaconf(
+                envvar_prefix="APP",
+                argv_prefix="--APP",
+                settings_files=settings_files,
+                environments=True,
+                env=self.env,
+                load_dotenv=True,
+            )
+
+        settings = self._settings_cache[cache_key]
 
         # 2. Establish partition_date
         # Priority: partition_date_str > CLI --set partition_date > today
@@ -452,4 +458,5 @@ class TaskContextBuilder:
                     ctx_data.setdefault("custom_overrides", {})[key] = value
 
         # Validate via msgspec
+        return msgspec.json.decode(msgspec.json.encode(ctx_data), type=TaskContext)
         return msgspec.json.decode(msgspec.json.encode(ctx_data), type=TaskContext)

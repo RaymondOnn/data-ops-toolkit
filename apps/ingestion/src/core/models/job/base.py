@@ -6,15 +6,15 @@ from pathlib import Path
 from typing import Any, Self
 
 import msgspec
-import structlog
 from apps.ingestion.src.core.contexts import ExecutionContext, TaskContext
 from apps.ingestion.src.core.models.job.manifest import TaskManifest
 from apps.ingestion.src.core.models.job.status import ExecutionStatus
 from apps.ingestion.src.core.models.stages.base import ExecutionStage
 from apps.ingestion.src.core.models.stages.enums import StageName
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
+from loguru import logger
 
-LOG = structlog.getLogger(__name__)
+LOG = logger
 
 
 # TODO: Rename folders to include worker id?
@@ -144,6 +144,11 @@ class Task:
             return msgspec.json.decode(f.read(), type=TaskManifest)
 
     @property
+    def is_dispatched(self) -> bool:
+        """Returns True if the task has been handed off to a worker."""
+        return self.manifest.status in ExecutionStatus.dispatched_statuses()
+
+    @property
     def context(self) -> TaskContext:
         """
         Finds the config file and returns a hydrated TaskContext object.
@@ -162,7 +167,7 @@ class Task:
             with config_path.open(mode="rb") as f:
                 return msgspec.json.decode(f.read(), type=TaskContext)
         except (StopIteration, FileNotFoundError):
-            LOG.error(
+            LOG.exception(
                 "TaskContext configuration missing on disk", folder=str(self.folder)
             )
             # Return an empty/default context if appropriate for your logic
@@ -200,7 +205,11 @@ class Task:
         # If this process OOMs, Ray will catch the SIGKILL, but the
         # Orchestrator will stay alive because it is not sharing memory
         # with this code.
-        log.info("Executing stage logic", isolation_mode="RayActor")
+        log.info(
+            "Executing {stage} stage logic",
+            stage=self.stage.name,
+            isolation_mode="RayActor",
+        )
         try:
             next_stage_label = self.stage.execute(task=self)
 

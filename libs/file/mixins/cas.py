@@ -7,7 +7,6 @@ from typing import Any
 
 import fsspec
 import polars as pl
-
 from libs.file.formats import FormatFactory
 
 LOG = logging.getLogger(__name__)

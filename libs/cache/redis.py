@@ -8,15 +8,17 @@ from .base import KeyValueCache
 
 class RedisCache(KeyValueCache):
     """Wraps redis.Redis to adhere to CacheService interface with msgspec serialization."""
+
     def __init__(self, host: str, port: int, db: int = 0, **kwargs):
         import redis
+
         self._client = redis.Redis(host=host, port=port, db=db, **kwargs)
 
     def _serialize(self, value: Any) -> bytes:
         return msgspec.json.encode(value)
 
     def _deserialize(self, value: bytes | None) -> Any:
-        if value is None: 
+        if value is None:
             return None
         return msgspec.json.decode(value)
 
@@ -38,14 +40,15 @@ class RedisCache(KeyValueCache):
     def delete(self, key: str) -> None:
         self._client.delete(key)
 
-    def iterkeys(self) -> Iterable[str]:
+    def iterkeys(self, pattern: str = "*") -> Iterable[str]:
         # Using scan_iter for performance on large Redis instances
-        for key in self._client.scan_iter("*"):
+        for key in self._client.scan_iter(pattern):
             yield key.decode("utf-8")
 
     def __getitem__(self, key: str) -> Any:
         val = self.get(key)
-        if val is None: raise KeyError(key)
+        if val is None:
+            raise KeyError(key)
         return val
 
     def __setitem__(self, key: str, value: Any) -> None:
@@ -53,3 +56,9 @@ class RedisCache(KeyValueCache):
 
     def __contains__(self, key: str) -> bool:
         return bool(self._client.exists(key))
+
+    def __len__(self) -> int:
+        return self._client.dbsize()
+
+    def is_empty(self) -> bool:
+        return self._client.dbsize() == 0

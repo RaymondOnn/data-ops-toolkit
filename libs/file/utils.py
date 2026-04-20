@@ -1,6 +1,6 @@
+import logging
 import re
 from io import BytesIO
-import logging
 
 LOG = logging.getLogger(__name__)
 

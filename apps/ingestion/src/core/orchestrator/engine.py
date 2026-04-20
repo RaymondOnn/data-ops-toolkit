@@ -5,7 +5,6 @@ from typing import Any
 
 import msgspec
 import ray
-import structlog
 from apps.ingestion.src.core.contexts import ExecutionContext, RayMode
 from apps.ingestion.src.core.models.job import ExecutionStatus, Task, TaskManifest
 from apps.ingestion.src.core.models.stages.enums import EXEC_STAGES, StageName
@@ -17,11 +16,12 @@ from apps.ingestion.src.utils.dates import epoch_to_iso, get_end_of_day_ts
 from filelock import FileLock
 from libs.cache.utils import get_cache
 from libs.utils.log import setup_logging
+from loguru import logger
 from tenacity import Retrying, stop_after_attempt, wait_exponential
 
 from .enums import TaskMetadata
 
-LOG = structlog.getLogger(__name__)
+LOG = logger
 IO_POOL_SIZE = 15
 CPU_POOL_SIZE = 4
 
@@ -44,9 +44,14 @@ class Worker:
         self.lock = FileLock(self.exec_ctx.lock_file)
 
         # Initialize logging for the worker process.
-        # Using 'platform.jsonl' for workers as they are shared across runs.
+        # Reset loguru to clear Ray's inherited handlers and apply local config
+        logger.remove()
         log_dir = self.exec_ctx.workspace_dir / "logs"
-        setup_logging(log_dir=log_dir, is_prod=self.exec_ctx.is_prod())
+        setup_logging(
+            log_dir=log_dir,
+            is_prod=self.exec_ctx.is_prod(),
+            is_debug=self.exec_ctx.is_debug(),
+        )
         self.is_busy = False
 
     def process_stage(self, key: str) -> None:
@@ -55,25 +60,31 @@ class Worker:
             wait=wait_exponential(multiplier=1, min=4, max=10),
             reraise=True,
         ):
-            with attempt:
+            with attempt, logger.contextualize(run_id=key.rsplit(":", maxsplit=1)[-1]):
                 current_stage, _ = key.split(":", 1)
-                log = structlog.get_logger().bind(
-                    worker_id=self.worker_id, stage=current_stage
-                )
+                log = logger.bind(worker_id=self.worker_id, stage=current_stage)
 
                 # 1. Rehydrate Task
                 with self.lock:
-                    raw_meta = self.cache[key]
+                    raw_meta = self.cache.get(key)
+                    if raw_meta is None:
+                        log.warning(
+                            "Task disappeared from cache before processing", key=key
+                        )
+                        return
+
                     if not isinstance(raw_meta, TaskMetadata):
                         raise ValueError(
                             f"Invalid task metadata for key {key}: {raw_meta}"
                         )
                     meta: TaskMetadata = raw_meta
 
-                # Update status to RUNNING immediately so Engine occupancy tracking is accurate
-                with self.lock:
+                    # Update status to RUNNING immediately so Engine occupancy tracking is accurate
                     meta.status = ExecutionStatus.RUNNING.value
                     self.cache[key] = meta
+                    LOG.info(
+                        "Updating job status", job_id=meta.job_id, status=meta.status
+                    )
 
                 task: Task = Task(
                     composite_key=f"{meta.job_id}:{meta.dataset_id}",
@@ -83,11 +94,13 @@ class Worker:
                     exec_ctx=self.exec_ctx,
                     target_stage=current_stage,
                 )
+
                 self.is_busy = True
                 log.info(
-                    "Worker started processing stage",
+                    "Worker started processing {current_stage} stage",
                     run_id=meta.run_id,
                     job_id=meta.job_id,
+                    current_stage=current_stage,
                 )
 
                 # Ensure the job's workspace is fully provisioned before check-in
@@ -119,8 +132,10 @@ class Worker:
                         subprocess.run(cmd, env=env, check=True)
                         return
                     except subprocess.CalledProcessError as e:
-                        log.error("PEX process failed", exit_code=e.returncode)
-                        raise e
+                        log.error(
+                            "PEX process failed, falling back to direct execution",
+                            exit_code=e.returncode,
+                        )
 
                 try:
                     # 2. OPTION B: Direct Import Execution (Dev/Fallback Mode)
@@ -148,15 +163,18 @@ class Worker:
                                 new_key = f"{next_stage}:{identifier}:{meta.run_id}"
                                 self.cache[new_key] = meta
                                 log.info(
-                                    "Step complete. Progressing.", next_stage=next_stage
+                                    "'{current_stage}' Step complete. "
+                                    "Progressing to {next_stage}...",
+                                    current_stage=current_stage,
+                                    next_stage=next_stage,
                                 )
                             else:
                                 # Task fully reached SUCCESS/FINISH
                                 log.info("Task fully completed.")
                                 self.cache.pop(f"active_run:{identifier}", None)
 
-                except Exception as e:
-                    log.error("Task stage reached terminal failure/hold", error=str(e))
+                except Exception:
+                    log.exception("Task stage reached terminal failure/hold")
                     with self.lock:
                         # For terminal failures, we remove the key from the active cache.
                         # The folder structure (HOLD/FAILED) becomes the source of truth.
@@ -211,13 +229,22 @@ class IngestionEngine:
 
         try:
             self.exec_ctx.check_serializability()
-            # Initialize specialized pools
-            self.io_pool: list[ray.actor.ActorHandle] = [
-                Worker.remote(f"io_{i}", self.exec_ctx) for i in range(IO_POOL_SIZE)  # type: ignore
-            ]
-            self.cpu_pool: list[ray.actor.ActorHandle] = [
-                Worker.remote(f"cpu_{i}", self.exec_ctx) for i in range(CPU_POOL_SIZE)  # type: ignore
-            ]
+            # Initialize specialized pools and track worker IDs locally for logging
+            self.worker_map: dict[ray.actor.ActorHandle, str] = {}
+            self.io_pool: list[ray.actor.ActorHandle] = []
+            self.cpu_pool: list[ray.actor.ActorHandle] = []
+
+            for i in range(IO_POOL_SIZE):
+                w_id = f"io_{i}"
+                handle = Worker.remote(w_id, self.exec_ctx)
+                self.io_pool.append(handle)
+                self.worker_map[handle] = w_id
+
+            for i in range(CPU_POOL_SIZE):
+                w_id = f"cpu_{i}"
+                handle = Worker.remote(w_id, self.exec_ctx)
+                self.cpu_pool.append(handle)
+                self.worker_map[handle] = w_id
         except Exception as e:
             # If the context is not serializable, we cannot proceed with Ray workers.
             # Log the error and raise an exception to prevent silent failures.
@@ -286,30 +313,55 @@ class IngestionEngine:
             )
 
     def _process_jobs(self) -> None:
-        # 1. Calculate current occupancy per stage
-        # We count how many keys per prefix have status 'RUNNING'
+        # 1. Calculate current occupancy for all stages
         current_occupancy = self._get_current_occupancy()
 
-        with self.lock:
-            # We take a snapshot of keys to avoid 'dict changed size' during iteration
-            for key in list(self.cache.iterkeys()):
-                if not isinstance(key, str) or ":" not in key:
-                    continue
+        # 2. Snapshot pool availability to exit early if entire pools are full
+        pool_status = {
+            "io": self._get_idle_worker_from_pool(self.io_pool) is not None,
+            "cpu": self._get_idle_worker_from_pool(self.cpu_pool) is not None,
+        }
 
-                # Convert the string label from the cache key to a ExecutionStage enum
-                stage_label = key.split(":", 1)[0]
-                try:
-                    stage_enum = StageName[stage_label.upper()]
-                except (KeyError, ValueError):
-                    continue
+        # Take a snapshot of keys starting with valid stages to iterate without holding the lock
+        for key in self._get_all_keys():
+            # If both pools are full, stop processing immediately
+            if not any(pool_status.values()):
+                LOG.debug("Both pools are full, stopping processing")
+                break
 
-                if stage_enum not in self.stage_limits:
-                    continue
+            # Convert the string label from the cache key to a ExecutionStage enum
+            stage_label = key.split(":", 1)[0]
+            stage_enum = StageName.from_label(stage_label)
+            if stage_enum not in self.stage_limits:
+                continue
 
-                raw_meta = self.cache[key]
-                if not isinstance(raw_meta, TaskMetadata):
+            limit = self.stage_limits[stage_enum]["limit"]
+            pool_type = self.stage_limits[stage_enum]["pool"]
+
+            # Respect both the stage-specific "dedicated" limit and pool availability
+            if current_occupancy[stage_enum] >= limit or not pool_status[pool_type]:
+                LOG.debug(
+                    "Stage limit reached or pool exhausted, skipping",
+                    stage=stage_enum,
+                    occupancy=current_occupancy[stage_enum],
+                    limit=limit,
+                    pool_status=pool_status[pool_type],
+                )
+                continue
+
+            # Only lock when we have a potential candidate to update
+            with self.lock:
+                task_meta = self.cache.get(key)
+                if (
+                    not isinstance(task_meta, TaskMetadata)
+                    or task_meta.status != ExecutionStatus.PENDING.value
+                ):
+                    LOG.debug(
+                        "Task not pending, skipping",
+                        job_id=task_meta.job_id,
+                        status=task_meta.status,
+                    )
                     continue
-                task_meta: TaskMetadata = raw_meta
 
                 if task_meta.status == ExecutionStatus.PENDING.value:
                     # --- BACKPRESSURE LOGIC ---
@@ -322,49 +374,62 @@ class IngestionEngine:
                         )
                         continue
 
-                    limit = self.stage_limits[stage_enum]["limit"]
-                    # 2. Check if the specific stage has room
-                    if current_occupancy[stage_enum] < limit:
-                        # 2. Select the correct Worker Pool
-                        # 3. Find a free Ray worker
-                        pool = (
-                            self.cpu_pool
-                            if self.stage_limits[stage_enum]["pool"] == "cpu"
-                            else self.io_pool
+                    # 2. Select the correct Worker Pool
+                    # 3. Find a free Ray worker
+                    pool = (
+                        self.cpu_pool
+                        if self.stage_limits[stage_enum]["pool"] == "cpu"
+                        else self.io_pool
+                    )
+                    if worker := self._get_idle_worker_from_pool(pool):
+                        LOG.success(
+                            "Dispatching task to worker",
+                            job_id=task_meta.job_id,
+                            dataset_id=task_meta.dataset_id,
+                            partition_date=task_meta.partition_date,
+                            run_id=task_meta.run_id,
+                            stage=stage_enum,
+                            worker_id=self.worker_map.get(worker, "unknown"),
                         )
-                        if worker := self._get_idle_worker_from_pool(pool):
-                            task_meta.status = ExecutionStatus.PROVISIONING.value
-                            task_meta.last_hb = time.time()
-                            self.cache[key] = task_meta
+                        task_meta.status = ExecutionStatus.PROVISIONING.value
+                        task_meta.last_hb = time.time()
+                        self.cache[key] = task_meta
+                        LOG.info(
+                            "Updating task status",
+                            job_id=task_meta.job_id,
+                            status=task_meta.status,
+                        )
 
-                            # Update local occupancy count
-                            current_occupancy[stage_enum] += 1
+                        # Update local occupancy count
+                        current_occupancy[stage_enum] += 1
 
-                            # Dispatch non-blocking and track the reference
-                            ref = worker.process_stage.remote(key)
-                            self._active_tasks[ref] = worker
+                        # Dispatch non-blocking and track the reference
+                        ref = worker.process_stage.remote(key)
+                        self._active_tasks[ref] = worker
+                    else:
+                        # Pool is exhausted for this tick; mark it so we stop checking related stages
+                        pool_status[pool_type] = False
 
     def _get_current_occupancy(self) -> dict[StageName, int]:
         """Counts how many workers are active in each stage."""
         counts = dict.fromkeys(self.stage_limits, 0)
-        for key in list(self.cache.iterkeys()):
-            if isinstance(key, str) and ":" in key:
-                stage_label = key.split(":", 1)[0]
-                try:
-                    stage_enum = StageName[stage_label.upper()]
-                except (KeyError, ValueError):
-                    continue
-
-                if stage_enum not in self.stage_limits:
-                    continue
-
-                meta = self.cache[key]
+        for stage_enum in self.stage_limits:
+            # Only iterate over keys for specific stages to avoid full cache scans
+            for key in self.cache.iterkeys(pattern=f"{stage_enum.label}:*"):
+                meta = self.cache.get(key)
                 if (
                     isinstance(meta, TaskMetadata)
-                    and meta.status == ExecutionStatus.RUNNING.value
+                    and meta.status in ExecutionStatus.dispatched_statuses()
                 ):
                     counts[stage_enum] += 1
         return counts
+
+    def _get_all_keys(self) -> list[str]:
+        """Fetches a snapshot of all keys from the cache that correspond to valid execution stages."""
+        all_keys = []
+        for stage_label in EXEC_STAGES:
+            all_keys.extend(self.cache.iterkeys(pattern=f"{stage_label}:*"))
+        return all_keys
 
     def _get_idle_worker_from_pool(
         self, pool: list[ray.actor.ActorHandle]
@@ -377,48 +442,50 @@ class IngestionEngine:
                 num_returns=len(self._active_tasks),
             )
             for ref in ready:
+                worker = self._active_tasks.get(ref)
+                self._active_tasks.pop(ref, None)
+                worker_id = (
+                    self.worker_map.get(worker, "unknown") if worker else "unknown"
+                )
                 try:
                     # Retrieve the result to re-raise any remote exceptions
                     # into the Orchestrator's context.
                     ray.get(ref)
                 except Exception as e:
-                    LOG.error("Ray worker task failed", error=str(e))
-                self._active_tasks.pop(ref, None)
+                    # RayTaskError includes the remote traceback automatically
+                    LOG.error(
+                        "Ray worker task failed",
+                        worker_id=worker_id,
+                        error_type=type(e).__name__,
+                        error_msg=str(e),
+                    )
 
         # 2. Find a worker that isn't currently assigned a task
         busy_workers = set(self._active_tasks.values())
         for worker in pool:
             if worker not in busy_workers:
+                # LOG.debug("Found idle worker", worker=worker)
                 return worker
+
+        LOG.debug("No idle workers found")
         return None
 
     # TODO: Handle Timeouts
     def scan_and_recover(self) -> None:
         """Scans all stage queues for zombie jobs."""
         with self.lock:
-            for key in list(self.cache.iterkeys()):
+            # Iterate only over keys starting with valid stages
+            for key in self._get_all_keys():
                 key_str = key if isinstance(key, str) else key.decode("utf-8")
-                if ":" not in key_str:
-                    continue
-
                 stage_label, rest = key_str.split(":", 1)
-                try:
-                    stage_enum = StageName[stage_label.upper()]
-                except (KeyError, ValueError):
-                    continue
 
-                if stage_enum not in self.stage_limits:
-                    continue
-
-                raw_meta = self.cache[key]
-                if not isinstance(raw_meta, TaskMetadata):
-                    continue
-
-                meta: TaskMetadata = raw_meta
+                meta: TaskMetadata = self.cache.get(key)  # type: ignore
 
                 # --- ENHANCED HEARTBEAT LOGIC ---
+                # We check for zombies in any 'dispatched' state (PROVISIONING or RUNNING).
+                # This ensures we recover from Ray actor startup failures as well.
                 if (
-                    meta.status == ExecutionStatus.RUNNING.value
+                    meta.status in ExecutionStatus.dispatched_statuses()
                     and time.time() - meta.last_hb > 300
                 ):
                     # Check the 'Physical Heartbeat' (Manifest timestamp)

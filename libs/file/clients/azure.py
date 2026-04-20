@@ -2,8 +2,6 @@ import logging
 from typing import Any
 
 import fsspec
-from adlfs import AzureBlobFileSystem
-
 from libs.file.base import FileSystemClient
 
 LOG = logging.getLogger(__name__)

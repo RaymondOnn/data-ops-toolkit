@@ -4,8 +4,10 @@ from typing import ClassVar
 
 from .provider import (
     AWSSecretProvider,  # Ensure AWSSecretProvider is imported for direct instantiation
+    LocalEncryptedProvider,
+    LocalSecretProvider,
+    SecretProvider,
 )
-from .provider import LocalEncryptedProvider, LocalSecretProvider, SecretProvider
 
 LOG = logging.getLogger(__name__)
 MASTER_KEY_ENV_VAR = "MASTER_KEY"
