@@ -8,7 +8,7 @@ PASS=${CLICKHOUSE_PASSWORD:-password}
 HOST=${CH_HOST:-localhost}
 
 ch_client() {
-    clickhouse-client --host "$HOST" --user "$USER" --password "$PASS" "$@"
+    clickhouse-client --host "$HOST" --user "$USER" --password "$PASS" --multiquery "$@"
 }
 
 # 0.5 Wait for ClickHouse to be responsive
@@ -48,11 +48,11 @@ SQL_FILES=(
     "/sql/definitions/tables/meta.execution_log.sql"
     "/sql/definitions/tables/meta.job_schedules.sql"
     "/sql/definitions/tables/meta.execution_history.sql"
-    "/sql/definitions/views/meta.execution_history.sql"
-    "/sql/definitions/views/meta.error_log.sql"
-    "/sql/definitions/views/meta.current_execution.sql"
     "/sql/definitions/views/meta.current_schedules.sql"
     "/sql/definitions/views/meta.work_queue_trigger.sql"
+    "/sql/definitions/views/meta.current_execution.sql"
+    "/sql/definitions/views/meta.execution_history.sql"
+    "/sql/definitions/views/meta.error_log.sql"
     "/sql/adhoc/seed_metadata.sql"
     "/sql/definitions/tables/meta.execution_log_clone.sql"
 )
@@ -61,10 +61,10 @@ SQL_FILES=(
 # Execute SQL files in defined order
 for f in "${SQL_FILES[@]}"; do
     if [ -f "$f" ]; then
-        echo "Processing SQL file: $f"
-        ch_client -n < "$f"
+        echo "📑 Executing: $f"
+        ch_client < "$f"
     else
-        echo "⚠️ Warning: SQL file not found at $f. Skipping..."
+        echo "❌ Error: SQL file not found at $f. Verify volume mount!"
     fi
 done
 

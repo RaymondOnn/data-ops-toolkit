@@ -5,10 +5,6 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import msgspec
-from dateutil.relativedelta import relativedelta
-from dynaconf import Dynaconf
-from loguru import logger
-
 from apps.ingestion.src.core.contexts.execution import ExecutionContext, ExecutionMode
 from apps.ingestion.src.core.contexts.job import TaskContext
 from apps.ingestion.src.utils.constants import (
@@ -16,6 +12,9 @@ from apps.ingestion.src.utils.constants import (
     APP_CURRENT_ENV,
     DEFAULT_PARTITION_COL,
 )
+from dateutil.relativedelta import relativedelta
+from dynaconf import Dynaconf
+from loguru import logger
 
 LOG = logger
 APP_DEFAULT_CONFIG = APP_CONFIG_ROOT / "app.yaml"

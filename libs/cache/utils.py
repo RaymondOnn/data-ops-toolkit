@@ -1,4 +1,3 @@
-
 from pathlib import Path
 from typing import Any
 
@@ -16,11 +15,9 @@ def get_cache(workspace_dir: Path, cache_cfg: dict[str, Any]) -> KeyValueCache:
         return RedisCache(
             host=cache_cfg.get("host", "localhost"),
             port=cache_cfg.get("port", 6379),
-            db=cache_cfg.get("db", 0)
+            db=cache_cfg.get("db", 0),
         )
 
     # Default to lean mode (Diskcache)
     cache_filepath = cache_cfg.get("filepath", ".cache")
-    return DiskCache(
-        cache_path=(workspace_dir / cache_filepath).resolve()
-    )
+    return DiskCache(cache_path=(workspace_dir / cache_filepath).resolve())

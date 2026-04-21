@@ -1,7 +1,7 @@
 DROP TABLE IF EXISTS META.EXECUTION_LOG;
 CREATE TABLE META.EXECUTION_LOG (
     ROW_ID                  UInt64 DEFAULT sipHash64(toString(generateUUIDv4()))
-    , RUN_ID                Nullable(FixedString(22))
+    , RUN_ID                Nullable(FixedString(26))
     , JOB_ID                LowCardinality(String)
     , DATASET_ID            LowCardinality(String)
     , PARTITION_DATE        Nullable(Date)

@@ -10,7 +10,7 @@ SELECT
     -- Position 1: ROW_ID (Must match UInt64 type)
     sipHash64(toString(generateUUIDv4())) AS ROW_ID
     -- Position 2: RUN_ID
-    , CAST(NULL, 'Nullable(FixedString(22))') AS RUN_ID
+    , CAST(NULL, 'Nullable(FixedString(26))') AS RUN_ID
     , JOB_ID
     , DATASET_ID
     , CAST(NULL, 'Nullable(Date)') AS PARTITION_DATE

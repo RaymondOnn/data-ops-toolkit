@@ -7,19 +7,18 @@ from zoneinfo import ZoneInfo
 
 import msgspec
 import polars as pl
-from loguru import logger
-from tenacity import retry, stop_after_attempt, wait_exponential
-
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
 from apps.ingestion.src.core.contexts.job import TaskContext
 from apps.ingestion.src.core.models.job import ExecutionStatus, TaskManifest
 from apps.ingestion.src.core.orchestrator.enums import JobRecord
 from apps.ingestion.src.services.database import DatabaseSink
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
+from loguru import logger
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 LOG = logger
 SOURCE_TBL = "META.CURRENT_EXECUTION"
-DESTINATION_TBL = "META.EXECUTION_LOG_CLONE"
+DESTINATION_TBL = "META.EXECUTION_LOG"
 
 
 # TODO: Logging to Error Log? Workflow for refresh current_execution for the day
@@ -88,7 +87,11 @@ class StateStore:
             raw_records = self.db.fetch(sql)
             for r in raw_records:
                 # Convert tuple results to dictionary for named access if necessary
-                raw_dict = dict(zip(cols, r)) if isinstance(r, (tuple, list)) else r
+                raw_dict = (
+                    dict(zip(cols, r, strict=False))
+                    if isinstance(r, (tuple, list))
+                    else r
+                )
 
                 # Instantiate the structured model (Validation happens here)
                 record = msgspec.convert(raw_dict, JobRecord)
@@ -108,7 +111,7 @@ class StateStore:
                 )
 
             LOG.info("Received {count} active records", count=len(raw_records))
-        except Exception as e:
+        except Exception:
             LOG.exception("Failed to refresh active records")
             # Fallback to empty dict to avoid NoneType errors in Orchestrator loop
             self._active_records = self._active_records or {}
@@ -278,17 +281,23 @@ class StateStore:
     def _process_stage(self):
         """Iterates through stage folder and moves successful loads to archive"""
         try:
+            pending_files = list(self.stage_dir.glob("*.parquet"))
+            if not pending_files:
+                return
+
             # Load all pending Parquet files into the DB
-            self.db.stage_data(self.stage_dir, "META.EXECUTION_LOG")
-            for pq_file in self.stage_dir.glob("*.parquet"):
+            self.db.client.copy_from_file(
+                table=DESTINATION_TBL,
+                source_dir=str(self.stage_dir),
+                file_ext="parquet",
+            )
+            for pq_file in pending_files:
                 # Move to archive only on success
                 pq_file.rename(self.archive_dir / pq_file.name)
                 LOG.info("Successfully loaded and archived state", file=pq_file.name)
-        except Exception as e:
-            LOG.warning(
-                "Failed to load state files, leaving in stage for retry",
-                error=str(e),
-            )
+        except Exception:
+            LOG.exception("Failed to load state files, leaving in stage for retry")
+            raise
 
     def emit_state(
         self,
@@ -311,39 +320,39 @@ class StateStore:
         )
         record = self.active_records.get(identifier)
         record_dict = msgspec.to_builtins(record) if record else {}
+        now = datetime.now(ZoneInfo(self.exec_ctx.timezone))
 
         # Align keys with your execution_log.sql columns
         incoming_update = {
             "RUN_ID": manifest.run_id,
             "JOB_ID": manifest.job_id,
-            "SCHEDULED_TIMESTAMP": record.SCHEDULED_TIMESTAMP if record else None,
             "DATASET_ID": manifest.dataset_id,
             "PARTITION_DATE": context.partition_date,
-            "START_TIMESTAMP": (
-                manifest.start.start_timestamp_utc if manifest.start else None
-            ),
-            "END_TIMESTAMP": (
-                manifest.complete.end_timestamp_utc if manifest.complete else None
-            ),
-            "LAST_UPDATED_AT_TS": datetime.now(
-                ZoneInfo(self.exec_ctx.timezone)
-            ).isoformat(sep=" ", timespec="milliseconds"),
             "JOB_STATUS": str(metadata.get("status", manifest.status.value)).upper(),
             "CURRENT_STEP": manifest.current_stage.upper(),
             "JOB_BITMASK": manifest.bitmask,
-            "IS_SCHEDULED": record.IS_SCHEDULED if record else 0,
-            "WATCH_FILE_PATH": record.WATCH_FILE_PATH if record else None,
+            "RETRY_ATTEMPTS": manifest.retry_count,
+            "LAST_UPDATED_AT_TS": self._format_ts(now),
+            # Use helper to drill into optional nested manifest fields
+            "START_TIMESTAMP": self._format_ts(
+                getattr(manifest.start, "start_timestamp_utc", None)
+            ),
+            "END_TIMESTAMP": self._format_ts(
+                getattr(manifest.complete, "end_timestamp_utc", None)
+            ),
+            "SOURCE_ROW_COUNT": getattr(manifest.extract, "source_row_count", None),
+            "FINAL_ROW_COUNT": getattr(manifest.publish, "final_count", None),
+            # Carry over data from the Hot Cache record if it exists
+            "SCHEDULED_TIMESTAMP": self._format_ts(
+                getattr(record, "SCHEDULED_TIMESTAMP", None)
+            ),
+            "IS_SCHEDULED": getattr(record, "IS_SCHEDULED", 0),
+            "WATCH_FILE_PATH": getattr(record, "WATCH_FILE_PATH", None),
+            # Complex JSON fields
             "RUNTIME_OVERRIDES": (
                 msgspec.json.encode(context.custom_overrides).decode()
                 if context.custom_overrides
                 else None
-            ),
-            "RETRY_ATTEMPTS": manifest.retry_count,
-            "SOURCE_ROW_COUNT": (
-                manifest.extract.source_row_count if manifest.extract else None
-            ),
-            "FINAL_ROW_COUNT": (
-                manifest.publish.final_count if manifest.publish else None
             ),
             "FINAL_MANIFEST": (
                 msgspec.json.encode(manifest).decode() if deep_sync else None
@@ -362,3 +371,17 @@ class StateStore:
         line = msgspec.json.encode(event) + b"\n"
         with self.stream_path.open("ab") as f:
             f.write(line)
+
+    def _format_ts(self, ts: Any) -> str | None:
+        """
+        Converts various timestamp formats into a ClickHouse-friendly
+        DateTime64(3) string: 'YYYY-MM-DD HH:mm:ss.SSS'
+        """
+        if not ts:
+            return None
+        if isinstance(ts, str):
+            try:
+                ts = datetime.fromisoformat(ts)
+            except ValueError:
+                return ts
+        return ts.replace(tzinfo=None).isoformat(sep=" ", timespec="milliseconds")

@@ -26,7 +26,7 @@ IO_POOL_SIZE = 15
 CPU_POOL_SIZE = 4
 
 
-@ray.remote
+@ray.remote(max_restarts=3, max_task_retries=1)
 class Worker:
     def __init__(self, worker_id: str, exec_ctx: ExecutionContext):
         self.worker_id = worker_id
@@ -55,64 +55,58 @@ class Worker:
         self.is_busy = False
 
     def process_stage(self, key: str) -> None:
-        for attempt in Retrying(
-            stop=stop_after_attempt(3),
-            wait=wait_exponential(multiplier=1, min=4, max=10),
-            reraise=True,
-        ):
-            with attempt, logger.contextualize(run_id=key.rsplit(":", maxsplit=1)[-1]):
-                current_stage, _ = key.split(":", 1)
-                log = logger.bind(worker_id=self.worker_id, stage=current_stage)
+        run_id = key.rsplit(":", maxsplit=1)[-1]
+        current_stage, identifier = key.split(":", 1)
+        log = logger.bind(worker_id=self.worker_id, stage=current_stage, run_id=run_id)
 
-                # 1. Rehydrate Task
-                with self.lock:
-                    raw_meta = self.cache.get(key)
-                    if raw_meta is None:
-                        log.warning(
-                            "Task disappeared from cache before processing", key=key
+        try:
+            for attempt in Retrying(
+                stop=stop_after_attempt(3),
+                wait=wait_exponential(multiplier=1, min=4, max=10),
+                reraise=True,
+            ):
+                with attempt, logger.contextualize(run_id=run_id):
+                    # 1. Rehydrate Task
+                    with self.lock:
+                        # Update status to RUNNING immediately so Engine occupancy tracking is accurate
+                        meta: TaskMetadata = self.cache.get(key)
+                        meta.status = ExecutionStatus.RUNNING.value
+                        meta.last_hb = time.time()
+                        self.cache[key] = meta
+
+                        LOG.info(
+                            "Updating job status",
+                            job_id=meta.job_id,
+                            run_id=meta.run_id,
+                            status=meta.status,
                         )
-                        return
 
-                    if not isinstance(raw_meta, TaskMetadata):
-                        raise ValueError(
-                            f"Invalid task metadata for key {key}: {raw_meta}"
-                        )
-                    meta: TaskMetadata = raw_meta
-
-                    # Update status to RUNNING immediately so Engine occupancy tracking is accurate
-                    meta.status = ExecutionStatus.RUNNING.value
-                    self.cache[key] = meta
-                    LOG.info(
-                        "Updating job status", job_id=meta.job_id, status=meta.status
+                    task: Task = Task(
+                        composite_key=f"{meta.job_id}:{meta.dataset_id}",
+                        run_id=meta.run_id,
+                        partition_date=meta.partition_date,
+                        worker_id=self.worker_id,
+                        exec_ctx=self.exec_ctx,
+                        target_stage=current_stage,
                     )
 
-                task: Task = Task(
-                    composite_key=f"{meta.job_id}:{meta.dataset_id}",
-                    run_id=meta.run_id,
-                    partition_date=meta.partition_date,
-                    worker_id=self.worker_id,
-                    exec_ctx=self.exec_ctx,
-                    target_stage=current_stage,
-                )
-
-                self.is_busy = True
-                log.info(
-                    "Worker started processing {current_stage} stage",
-                    run_id=meta.run_id,
-                    job_id=meta.job_id,
-                    current_stage=current_stage,
-                )
-
-                # Ensure the job's workspace is fully provisioned before check-in
-                _ = task.folder
-
-                # 1. OPTION A: Isolated Execution via PEX (Production Mode)
-                if self.exec_ctx.code_pex_path and self.exec_ctx.code_pex_path.exists():
+                    self.is_busy = True
                     log.info(
-                        "Launching isolated PEX process",
-                        pex=str(self.exec_ctx.code_pex_path),
+                        "Worker started processing {current_stage} stage",
+                        run_id=meta.run_id,
+                        job_id=meta.job_id,
+                        current_stage=current_stage,
                     )
-                    try:
+
+                    # 1. OPTION A: Isolated Execution via PEX (Production Mode)
+                    if (
+                        self.exec_ctx.code_pex_path
+                        and self.exec_ctx.code_pex_path.exists()
+                    ):
+                        log.info(
+                            "Launching isolated PEX process",
+                            pex=str(self.exec_ctx.code_pex_path),
+                        )
                         env = os.environ.copy()
                         if self.exec_ctx.deps_pex_path:
                             env["PEX_PATH"] = str(self.exec_ctx.deps_pex_path)
@@ -130,26 +124,13 @@ class Worker:
                             current_stage,
                         ]
                         subprocess.run(cmd, env=env, check=True)
-                        return
-                    except subprocess.CalledProcessError as e:
-                        log.error(
-                            "PEX process failed, falling back to direct execution",
-                            exit_code=e.returncode,
-                        )
+                    else:
+                        # 2. OPTION B: Direct Import Execution (Dev/Fallback Mode)
+                        task.check_in(current_stage)
+                        task.stage.pre_flight(task)
+                        next_stage = task.execute()
 
-                try:
-                    # 2. OPTION B: Direct Import Execution (Dev/Fallback Mode)
-                    task.check_in(current_stage)
-                    task.stage.pre_flight(task)
-                    next_stage = task.execute()
-
-                    # 4. Atomic Handoff
-                    identifier = self.exec_ctx.get_task_identifier(
-                        job_id=meta.job_id,
-                        dataset_id=meta.dataset_id,
-                        partition_date=meta.partition_date,
-                    )
-
+                    # 4. Success Handoff
                     with self.lock:
                         # Every execution ends the "Current" stage lease.
                         # We pop it regardless of what comes next.
@@ -160,8 +141,7 @@ class Worker:
                                 # Progressing to next queue
                                 meta.current_stage = next_stage
                                 meta.status = ExecutionStatus.PENDING.value
-                                new_key = f"{next_stage}:{identifier}:{meta.run_id}"
-                                self.cache[new_key] = meta
+                                self.cache[f"{next_stage}:{identifier}"] = meta
                                 log.info(
                                     "'{current_stage}' Step complete. "
                                     "Progressing to {next_stage}...",
@@ -173,17 +153,17 @@ class Worker:
                                 log.info("Task fully completed.")
                                 self.cache.pop(f"active_run:{identifier}", None)
 
-                except Exception:
-                    log.exception("Task stage reached terminal failure/hold")
-                    with self.lock:
-                        # For terminal failures, we remove the key from the active cache.
-                        # The folder structure (HOLD/FAILED) becomes the source of truth.
-                        self.cache.pop(key, None)
-                        # We keep 'active_run' key so the Orchestrator doesn't
-                        # re-trigger the same partition while a failed run is present.
-
-                finally:
-                    self.is_busy = False
+        except Exception:
+            log.exception("Task stage reached terminal failure/hold")
+            with self.lock:
+                # For terminal failures, we remove the key from the active cache.
+                # The folder structure (HOLD/FAILED) becomes the source of truth.
+                self.cache.pop(key, None)
+                # We keep 'active_run' key so the Orchestrator doesn't
+                # re-trigger the same partition while a failed run is present.
+            raise
+        finally:
+            self.is_busy = False
 
     def is_idle(self) -> bool:
         return not self.is_busy
@@ -357,8 +337,9 @@ class IngestionEngine:
                     or task_meta.status != ExecutionStatus.PENDING.value
                 ):
                     LOG.debug(
-                        "Task not pending, skipping",
+                        "Task {run_id} not pending, skipping",
                         job_id=task_meta.job_id,
+                        run_id=task_meta.run_id,
                         status=task_meta.status,
                     )
                     continue

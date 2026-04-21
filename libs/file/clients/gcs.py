@@ -1,6 +1,3 @@
-
-
-
 # class GCSClient(FileSystemClient):
 #     """
 #     Google Cloud Storage Driver.

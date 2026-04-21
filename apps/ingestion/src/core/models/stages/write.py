@@ -66,10 +66,17 @@ class WriteStage(ExecutionStage):
             )
 
             # 2. PHASE 1: LOAD TO STAGING
+            audit_values = {
+                "_partition": task_ctx.load.partition_value,
+                "_run_id": task.run_id,
+                "_source": task_ctx.extract.source_identifier,
+            }
+            print("Audit Values in WriteStage:", audit_values)
             staging_artifact, rows_loaded = loader.load(
                 service=self.service,
                 source_dir=source_dir,
                 load_ctx=context,
+                audit_values=audit_values,
             )
 
             # 3. Finalize Manifest

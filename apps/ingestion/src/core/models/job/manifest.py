@@ -128,16 +128,25 @@ class TaskManifest(msgspec.Struct, kw_only=True):
     # The "Black Box" Recorder
     error: ErrorPayload | None = None
 
+    def is_fully_populated(self) -> bool:
+        """
+        Utility method to check if all stages have their payloads filled.
+        Can be used for validation or debugging.
+        """
+        from apps.ingestion.src.core.models.stages.enums import EXEC_STAGES
 
-__sll__ = [
+        return all(getattr(self, name) for name in EXEC_STAGES)
+
+
+__all__ = [
+    "AuditPayload",
+    "CompletePayload",
+    "ErrorPayload",
+    "ExtractPayload",
     # BasePayload,
-    FileInfo,
-    ExtractPayload,
-    TransformPayload,
-    WritePayload,
-    AuditPayload,
-    PublishPayload,
-    CompletePayload,
-    ErrorPayload,
-    TaskManifest,
+    "FileInfo",
+    "PublishPayload",
+    "TaskManifest",
+    "TransformPayload",
+    "WritePayload",
 ]

@@ -11,21 +11,29 @@ job:
 datasets:
   # DATASET 1: Standard 50M row import
   orders: # dataset_id
-    partitions:
-      column: updated_at
-      units: days
-      offset: -2
-      format: "YYYY-MM-DD"
-      wrap_quotes: true
-    raw:
-      service_ref: "postgres"
-      source_identifier: "production.orders" # For API: "/v1/customers"
+    partition_date:
+      offset:
+        days: -1
+        months: 0
+        years: 0
+      format: "%Y-%m-%d"
+      wrap_quotes: false
+    extract:
+      service_ref: "postgres" # for credential lookup
       load_mode: delta # Loading Strategy: delta | snapshot 
-      params:
-        # For DatabaseReader
-        filter_sql: "status = 'COMPLETED' AND updated_at >= {{partition_date}}"
+      source_params:
+        # file source
+        type: file
+        file_pattern: "s3://bucket/path/orders_{{partition_date}}.csv"
 
-        # For APIReader
+        # Database Source
+        type: database
+        table_name: "production.orders" # For API: "/v1/customers"
+        filter_sql: "status = 'COMPLETED' AND updated_at >= {{partition_date}}"        
+
+        # API Source
+        type: api
+        endpoint: "example.com/v1/orders"        
         query_params:
           include_deleted: false
           region: "EMEA"
@@ -55,9 +63,15 @@ datasets:
       params:
 
     load:
-      service_ref: clickhouse
-      sink_identifier: "orders"
-      params:
+      service_ref: "clickhouse"
+      sink_params:
+        type: database
+        table_name: "TEST.ORDERS"
+
+        type: blob
+        folder_path: "s3://bucket/processed/orders/"
+
+      sink_identifier: TEST.ORDERS
   
     
     # audit:

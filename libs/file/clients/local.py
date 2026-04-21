@@ -24,4 +24,3 @@ class LocalClient(FileSystemClient):
         if self._fs is None:
             self._fs = fsspec.filesystem("file", **self.opts)
         return self._fs
-

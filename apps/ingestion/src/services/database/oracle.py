@@ -28,6 +28,7 @@ class OracleService(DatabaseSource, DatabaseSink):
         source_dir: Path,
         target_table: str,
         file_ext: str = "parquet",
+        audit_values: dict[str, Any] | None = None,
     ) -> tuple[str, int]:
         staging_table = f"STG_{target_table}"
 

@@ -66,7 +66,7 @@ class ExecutionStage(ABC):
             return next_stage.label
         return "FINISH"
 
-    # TODO: Bitmask, recovery path 
+    # TODO: Bitmask, recovery path
     def _rewind(self, task: "Task", target_stage: StageName) -> str:
         """
         Generalized self-healing: Rewinds the task to a previous stage.

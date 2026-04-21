@@ -3,7 +3,7 @@ CREATE VIEW META.CURRENT_EXECUTION AS
 
 -- 1. Get Scheduled slots that are DUE (Intent)
 SELECT 
-    CAST(NULL, 'Nullable(FixedString(22))') AS RUN_ID
+    CAST(NULL, 'Nullable(FixedString(26))') AS RUN_ID
     , JOB_ID
     , DATASET_ID
     , CAST(NULL, 'Nullable(Date)') AS PARTITION_DATE -- Blank from DB for schedules

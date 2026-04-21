@@ -110,7 +110,7 @@ class SuccessState(LifecycleState):
                     **data,
                 }
             )
-        except Exception as e:
+        except Exception:
             LOG.exception("Failed to update success status")
             self.job.move_to_folder("FAILED")
 

@@ -1,4 +1,6 @@
 import logging
+import time
+import uuid
 from collections.abc import Generator, Sequence
 from pathlib import Path
 from typing import Any
@@ -39,6 +41,8 @@ class ClickhouseClient(DBClient):
                 port=int(self.config.get("port", 8123)),
                 username=str(self.config.get("user")),
                 password=str(self.config.get("password")),
+                # timeout=self.config.get("timeout", 30),  # Connection timeout in seconds
+                # send_receive_timeout=self.config.get("send_receive_timeout", 300) # Data transfer timeout in seconds
             )
             self._ping(conn)
             return conn
@@ -65,13 +69,85 @@ class ClickhouseClient(DBClient):
         }
 
     def copy_from_file(
-        self, table: str, source_dir: str, file_ext: str = "parquet"
+        self,
+        table: str,
+        source_dir: str,
+        file_ext: str = "parquet",
+        audit_values: dict[str, Any] | None = None,
     ) -> None:
+        audit_values = audit_values or {}
+        files = list(Path(source_dir).glob(f"*.{file_ext}"))
+
+        if not files:
+            LOG.warning(
+                "No files found for staging",
+                extra={"source_dir": source_dir, "file_ext": file_ext},
+            )
+            return
+
+        schema_info = self.sql(f"DESCRIBE TABLE {table}")
+        all_columns = [
+            row[0].decode("utf-8") if isinstance(row[0], bytes) else str(row[0])
+            for row in schema_info
+        ]
+        # Filter columns to match the staging table (excluding audit columns)
+        column_names = [c for c in all_columns if c not in audit_values]
+
+        # 1. Create a Temporary Table with the same structure as the Parquet
+        # 'AS target_table' copies the schema; 'EXCEPT' omits the audit columns
+        unique_id = str(uuid.uuid4())[:8]
+        tmp_table = f"tmp_stage_{int(time.time())}_{unique_id}"
+        except_clause = (
+            f"EXCEPT ({', '.join(audit_values.keys())})" if audit_values else ""
+        )
+
         with self.get_connection() as conn:
-            for file_path in Path(source_dir).glob(f"*.{file_ext}"):
-                with file_path.open("rb") as f:
+            conn.command(
+                f"""
+                CREATE TEMPORARY TABLE {tmp_table} 
+                ENGINE = MergeTree()
+                ORDER BY tuple()
+                AS 
+                SELECT * {except_clause}
+                FROM {table}
+                LIMIT 0 
+            """
+            )
+
+            # 2. Bulk load the files into the Temp Table
+            for file in files:
+                with file.open("rb") as f:
                     # Streams the binary data directly
-                    conn.raw_insert(table, f, fmt=file_path.suffix.lstrip(".").title())
+                    conn.raw_insert(
+                        table=tmp_table,
+                        insert_block=f,
+                        column_names=column_names,
+                        fmt=file.suffix.lstrip(".").title(),
+                    )
+
+            # 3. Move to the Target Table with Audit Constants
+            select_clause = "*"
+            if audit_values:
+                audit_sql = ", ".join(
+                    [f"'{v}' AS {k}" for k, v in audit_values.items()]
+                )
+                select_clause = f"*, {audit_sql}"
+
+            LOG.debug(
+                "Promoting from temp stage to target",
+                extra={"table": table, "select": select_clause},
+            )
+            conn.command(
+                f"""
+                INSERT INTO {table} 
+                SELECT {select_clause}
+                FROM {tmp_table}
+            """
+            )
+            LOG.info(
+                "Successfully staged files to ClickHouse",
+                extra={"table": table, "count": len(files)},
+            )
 
     def sql(self, query: str) -> list[Sequence[Any]]:
         # Returns a list of tuples by default
@@ -88,16 +164,6 @@ class ClickhouseClient(DBClient):
             with result:
                 for pandas_df in result:
                     yield pl.from_pandas(pandas_df)
-
-    # def write_table(self, lf: pl.LazyFrame, table_name: str) -> None:
-    #     """
-    #     Uses ClickHouse native client to insert data in optimized blocks.
-    #     """
-    #     # ClickHouse drivers are highly optimized for Polars/Pandas structures.
-    #     # We stream the data to the insert method.
-    #     df = lf.collect()
-
-    #     self.connection.insert_df(table=table_name, df=df)
 
     def get_schema(self, fq_table: str) -> pl.DataFrame:
         # ClickHouse has a system.columns table we can query for schema info

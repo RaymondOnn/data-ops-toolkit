@@ -1,6 +1,6 @@
 DROP TABLE IF EXISTS META.EXECUTION_HISTORY;
 CREATE TABLE IF NOT EXISTS META.EXECUTION_HISTORY (
-    RUN_ID                  FixedString(22) -- Base62 encoded UUIDv4
+    RUN_ID                  FixedString(26) -- Base62 encoded UUIDv4
     , JOB_ID                LowCardinality(String)
     , DATASET_ID            LowCardinality(String)
     , PARTITION_DATE        Nullable(Date)

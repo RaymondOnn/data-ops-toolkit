@@ -12,7 +12,6 @@ services:
       - LOCALSTACK_HOST=localstack
     volumes:
       - ../../../sql:/sql
-      - ./clickhouse/init_databases.sh:/docker-entrypoint-initdb.d/init_databases.sh
       - ./clickhouse/clickhouse_settings.xml:/etc/clickhouse-server/config.d/clickhouse_settings.xml
       - ./clickhouse/cron_next_function.xml:/etc/clickhouse-server/cron_next_function.xml
       - ./clickhouse/udf:/var/lib/clickhouse/user_scripts

@@ -11,6 +11,7 @@ from apps.ingestion.src.core.contexts import TaskContextBuilder
 from apps.ingestion.src.core.models.job import ExecutionStatus, Task
 from apps.ingestion.src.core.models.stages.enums import StageName
 from apps.ingestion.src.services.factory import ServiceFactory
+from apps.ingestion.src.utils.common import make_short_hash
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, DISK_THRESHOLD_HALT
 from apscheduler.events import EVENT_JOB_ERROR, JobExecutionEvent
 from apscheduler.executors.pool import ThreadPoolExecutor
@@ -18,7 +19,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from libs.resilience.heartbeat import Heartbeat
 from libs.utils.system import get_disk_usage, get_system_vitals
 from loguru import logger
-from nanoid import generate
 
 from .engine import IngestionEngine
 from .enums import JobRecord, TaskMetadata
@@ -43,7 +43,7 @@ INTERVAL_RECOVERY_SWEEP_SECS = 300
 def generate_run_id() -> str:
     """Generates a unique run ID for a task."""
     timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
-    short_hash = generate(alphabet="0123456789abcdef", size=6)
+    short_hash = make_short_hash(8)
     return f"{timestamp}-{short_hash}"
 
 
@@ -57,7 +57,6 @@ def generate_run_id() -> str:
 # TODO: Feature Toggles
 # TODO: Cancel Task
 # TODO: Dynamic Stage Order (e.g. Archive before Write)
-
 
 
 class Orchestrator:

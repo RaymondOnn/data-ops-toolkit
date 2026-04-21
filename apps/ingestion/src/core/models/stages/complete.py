@@ -38,7 +38,6 @@ class CompleteStage(ExecutionStage):
         start_ts = datetime.now().astimezone().isoformat()
 
         try:
-
             # 1. OPTIONAL ARCHIVAL
             # Subject to privacy requirements defined in job_config
             final_archive_path = None

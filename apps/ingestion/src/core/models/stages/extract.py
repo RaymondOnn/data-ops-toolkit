@@ -186,7 +186,7 @@ class ExtractStage(ExecutionStage):
         except ClientCantConnect as ccc:
             LOG.exception("Halt by client connection.", stage=self.name)
             raise TaskBlocked(str(ccc)) from ccc
-        except CircuitBreakerTripped as cb:
+        except CircuitBreakerTripped:
             LOG.exception("Halt by circuit breaker.", stage=self.name)
             raise
         except Exception as e:

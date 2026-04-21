@@ -55,4 +55,3 @@ class S3Client(FileSystemClient):
                 if i == max_retries - 1:
                     raise
                 time.sleep(2**i)
-     

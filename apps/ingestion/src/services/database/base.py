@@ -99,6 +99,7 @@ class DatabaseSink(DatabaseService, Sink):
         source_dir: Path,
         target_table: str,
         file_ext: str = "parquet",
+        audit_values: dict[str, Any] | None = None,
     ) -> tuple[str, int]:
         """Phase 1: Returns the name of the temporary staging table and rows loaded."""
         pass

@@ -30,6 +30,12 @@ RUN apt-get update && \
 # We target dist-packages which is a standard path for Debian/Ubuntu
 COPY --from=builder /packages /usr/local/lib/python3.12/dist-packages/
 
+# Copy initialization scripts into the image
+# We use sed to remove potential Windows CRLF line endings and ensure it is executable
+COPY init_databases.sh /docker-entrypoint-initdb.d/init_databases.sh
+RUN sed -i 's/\r$//' /docker-entrypoint-initdb.d/init_databases.sh && \
+    chmod +x /docker-entrypoint-initdb.d/init_databases.sh
+
 # Healthcheck to ensure the server is ready to accept queries
 HEALTHCHECK --interval=5s --timeout=5s --retries=5 \
     CMD clickhouse-client \

@@ -3,6 +3,7 @@ from collections.abc import Generator, Sequence
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
+import pyarrow as pa
 import pyarrow.dataset as ds
 from libs.clients.base import ClientCantConnect
 from libs.database.clients.base import DBClient
@@ -57,13 +58,32 @@ class PostgresClient(DBClient):
         }
 
     def copy_from_file(
-        self, table: str, source_dir: str, file_ext: str = "parquet"
+        self,
+        table: str,
+        source_dir: str,
+        file_ext: str = "parquet",
+        audit_values: dict[str, Any] | None = None,
     ) -> None:
-        dataset = ds.dataset(source_dir, format=file_ext)
+        def pg_stream(dataset, target_columns, audit_values):
+            for batch in dataset.to_batches():
+                # Inject constants
+                for col, val in audit_values.items():
+                    batch = batch.append_column(col, pa.array([val] * batch.num_rows))
+
+                # KEY STEP: Reorder columns to match the DB schema exactly
+                # This prevents "column mismatch" errors if Parquet order differs from DB
+                yield batch.select(target_columns)
+
+        audit_values = audit_values or {}
+        dataset = ds.dataset(source_dir, format=file_ext.casefold())
         with self.get_connection() as conn, conn.cursor() as cur:
+            db_schema = conn.adbc_get_table_schema("target_table")
+            target_columns = db_schema.names
+
             # Stream the dataset to the table
             # 'append' ensures we don't drop existing data
-            cur.adbc_ingest(table, dataset.to_batches(), mode="append")
+            stream = pg_stream(dataset, target_columns, audit_values={})
+            cur.adbc_ingest(table, stream, mode="append")
 
     def sql(self, query: str) -> list[Sequence[Any]]:
         """

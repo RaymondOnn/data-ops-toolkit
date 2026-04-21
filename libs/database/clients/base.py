@@ -100,7 +100,11 @@ class DBClient(ABC):
 
     @abstractmethod
     def copy_from_file(
-        self, table: str, source_dir: str, file_ext: str = "parquet"
+        self,
+        table: str,
+        source_dir: str,
+        file_ext: str = "parquet",
+        audit_values: dict[str, Any] | None = None,
     ) -> None:
         """Default file copy method, can be overridden by databases with native support."""
         raise NotImplementedError("Subclasses must implement this method")

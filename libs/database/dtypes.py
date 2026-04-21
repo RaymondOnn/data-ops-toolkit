@@ -73,10 +73,10 @@ class TypeResolver:
         """
         # Clean the input (e.g., 'varchar(255)' -> 'varchar')
         base_type = raw_type.split("(", maxsplit=1)[0].lower().strip()
-        
+
         provider_map = cls._MAPS.get(provider.lower())
         if not provider_map:
-            return TypeGroup.TEXT # Default fallback
+            return TypeGroup.TEXT  # Default fallback
 
         return provider_map.get(base_type, TypeGroup.TEXT)
 

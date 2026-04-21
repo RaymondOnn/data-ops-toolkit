@@ -1,10 +1,9 @@
 import logging
 from collections.abc import Generator, Sequence
-from pathlib import Path
 from typing import Any
 
 import polars as pl
-import pyarrow.parquet as pq
+import pyarrow.dataset as ds
 from libs.database.clients.base import DBClient
 from oracledb import Connection
 
@@ -61,20 +60,41 @@ class OracleClient(DBClient):
         return set(queries)
 
     def copy_from_file(
-        self, table: str, source_dir: str, file_ext: str = "parquet"
+        self,
+        table: str,
+        source_dir: str,
+        file_ext: str = "parquet",
+        audit_values: dict[str, Any] | None = None,
     ) -> None:
-        with self.get_connection() as conn, conn.cursor() as cur:
-            for file_path in Path(source_dir).glob(f"*.{file_ext}"):
-                parquet_file = pq.ParquetFile(file_path)
-                for batch in parquet_file.iter_batches(batch_size=50000):
-                    # Convert Arrow batch to a list of tuples for Oracle
-                    data = batch.to_pylist()
 
-                    # Use executemany for bulk binding
-                    cur.executemany(
-                        f"INSERT INTO {table} (col1, col2) VALUES (:1, :2)", data
-                    )
-                    conn.commit()
+        audit_values = audit_values or {}
+
+        with self.get_connection() as conn, conn.cursor() as cur:
+            cur.execute(f"SELECT * FROM {table.upper()} WHERE 1=0")
+            db_cols = [col[0].lower() for col in cur.description]
+
+            parquet_cols = [c for c in db_cols if c not in audit_values]
+            placeholders = ", ".join([f":{i + 1}" for i in range(len(parquet_cols))])
+            audit_fragments = ", ".join(
+                [
+                    f"'{v}'" if isinstance(v, str) else f"CAST('{v}' AS TIMESTAMP)"
+                    for k, v in audit_values.items()
+                ]
+            )
+
+            sql = f"""
+                INSERT INTO {table.upper()} ({", ".join(db_cols)}) 
+                    VALUES ({placeholders}, {audit_fragments})
+            """
+
+            dataset = ds.dataset(source_dir, format=file_ext.casefold())
+            for batch in dataset.to_batches(batch_size=50000):
+                # Convert Arrow batch to a list of tuples for Oracle
+                data = batch.select(parquet_cols).to_pylist()
+
+                # Use executemany for bulk binding
+                cur.executemany(sql, data)
+                conn.commit()
 
     def sql(self, query: str) -> list[Sequence[Any]]:
         """

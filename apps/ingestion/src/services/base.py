@@ -50,6 +50,7 @@ class Sink(Service, ABC):
         target_table: str,
         expected_count: int,
         file_ext: str = "parquet",
+        audit_values: dict[str, Any] | None = None,
     ) -> tuple[str, int]:
         """
         Phase 1: Returns the name of the temporary staging table/folder

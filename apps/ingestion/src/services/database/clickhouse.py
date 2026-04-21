@@ -37,6 +37,7 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         target_table: str,
         expected_count: int,
         file_ext: str = "parquet",
+        audit_values: dict[str, Any] | None = None,
     ) -> tuple[str, int] | None:
         name = target_table.split(".", 1)[
             -1
@@ -44,7 +45,7 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         staging_table = (
             f"stg_{name}_{int(datetime.now().astimezone().strftime('%Y%m%d%H%M%S'))}"
         )
-
+        audit_values = audit_values or {}
         success = False
         try:
             # Different stages use separate sessions. Hence, TEMP Table approach not feasible.
@@ -63,7 +64,8 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             self.client.copy_from_file(
                 table=staging_table,
                 source_dir=str(source_dir),
-                file_ext=file_ext
+                file_ext=file_ext,
+                audit_values=audit_values,
             )
             rows_staged = self.get_row_count(staging_table)
 

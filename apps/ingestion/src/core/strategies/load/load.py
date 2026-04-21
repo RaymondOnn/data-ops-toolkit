@@ -1,9 +1,9 @@
 from pathlib import Path
-
-from loguru import logger
-from msgspec import Struct
+from typing import Any
 
 from apps.ingestion.src.services.base import Sink
+from loguru import logger
+from msgspec import Struct
 
 LOG = logger
 
@@ -34,6 +34,7 @@ class Loader:
         source_dir: Path,
         load_ctx: LoadContext,
         file_ext: str = "parquet",
+        audit_values: dict[str, Any] | None = None,
     ) -> tuple[str, int]:
         """
         Phase 1: Moves data from Silver (Parquet) to a temporary 'Staging' area.
@@ -51,6 +52,7 @@ class Loader:
                 target_table=load_ctx.sink_identifier,
                 file_ext=file_ext,
                 expected_count=load_ctx.expected_count,
+                audit_values=audit_values,
             )
 
             if result is None:
@@ -60,7 +62,7 @@ class Loader:
                 )
             return result
         except Exception as exc:
-            LOG.exception("Error during staging data")
+            LOG.exception("Error during staging data", exception=exc)
             raise exc
 
     def promote(

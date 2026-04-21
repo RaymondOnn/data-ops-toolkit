@@ -31,6 +31,7 @@ class PostgresService(DatabaseSource, DatabaseSink):
         source_dir: Path,
         target_table: str,
         file_ext: str = "parquet",
+        audit_values: dict[str, Any] | None = None,
     ) -> tuple[str, int]:
         staging_table = f"stg_{target_table}_{int(time.time())}"
         self.client.sql(f"CREATE UNLOGGED TABLE {staging_table} (LIKE {target_table})")

@@ -2,12 +2,11 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 import msgspec
-from loguru import logger
-
 from apps.ingestion.src.core.models.job.manifest import PublishPayload
 from apps.ingestion.src.core.strategies.load.load import LoadContext, Loader
 from apps.ingestion.src.services.base import Sink
 from apps.ingestion.src.services.factory import ServiceFactory
+from loguru import logger
 
 from .base import ExecutionStage
 from .enums import StageName
