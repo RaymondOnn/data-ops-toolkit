@@ -3,21 +3,22 @@ import subprocess
 import time
 from typing import Any
 
-import msgspec
 import ray
+from filelock import FileLock
+from loguru import logger
+from tenacity import Retrying, stop_after_attempt, wait_exponential
+
 from apps.ingestion.src.core.contexts import ExecutionContext, RayMode
-from apps.ingestion.src.core.models.job import ExecutionStatus, Task, TaskManifest
 from apps.ingestion.src.core.models.stages.enums import EXEC_STAGES, StageName
+from apps.ingestion.src.core.models.task import ExecutionStatus, Task
 from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.services.registry import ServiceRegistry
 from apps.ingestion.src.utils.common import find_path
 from apps.ingestion.src.utils.constants import MANIFEST_FILENAME
 from apps.ingestion.src.utils.dates import epoch_to_iso, get_end_of_day_ts
-from filelock import FileLock
+from apps.ingestion.src.utils.exceptions import RetryTask, RewindTask
 from libs.cache.utils import get_cache
 from libs.utils.log import setup_logging
-from loguru import logger
-from tenacity import Retrying, stop_after_attempt, wait_exponential
 
 from .enums import TaskMetadata
 
@@ -32,6 +33,14 @@ class Worker:
         self.worker_id = worker_id
         self.exec_ctx = exec_ctx
 
+        # Initialize logging for the worker process immediately.
+        # Reset loguru to clear Ray's inherited handlers and apply local config
+        # setup_logging(
+        #     log_dir=self.exec_ctx.workspace_dir / "logs",
+        #     is_prod=self.exec_ctx.is_prod(),
+        #     is_debug=self.exec_ctx.is_debug(),
+        # )
+        
         # Pass primitives to factory to keep services/ independent of core/
         self.cache = get_cache(self.exec_ctx.workspace_dir, self.exec_ctx.cache_config)
 
@@ -40,18 +49,12 @@ class Worker:
 
         # Share the same cache path with ServiceRegistry so that circuit-breaker
         # state (written by workers) is visible to the Orchestrator's registry.
-        ServiceRegistry.configure(self.exec_ctx.workspace_dir)
+        ServiceRegistry.configure(
+            self.exec_ctx.workspace_dir, self.exec_ctx.cache_config
+        )
         self.lock = FileLock(self.exec_ctx.lock_file)
 
-        # Initialize logging for the worker process.
-        # Reset loguru to clear Ray's inherited handlers and apply local config
-        logger.remove()
-        log_dir = self.exec_ctx.workspace_dir / "logs"
-        setup_logging(
-            log_dir=log_dir,
-            is_prod=self.exec_ctx.is_prod(),
-            is_debug=self.exec_ctx.is_debug(),
-        )
+
         self.is_busy = False
 
     def process_stage(self, key: str) -> None:
@@ -89,6 +92,18 @@ class Worker:
                         exec_ctx=self.exec_ctx,
                         target_stage=current_stage,
                     )
+                    
+                    setup_logging(
+                        log_dir=self.exec_ctx.workspace_dir / "logs",
+                        is_prod=self.exec_ctx.is_prod(),
+                        is_debug=self.exec_ctx.is_debug(),
+                        # Name the log by stage for easy multi-stage debugging
+                        filename=f"{task.id}.jsonl",
+                    )
+
+                    # Cleanup indicators when starting execution
+                    (task.folder / ".retrying").unlink(missing_ok=True)
+                    (task.folder / ".blocked").unlink(missing_ok=True)
 
                     self.is_busy = True
                     log.info(
@@ -152,7 +167,51 @@ class Worker:
                                 # Task fully reached SUCCESS/FINISH
                                 log.info("Task fully completed.")
                                 self.cache.pop(f"active_run:{identifier}", None)
+        except RetryTask as r:
+            log.warning(
+                "Task signaled RETRY (transient outage)",
+                reason=r.reason,
+                wait=r.wait_seconds,
+            )
+            with self.lock:
+                meta: TaskMetadata = self.cache.get(key)
+                if meta:
+                    # We use last_hb as the 'earliest resume time'
+                    # This prevents the orchestrator from picking it up too soon
+                    if hasattr(r, "source_name") and r.source_name:
+                        # Case: Waiting for .source_down signal
+                        meta.status = ExecutionStatus.BLOCKED
+                        meta.blocked_by = r.source_name
+                    else:
+                        # Case: Normal scheduled retry
+                        meta.status = ExecutionStatus.RETRY
+                    meta.last_hb = time.time() + r.wait_seconds
+                    self.cache[key] = meta
+            return  # Yield Ray Actor
+        except RewindTask as rw:
+            log.warning(
+                "Task signaled REWIND (Self-Healing)",
+                to_stage=rw.target_stage,
+                reason=rw.reason,
+            )
+            with self.lock:
+                # 1. Clear the current lease
+                self.cache.pop(key, None)
 
+                # 2. Reset the manifest on disk for the target stage
+                # (We clear the payload and set status to PENDING)
+                task.update_manifest(
+                    {
+                        "status": ExecutionStatus.PENDING.value,
+                        rw.target_stage: None,
+                        "current_stage": rw.target_stage,
+                    }
+                )
+
+                # 3. Put back into the specific target queue
+                meta.current_stage = rw.target_stage
+                meta.status = ExecutionStatus.PENDING.value
+                self.cache[f"{rw.target_stage}:{identifier}"] = meta
         except Exception:
             log.exception("Task stage reached terminal failure/hold")
             with self.lock:
@@ -165,16 +224,42 @@ class Worker:
         finally:
             self.is_busy = False
 
+    def _handle_handoff(self, key, identifier, current_stage, next_stage, meta, log):
+        """Encapsulated logic for moving tasks between stage queues."""
+        with self.lock:
+            # Every execution ends the "Current" stage lease.
+            self.cache.pop(key, None)
+
+            if next_stage:
+                if next_stage.casefold() in EXEC_STAGES:
+                    # Progressing (or Rewinding) to specific queue
+                    meta.current_stage = next_stage
+                    meta.status = ExecutionStatus.PENDING.value
+                    # We reset last_hb so it's eligible for immediate pickup if it's a rewind
+                    meta.last_hb = time.time()
+                    self.cache[f"{next_stage}:{identifier}"] = meta
+                    log.info(
+                        "Transitioning: {current_stage} -> {next_stage}",
+                        current_stage=current_stage,
+                        next_stage=next_stage,
+                    )
+                else:
+                    # Task fully reached SUCCESS/FINISH
+                    log.info("Task fully completed.")
+                    self.cache.pop(f"active_run:{identifier}", None)
+
     def is_idle(self) -> bool:
         return not self.is_busy
 
 
-class IngestionEngine:
+class TaskManger:
     def __init__(self, exec_ctx: ExecutionContext, cache_dir: str = ".cache/ingestion"):
         self.exec_ctx = exec_ctx
         # 2. Initialize the Global Registry (Diskcache)
         # This ensures the shared cache path exists for all Ray workers
-        ServiceRegistry.configure(self.exec_ctx.workspace_dir)
+        ServiceRegistry.configure(
+            self.exec_ctx.workspace_dir, self.exec_ctx.cache_config
+        )
         self.registry = ServiceRegistry()
 
         # CRITICAL: Create cache directory in the parent process BEFORE
@@ -241,23 +326,23 @@ class IngestionEngine:
         LOG.info("Starting Orchestrator...")
         while True:
             self.scan_and_recover()
-            self._process_jobs()
+            self._process_tasks()
             time.sleep(10)  # Frequency of polling
 
-    def queue_jobs(
+    def queue_tasks(
         self,
         identifier: str,
         run_id: str,
         config_file_path: str,
         current_stage: str | None = None,
     ) -> None:
-        """Checks config, creates jobs if not in cache, and submits them."""
+        """Checks config, creates tasks if not in cache, and submits them."""
         # Always start in the 'start' queue
         current_stage = current_stage or "start"
         queue_key = f"{current_stage}:{identifier}:{run_id}"
         job_id, dataset_id, partition_date = identifier.split(":")
 
-        # Logic to determine if this is a snapshot (e.g., based on
+        # ?: Logic to determine if this is a snapshot (e.g., based on
         # job naming convention)
         is_snapshot = "snapshot" in job_id.lower()
         expires_at = get_end_of_day_ts() if is_snapshot else None
@@ -266,7 +351,7 @@ class IngestionEngine:
         expiry_str = epoch_to_iso(expires_at) if expires_at else "NEVER"
 
         with self.lock:
-            # Check if job exists in cache
+            # Check if task exists in cache
             if queue_key not in self.cache:
                 # Brand new entry
                 meta = TaskMetadata(
@@ -292,7 +377,7 @@ class IngestionEngine:
                 expires=expiry_str,
             )
 
-    def _process_jobs(self) -> None:
+    def _process_tasks(self) -> None:
         # 1. Calculate current occupancy for all stages
         current_occupancy = self._get_current_occupancy()
 
@@ -331,13 +416,24 @@ class IngestionEngine:
 
             # Only lock when we have a potential candidate to update
             with self.lock:
-                task_meta = self.cache.get(key)
-                if (
-                    not isinstance(task_meta, TaskMetadata)
-                    or task_meta.status != ExecutionStatus.PENDING.value
-                ):
+                task_meta: TaskMetadata = self.cache.get(key)
+
+                # # A task is ready if it's PENDING, or if it's in RETRY and the wait is over
+                is_pending = task_meta.status == ExecutionStatus.PENDING.value
+                # Case 1: Normal Retry (Timer based)
+                is_retry_ready = (
+                    task_meta.status == "RETRY" and time.time() >= task_meta.last_hb
+                )
+                # Case 2: Service Outage (Signal based)
+                is_blocked_ready = (
+                    task_meta.status == "BLOCKED"
+                    and ServiceRegistry.is_healthy(task_meta.blocked_by or "")
+                    and time.time() >= task_meta.last_hb
+                )
+
+                if not (is_pending or is_retry_ready or is_blocked_ready):
                     LOG.debug(
-                        "Task {run_id} not pending, skipping",
+                        "Task {run_id} not pending or retry-ready, skipping",
                         job_id=task_meta.job_id,
                         run_id=task_meta.run_id,
                         status=task_meta.status,
@@ -345,6 +441,7 @@ class IngestionEngine:
                     continue
 
                 if task_meta.status == ExecutionStatus.PENDING.value:
+                    # if is_pending or is_retry_ready:
                     # --- BACKPRESSURE LOGIC ---
                     # If the system is degraded (high memory), we pause new EXTRACTIONs
                     # to allow the LOAD/WRITE stages to clear the disk/memory backlog.
@@ -453,7 +550,7 @@ class IngestionEngine:
 
     # TODO: Handle Timeouts
     def scan_and_recover(self) -> None:
-        """Scans all stage queues for zombie jobs."""
+        """Scans all stage queues for zombie tasks."""
         with self.lock:
             # Iterate only over keys starting with valid stages
             for key in self._get_all_keys():
@@ -488,11 +585,11 @@ class IngestionEngine:
                         "Zombie task detected - no activity on cache or disk",
                         key=key_str,
                     )
-                    self._recover_job(stage_label, rest)
+                    self._recover_task(stage_label, rest)
 
-    def _recover_job(self, stage_name: str, rest_of_key: str) -> None:
+    def _recover_task(self, stage_name: str, rest_of_key: str) -> None:
         """
-        Recovers a stalled job by checking its physical progress.
+        Recovers a stalled task by checking its physical progress.
         """
         with self.lock:
             key = f"{stage_name}:{rest_of_key}"
@@ -508,8 +605,10 @@ class IngestionEngine:
         # 1. Verify if the stage actually finished on disk but failed to transit
         # We check for the .success marker in the current stage's folder
         if self._check_stage_completion_on_disk(run_id, stage_name):
-            # If the symlink exists, the worker finished 'finalize' but the engine died
-            next_stage = self._get_next_stage_name(stage_name)
+            # Promotion: Find the next stage using the StageName domain model
+            next_stage_obj = StageName.next(stage_name)
+            next_stage = next_stage_obj.label if next_stage_obj else "complete"
+
             LOG.info(
                 "Recovery: Step was successful on disk. Promoting.",
                 job_id=job_id,
@@ -539,9 +638,19 @@ class IngestionEngine:
                 exec_ctx=self.exec_ctx,
                 target_stage=stage_name,
             )
-            task.reset_for_retry()
+
+            task.update_manifest(
+                {
+                    "status": ExecutionStatus.PENDING.value,
+                    "current_stage": None,
+                }
+            )
 
             # Sync the engine cache with the new manifest state
+            # Clear indicators and set to PENDING
+            (task.folder / ".retrying").unlink(missing_ok=True)
+            (task.folder / ".blocked").unlink(missing_ok=True)
+
             task_meta.status = ExecutionStatus.PENDING.value
             task_meta.last_hb = time.time()
             self.cache[key] = task_meta
@@ -561,66 +670,50 @@ class IngestionEngine:
         # It must exist and be a valid link/directory
         return bool(active_path.exists())
 
-    def _get_next_stage_name(self, current_stage: str) -> str:
-        """
-        Decision: Use List-Index Lookup.
-        Leveraging a list makes the pipeline order explicit and easy to change.
-        """
+    # def _recover_from_manifest(self, job_id: str, run_id: str) -> str:
+    #     """
+    #     Decision: Single-File Peep.
+    #     Peeps at the manifests on disk to find where the job stalled.
+    #     Used during System Recovery or Orchestrator Boot-up to decide exactly
+    #     where to resume a job that was interrupted.
+    #     Instead of searching 5+ folders, we read the one 'active' manifest.
+    #     This is O(1) instead of O(N).
+    #     """
 
-        try:
-            current_idx = EXEC_STAGES.index(current_stage)
-            # Return next stage, or 'complete' if we are at the end
-            if current_idx + 1 < len(EXEC_STAGES):
-                return str(EXEC_STAGES[current_idx + 1])
-            return "complete"
-        except ValueError:
-            # If the stage is unknown (e.g., job just started), start at the beginning
-            return str(EXEC_STAGES[0])
+    #     active_root = self.exec_ctx.active_path
+    #     active_path = find_path(active_root, run_id)
+    #     manifest_path = active_path / MANIFEST_FILENAME
 
-    def _recover_from_manifest(self, job_id: str, run_id: str) -> str:
-        """
-        Decision: Single-File Peep.
-        Peeps at the manifests on disk to find where the job stalled.
-        Used during System Recovery or Orchestrator Boot-up to decide exactly
-        where to resume a job that was interrupted.
-        Instead of searching 5+ folders, we read the one 'active' manifest.
-        This is O(1) instead of O(N).
-        """
+    #     if not manifest_path.exists():
+    #         LOG.info("No active manifest found, starting fresh.", job_id=job_id)
+    #         return str(EXEC_STAGES[0])  # Usually 'start'
 
-        active_root = self.exec_ctx.active_path
-        active_path = find_path(active_root, run_id)
-        manifest_path = active_path / MANIFEST_FILENAME
+    #     with manifest_path.open("rb") as f:
+    #         # msgspec is fast enough to do this in the main recovery loop
+    #         meta = msgspec.json.decode(f.read(), type=TaskManifest)
 
-        if not manifest_path.exists():
-            LOG.info("No active manifest found, starting fresh.", job_id=job_id)
-            return str(EXEC_STAGES[0])  # Usually 'start'
+    #         # Logic: If the current stage is done, move forward.
+    #         # Otherwise, the stage crashed mid-way; resume/retry it.
+    #         for stage in EXEC_STAGES:
+    #             if hasattr(meta, stage):
+    #                 continue
 
-        with manifest_path.open("rb") as f:
-            # msgspec is fast enough to do this in the main recovery loop
-            meta = msgspec.json.decode(f.read(), type=TaskManifest)
+    #             return stage
 
-            # Logic: If the current stage is done, move forward.
-            # Otherwise, the stage crashed mid-way; resume/retry it.
-            for stage in EXEC_STAGES:
-                if hasattr(meta, stage):
-                    continue
+    #     return "FINISH"
 
-                return stage
+    # def get_latest_manifest(self, job_id: str, run_id: str) -> TaskManifest:
+    #     """
+    #     Decision: Direct Access.
+    #     """
+    #     active_root = self.exec_ctx.active_path
+    #     active_path = find_path(active_root, run_id)
+    #     manifest_path = active_path / MANIFEST_FILENAME
 
-        return "FINISH"
+    #     if not manifest_path.exists():
+    #         # During recovery, if a job exists in DB but not on disk, it's a 'Ghost'
+    #         raise FileNotFoundError(f"Active workspace missing for {job_id}")
 
-    def get_latest_manifest(self, job_id: str, run_id: str) -> TaskManifest:
-        """
-        Decision: Direct Access.
-        """
-        active_root = self.exec_ctx.active_path
-        active_path = find_path(active_root, run_id)
-        manifest_path = active_path / MANIFEST_FILENAME
-
-        if not manifest_path.exists():
-            # During recovery, if a job exists in DB but not on disk, it's a 'Ghost'
-            raise FileNotFoundError(f"Active workspace missing for {job_id}")
-
-        with manifest_path.open("rb") as f:
-            # Structural validation included via msgspec
-            return msgspec.json.decode(f.read(), type=TaskManifest)
+    #     with manifest_path.open("rb") as f:
+    #         # Structural validation included via msgspec
+    #         return msgspec.json.decode(f.read(), type=TaskManifest)

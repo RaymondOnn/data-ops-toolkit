@@ -1,17 +1,16 @@
 # src/core/services/base.py
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-
-    def __init__(self, name: str, **config: Any):
-        self.name = name
-        self.config = config
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from typing import Any
 
 
 class KeyValueCache(ABC):
     """Normalized interface for local and remote key-value stores."""
+
+    def __init__(self, name: str, **config: Any):
+        self.name = name
+        self.config = config
 
     @abstractmethod
     def get(self, key: str, default: Any = None) -> Any: ...
@@ -27,6 +26,15 @@ class KeyValueCache(ABC):
 
     @abstractmethod
     def iterkeys(self, pattern: str = "*") -> Iterable[str]: ...
+
+    @contextmanager
+    @abstractmethod
+    def transact(self) -> Iterator[None]:
+        """
+        Provides an atomic transaction context for multiple cache operations.
+        Implementations should ensure operations within this context are atomic.
+        """
+        yield
 
     @abstractmethod
     def __getitem__(self, key: str) -> Any: ...

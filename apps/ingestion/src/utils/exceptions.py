@@ -1,22 +1,27 @@
-class Error(Exception):
-    """Base class for exceptions in this module."""
-
-    pass
+from libs.utils.exceptions import TransientError, TerminalError
 
 
-class TaskDeferred(Error):
-    """Exception raised when a non-critical task fails."""
+class RetryTask(Exception):
+    """
+    Raised by a stage to signal a transient failure that requires a retry.
+    """
 
-    pass
+    def __init__(
+        self, reason: str, wait_seconds: int = 30, source_name: str | None = None
+    ):
+        self.reason = reason
+        self.wait_seconds = wait_seconds
+        self.source_name = source_name
+        super().__init__(self.reason)
 
 
-class TaskBlocked(Error):
-    """Exception raised when a critical task fails."""
+class RewindTask(Exception):
+    """
+    Raised to signal that a prerequisite artifact is missing and
+    the task must jump back to a previous stage.
+    """
 
-    pass
-
-
-class TaskFailed(Error):
-    """Exception raised when data fails validation and must be isolated."""
-
-    pass
+    def __init__(self, target_stage: str, reason: str):
+        self.target_stage = target_stage
+        self.reason = reason
+        super().__init__(self.reason)

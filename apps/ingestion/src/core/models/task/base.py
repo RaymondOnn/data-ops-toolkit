@@ -7,12 +7,14 @@ from typing import Any, Self
 
 import msgspec
 from apps.ingestion.src.core.contexts import ExecutionContext, TaskContext
-from apps.ingestion.src.core.models.job.manifest import TaskManifest
-from apps.ingestion.src.core.models.job.status import ExecutionStatus
+from apps.ingestion.src.core.models.task.manifest import TaskManifest
+from apps.ingestion.src.core.models.task.status import ExecutionStatus
 from apps.ingestion.src.core.models.stages.base import ExecutionStage
 from apps.ingestion.src.core.models.stages.enums import StageName
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
 from loguru import logger
+
+from .enums import TaskSignal
 
 LOG = logger
 
@@ -324,19 +326,6 @@ class Task:
         )
         LOG.debug("Task checked in to stage", run_id=self.run_id, stage=stage_name)
 
-    def reset_for_retry(self, stage_to_clear: str | None = None) -> None:
-        """
-        Prepares a task for re-execution by resetting status and optionally
-        clearing payload metadata for a specific stage.
-        """
-        updates = {
-            "status": ExecutionStatus.PENDING,
-            "last_active": datetime.now().astimezone().isoformat(),
-        }
-        if stage_to_clear:
-            updates[stage_to_clear] = None
-        self.update_manifest(updates)
-
     def move_to_folder(self, stage: str) -> None:
         """
         Physically relocates the metadata folder (active -> HOLD/FAILED).
@@ -365,9 +354,7 @@ class Task:
             self._folder = new_path
             self._manifest_path = new_path / "manifest.json"
 
-    def request_status_sync(
-        self, deep_sync: bool = False, is_failure: bool = False
-    ) -> None:
+    def request_status_sync(self, signal: TaskSignal = TaskSignal.SYNC) -> None:
         """
         Drops a signal file to notify the Orchestrator of a state change.
         """
@@ -376,14 +363,8 @@ class Task:
         signal_dir = self.exec_ctx.signal_path
         signal_dir.mkdir(parents=True, exist_ok=True)
 
-        # 2. Drop the Breadcrumb
-        # The 'Light' signal for progress stages
-        ext = ".sync"
-        if deep_sync:
-            # The 'Heavy' signal for CompleteStep
-            ext = ".done"
-        if is_failure:
-            ext = ".fail"
+        # 2. Drop the Signal
+        ext = f".{signal.value.casefold()}"
 
         # We embed metadata in the filename so the Orchestrator
         # might not even need to open the manifest for simple status updates.
@@ -395,6 +376,9 @@ class Task:
 
         LOG.debug("Dropping state sync signal", name=signal_path)
         signal_path.touch()  # Create hidden/temp
+
+        if signal == TaskSignal.RETRY:
+            (self.folder / ".retrying").touch()
 
     # TODO: Consider if this is needed
     # @property

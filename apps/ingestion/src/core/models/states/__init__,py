@@ -1,1 +1,6 @@
 from .terminal import FailedState, HoldState, SuccessState
+from .retry import RetryState
+
+STATE_MAP = {"HOLD": HoldState, "FAILED": FailedState, "RETRY": RetryState}
+
+__all__ = ["FailedState", "HoldState", "RetryState", "SuccessState"]

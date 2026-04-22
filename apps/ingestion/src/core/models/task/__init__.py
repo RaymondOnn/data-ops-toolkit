@@ -10,9 +10,11 @@ from .manifest import (
     WritePayload,
 )
 from .status import ExecutionStatus
+from .enums import TaskSignal
 
 __all__ = [
     "ExecutionStatus",
     "Task",
     "TaskManifest",
+    "TaskSignal",
 ]

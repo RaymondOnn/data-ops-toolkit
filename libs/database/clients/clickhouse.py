@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 import uuid
 from collections.abc import Generator, Sequence
@@ -7,12 +8,20 @@ from typing import Any
 
 import polars as pl
 from clickhouse_connect.driver.client import Client
+from clickhouse_connect.driver.exceptions import DatabaseError, OperationalError
+from libs.utils.exceptions import AuthFailure, HostUnreachable
 
 from ..pool.base import ConnectionPool
 from ..pool.queue import QueueConnectionPool
 from .base import DBClient
 
 LOG = logging.getLogger(__name__)
+
+
+def get_error_code(exception):
+    # Searches for 'Code: ' followed by digits in the exception message
+    match = re.search(r"Code:\s*(\d+)", str(exception))
+    return int(match.group(1)) if match else None
 
 
 class ClickhouseClient(DBClient):
@@ -46,6 +55,15 @@ class ClickhouseClient(DBClient):
             )
             self._ping(conn)
             return conn
+        except (DatabaseError, OperationalError) as e:
+            code = get_error_code(e)
+
+            if code in (516, 192, 193):
+                raise AuthFailure() from e
+
+            if code in (209, 210) or "Connection refused" in str(e):
+                raise HostUnreachable() from e
+            raise ClientCantConnect("Failed to connect to ClickHouse") from e
         except Exception as e:
             raise ClientCantConnect("Failed to connect to ClickHouse") from e
 

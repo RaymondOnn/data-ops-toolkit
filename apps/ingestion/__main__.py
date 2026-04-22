@@ -8,7 +8,7 @@ import typer
 # from apps.ingestion.src.cli.test import test_app
 from apps.ingestion.src.core.contexts import ExecutionMode, parse_set_options
 from apps.ingestion.src.core.contexts.execution import RayMode
-from apps.ingestion.src.core.models.job import Task
+from apps.ingestion.src.core.models.task import Task
 from apps.ingestion.src.core.orchestrator import create_orchestrator
 from libs.utils.log import setup_logging
 

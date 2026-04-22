@@ -1,4 +1,5 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import msgspec
@@ -45,6 +46,18 @@ class RedisCache(KeyValueCache):
         for key in self._client.scan_iter(pattern):
             yield key.decode("utf-8")
 
+    @contextmanager
+    def transact(self) -> Iterator[None]:
+        """
+        Simulates an atomic transaction context using a Redis distributed lock.
+        This allows Read-Modify-Write patterns to be process-safe.
+        """
+        # We use a specific lock key for cache-wide transactions.
+        # Timeout ensures the lock is eventually released if a process crashes.
+        lock = self._client.lock("kv_cache_transaction_lock", timeout=30, sleep=0.1)
+        with lock:
+            yield
+
     def __getitem__(self, key: str) -> Any:
         val = self.get(key)
         if val is None:
@@ -58,7 +71,7 @@ class RedisCache(KeyValueCache):
         return bool(self._client.exists(key))
 
     def __len__(self) -> int:
-        return self._client.dbsize()
+        return int(self._client.dbsize())
 
     def is_empty(self) -> bool:
-        return self._client.dbsize() == 0
+        return len(self) == 0

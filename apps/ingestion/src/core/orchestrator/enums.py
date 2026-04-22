@@ -20,6 +20,7 @@ class TaskMetadata(msgspec.Struct):
     last_hb: float = msgspec.field(default_factory=time.time)
     retry_count: int = 0
     expires_at: float | None = None
+    blocked_by: str | None = None
 
 
 class JobRecord(msgspec.Struct, kw_only=True):

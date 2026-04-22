@@ -25,6 +25,7 @@ class ExecutionStatus(StrEnum):
     # Wait States (The "Breadcrumb" triggers)
     DEFERRED = "DEFERRED"  # Transient error, Orchestrator will retry later
     BLOCKED = "BLOCKED"  # Manual HOLD or dependency missing
+    RETRY = "RETRY"  # Waiting for scheduled retry after failure
 
     UNKNOWN = "UNKNOWN"
 

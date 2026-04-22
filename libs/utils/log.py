@@ -91,6 +91,10 @@ def setup_logging(
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / filename
 
+    # Defensive touch to ensure the file exists before Loguru's background thread
+    # attempts to perform rotation checks.
+    log_file.touch(exist_ok=True)
+
     # 1. Clear default handlers
     logger.remove()
 
@@ -107,6 +111,7 @@ def setup_logging(
         serialize=is_prod,
         backtrace=True,
         diagnose=is_debug,
+        enqueue=True,
     )
 
     # 3. Add JSON File Handler with Rotation
@@ -117,6 +122,7 @@ def setup_logging(
         rotation="00:00",
         retention="7 days",
         compression="zip",
+        enqueue=True,
     )
 
     # 4. Intercept standard logging calls

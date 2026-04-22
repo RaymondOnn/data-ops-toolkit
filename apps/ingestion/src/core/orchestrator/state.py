@@ -9,7 +9,7 @@ import msgspec
 import polars as pl
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
 from apps.ingestion.src.core.contexts.job import TaskContext
-from apps.ingestion.src.core.models.job import ExecutionStatus, TaskManifest
+from apps.ingestion.src.core.models.task import ExecutionStatus, TaskManifest
 from apps.ingestion.src.core.orchestrator.enums import JobRecord
 from apps.ingestion.src.services.database import DatabaseSink
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
@@ -113,6 +113,7 @@ class StateStore:
             LOG.info("Received {count} active records", count=len(raw_records))
         except Exception:
             LOG.exception("Failed to refresh active records")
+            raise
             # Fallback to empty dict to avoid NoneType errors in Orchestrator loop
             self._active_records = self._active_records or {}
 

@@ -102,8 +102,9 @@ class TaskContextBuilder:
         try:
             LOG.info("Resolved App Config", config=self.app_settings.to_dict())
         except Exception:
-            LOG.warning("Could not serialize app config for logging")
-
+            LOG.exception("Could not serialize app config for logging")
+            raise 
+        
     def _resolve_partition_date(
         self,
         spec: dict[str, Any],

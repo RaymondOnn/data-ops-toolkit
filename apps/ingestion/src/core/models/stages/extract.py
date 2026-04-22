@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import msgspec
 import polars as pl
-from apps.ingestion.src.core.models.job.manifest import ExtractPayload, FileInfo
+from apps.ingestion.src.core.models.task.manifest import ExtractPayload, FileInfo
 from apps.ingestion.src.core.strategies.extract import (
     Reader,
     ReaderContext,
@@ -22,7 +22,7 @@ from .base import ExecutionStage
 from .enums import StageName
 
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.models.job import Task
+    from apps.ingestion.src.core.models.task import Task
 
 
 LOG = logger

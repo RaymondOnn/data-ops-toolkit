@@ -2,17 +2,18 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 import msgspec
-from apps.ingestion.src.core.models.job.manifest import PublishPayload
+from apps.ingestion.src.core.models.task.manifest import PublishPayload
 from apps.ingestion.src.core.strategies.load.load import LoadContext, Loader
 from apps.ingestion.src.services.base import Sink
 from apps.ingestion.src.services.factory import ServiceFactory
+from apps.ingestion.src.utils.exceptions import RetryTask, RewindTask
 from loguru import logger
 
 from .base import ExecutionStage
 from .enums import StageName
 
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.models.job import Task
+    from apps.ingestion.src.core.models.task import Task
 
 
 LOG = logger
@@ -25,7 +26,6 @@ class PublishStage(ExecutionStage):
     """
 
     name = StageName.PUBLISH.label
-
     manifest: PublishPayload
     service: Sink
 
@@ -34,34 +34,43 @@ class PublishStage(ExecutionStage):
         Bypass global pre-flight checks (like disk pressure).
         Publishing is a priority stage to reclaim resources.
         """
-        pass
-
-    def execute(self, task: "Task") -> str:
-        self.pre_flight(task)
-
-        task_ctx = task.context
-        start_ts = datetime.now().astimezone().isoformat()
-
+        # 1. Initialize Service & Check Connectivity
+        # (This logic is the 'new' pre-flight abstraction)
         try:
-            # 1. Initialize Service & Check Connectivity
-            # (This logic is the 'new' pre-flight abstraction)
+            task_ctx = task.context
             self.service = ServiceFactory.get_sink(
                 task_ctx.load.sink_type, **task_ctx.load.sink_config
             )
+        except Exception as e:
+            LOG.error(
+                "Failed to initialize sink service",
+                error=str(e),
+                sink_type=task_ctx.load.sink_type,
+                sink_config=task_ctx.load.sink_config,
+            )
+            raise RetryTask(
+                reason=f"Service {task_ctx.load.sink_type} unavailable",
+                source_name=task_ctx.load.sink_type,
+            ) from e
 
+        # 2. Check Staging Artifact (Self-Healing Rewind)
+        write_meta = task.manifest.write
+        if not write_meta or not write_meta.staging_artifact:
+            LOG.warning("Missing write metadata. Rewinding to WRITE stage.")
+            raise RewindTask(
+                target_stage=StageName.WRITE.label,
+                reason="Staging artifact missing for publication.",
+            )
+
+    def execute(self, task: "Task"):
+        start_ts = datetime.now().astimezone().isoformat()
+
+        try:
+            task_ctx = task.context
             write_meta = task.manifest.write
-            if not write_meta or not write_meta.staging_artifact:
-                LOG.warning("Missing write metadata. Rewinding to WRITE stage.")
-                return self._rewind(task, StageName.WRITE)
-
-            # 2. Check Staging Artifact (Self-Healing Rewind)
-            staging_id = write_meta.staging_artifact
-            if not self.service.exists(staging_id):
-                LOG.warning(
-                    "Staging artifact '{artifact}' lost. Rewinding to WRITE stage.",
-                    artifact=staging_id,
-                )
-                return self._rewind(task, StageName.WRITE)
+            if not write_meta:
+                LOG.error("Write metadata is required for Publish stage.")
+                raise ValueError("Write metadata is required for Publish stage.")
 
             # 2. Get the behavioral Strategy
             loader = Loader()
@@ -109,6 +118,3 @@ class PublishStage(ExecutionStage):
 
         except Exception as e:
             self.finalize(task, exception=e)
-            raise
-            raise
-            raise

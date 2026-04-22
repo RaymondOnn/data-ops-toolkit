@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 import polars as pl
 import ray
-from apps.ingestion.src.core.models.job.manifest import TransformPayload
+from apps.ingestion.src.core.models.task.manifest import TransformPayload
 from apps.ingestion.src.core.strategies.transform import (
     TransformContext,
     TransformFactory,
@@ -15,7 +15,7 @@ from .base import ExecutionStage
 from .enums import StageName
 
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.models.job import Task
+    from apps.ingestion.src.core.models.task import Task
 
 
 LOG = logger

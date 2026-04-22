@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 
 import msgspec
-from apps.ingestion.src.core.models.job.status import ExecutionStatus
+from apps.ingestion.src.core.models.task.status import ExecutionStatus
 from msgspec import field
 
 

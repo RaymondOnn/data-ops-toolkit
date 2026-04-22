@@ -14,7 +14,7 @@ services:
       - ../../../sql:/sql
       - ./clickhouse/clickhouse_settings.xml:/etc/clickhouse-server/config.d/clickhouse_settings.xml
       - ./clickhouse/cron_next_function.xml:/etc/clickhouse-server/cron_next_function.xml
-      - ./clickhouse/udf:/var/lib/clickhouse/user_scripts
+      - ./clickhouse/udf:/var/lib/clickhouse/user_scripts:ro
       - ./.tmp/clickhouse:/var/lib/clickhouse
     ports:
       - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"
@@ -26,22 +26,6 @@ services:
     networks:
       - ch_ntw
 
-  # clickhouse-init:
-  #   image: clickhouse/clickhouse-server:latest
-  #   environment:
-  #     - CLICKHOUSE_USER=default
-  #     - CLICKHOUSE_PASSWORD=password
-  #     - CH_HOST=clickhouse
-  #     - LOCALSTACK_HOST=localstack
-  #   volumes:
-  #     - ./clickhouse/init_databases.sh:/init_databases.sh
-  #     - ../../../sql:/sql
-  #   depends_on:
-  #     - clickhouse
-  #   networks:
-  #     - ch_ntw
-  #   entrypoint: /bin/bash
-  #   command: /init_databases.sh
 
   # localstack:
   #   image: localstack/localstack:latest

@@ -1,19 +1,22 @@
 import traceback
 from abc import ABC, abstractmethod
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import msgspec
-from apps.ingestion.src.core.models.job.manifest import ErrorPayload
 from apps.ingestion.src.core.models.stages.enums import EXEC_STAGES, StageName
+from apps.ingestion.src.core.models.task.enums import TaskSignal
+from apps.ingestion.src.core.models.task.manifest import ErrorPayload
 from apps.ingestion.src.utils.constants import DISK_THRESHOLD_HALT
+from apps.ingestion.src.utils.exceptions import RetryTask
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreakerTripped
 from libs.utils.system import get_disk_usage
 from loguru import logger
 
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.models.job import Task
+    from apps.ingestion.src.core.models.task import Task
 
 LOG = logger
 
@@ -66,21 +69,6 @@ class ExecutionStage(ABC):
             return next_stage.label
         return "FINISH"
 
-    # TODO: Bitmask, recovery path
-    def _rewind(self, task: "Task", target_stage: StageName) -> str:
-        """
-        Generalized self-healing: Rewinds the task to a previous stage.
-        The engine will automatically re-queue the task into the target queue.
-        """
-        LOG.warning(
-            "Self-healing: Artifact missing, rewinding stage",
-            run_id=task.run_id,
-            from_stage=self.name,
-            to_stage=target_stage.label,
-        )
-        task.reset_for_retry(stage_to_clear=target_stage.label)
-        return target_stage.label
-
     def move_to_folder(self, task: "Task", category: str) -> None:
         """
         Physically moves the metadata folder to HOLD or QUARANTINE.
@@ -103,11 +91,13 @@ class ExecutionStage(ABC):
         We avoid searching for 'latest' folders by using a static symlink
         at active/{job_id}/{stage_name}.
         """
+        from apps.ingestion.src.core.models.states.retry import RetryState
         from apps.ingestion.src.core.models.states.terminal import (
             FailedState,
             HoldState,
             SuccessState,
         )
+        from apps.ingestion.src.utils.exceptions import TerminalError, TransientError
 
         results = results or {}
         data = msgspec.to_builtins(task.manifest)
@@ -136,24 +126,51 @@ class ExecutionStage(ABC):
             )
             error = msgspec.to_builtins(error_payload)
 
-            # 2. ROUTING LOGIC (The "Sorting Hat")
-            if isinstance(exception, (CircuitBreakerTripped, ClientCantConnect)):
-                # If we fail during CompleteStep, it's Deferred (Ready to wrap up)
-                # Otherwise, it's Blocked (Needs to re-run current stage)
-                # data["status"] = (
-                #     ExecutionStatus.DEFERRED if self.name == "CompleteStep"
-                #     else ExecutionStatus.BLOCKED
-                # )
-
-                HoldState(task).on_enter(data=error)
-                target_category = "HOLD"
-            else:
+            # Policy: Fails after 3 attempts or at midnight
+            now = datetime.now().astimezone()
+            midnight = now.replace(hour=23, minute=59, second=59, microsecond=0)
+            if task.manifest.retry_count >= 3 or now >= midnight:
+                LOG.error(
+                    "Retries exhausted or past midnight. Escalating to FAILED.",
+                    run_id=task.run_id,
+                )
                 FailedState(task).on_enter(data=error)
                 target_category = "FAILED"
 
-            # 2.5 Signal change BEFORE moving the folder to avoid timing bugs
-            # where the Orchestrator looks in 'active' while the move is in progress.
-            task.request_status_sync(is_failure=True)
+            # 1. Connectivity/Circuit Breaker (Blocked)
+            if isinstance(exception, (CircuitBreakerTripped, ClientCantConnect)):
+                error["source_name"] = task.context.extract.source_identifier
+                error["wait_seconds"] = 300  # Example fixed wait time for recovery
+
+                RetryState(task).on_enter(data=error)
+                task.request_status_sync(TaskSignal.RETRY)
+
+                raise RetryTask(
+                    reason=f"Source {error['source_name']} Down",
+                    wait_seconds=error["wait_seconds"],
+                    source_name=error["source_name"],
+                )
+
+            # 2. General Transient Errors (Scheduled Retry)
+            if isinstance(exception, TransientError):
+                RetryState(task).on_enter(data=error)
+
+                # Exponential backoff: 30s, 60s, 120s... max 10m
+                retry_count = task.manifest.retry_count
+                error["wait_seconds"] = min(600, (2**retry_count) * 30)
+
+                task.request_status_sync(TaskSignal.RETRY)
+                raise RetryTask(
+                    reason=str(exception), wait_seconds=error["wait_seconds"]
+                )
+
+            if isinstance(exception, TerminalError):
+                FailedState(task).on_enter(data=error)
+                target_category = "FAILED"
+
+                # 2.5 Signal change BEFORE moving the folder to avoid timing bugs
+                # where the Orchestrator looks in 'active' while the move is in progress.
+                task.request_status_sync(TaskSignal.FAIL)
 
             self.move_to_folder(task, target_category)
         else:
@@ -191,4 +208,4 @@ class ExecutionStage(ABC):
                 )
 
             # 5. ATOMIC SWAP (Success Case)
-            task.request_status_sync()
+            task.request_status_sync(TaskSignal.SYNC)

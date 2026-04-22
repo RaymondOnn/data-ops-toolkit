@@ -1,10 +1,12 @@
 import functools
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, ClassVar
 
-import diskcache
 from apps.ingestion.src.utils.constants import DISKCACHE_FILE_PATH
+from libs.cache.base import KeyValueCache
+from libs.cache.utils import get_cache
 from libs.resilience.circuit_breaker import (
     CircuitBreaker,
     CircuitBreakerState,
@@ -16,26 +18,31 @@ LOG = logger
 
 
 class ServiceRegistry:
-    _cache: ClassVar[diskcache.Cache | None] = None
+    _cache: ClassVar[KeyValueCache | None] = None
+    _signal_path: ClassVar[Path | None] = None
     _local_failures: ClassVar[dict[str, int]] = {}  # In-memory buffer for THIS Pod
 
     @classmethod
-    def configure(cls, workspace_dir: Any) -> None:
+    def configure(
+        cls, workspace_dir: Any, cache_config: dict[str, Any] | None = None
+    ) -> None:
         """
         Must be called once at startup (e.g., in Worker.__init__) before any
         service calls are made. Points the shared diskcache at the correct path.
         """
         if cls._cache is None:
-            cache_path = (workspace_dir / DISKCACHE_FILE_PATH).resolve()
-            cls._cache = diskcache.Cache(
-                cache_path,
-                timeout=10,
-                sqlite_journal_mode="wal",  # Pass directly
-                sqlite_synchronous=1,  # Pass directly
-            )
+            # Initialize signal path for automated .source_down markers
+            cls._signal_path = Path(workspace_dir) / "signals"
+
+            # Use the utility factory to get a normalized cache provider
+            config = cache_config or {
+                "type": "diskcache",
+                "filepath": DISKCACHE_FILE_PATH,
+            }
+            cls._cache = get_cache(Path(workspace_dir), config)
 
     @classmethod
-    def _get_cache(cls) -> diskcache.Cache:
+    def _get_cache(cls) -> KeyValueCache:
         if cls._cache is None:
             raise RuntimeError(
                 "ServiceRegistry has not been configured. "
@@ -48,8 +55,39 @@ class ServiceRegistry:
         return str(cls._get_cache().get(f"status:{name}", "CLOSED"))
 
     @classmethod
+    def is_healthy(cls, name: str) -> bool:
+        """Checks if the service is CLOSED and no .down signal exists."""
+        return cls.get_status(name) == "CLOSED"
+
+    @classmethod
+    def probe(cls, name: str, probe_fn: Callable[[], bool]) -> bool:
+        """
+        Attempts to verify if a service is back online.
+        If successful, resets the circuit breaker.
+
+        Use this in the Orchestrator or LifecycleManager to verify recovery
+        before re-queuing blocked tasks.
+        """
+        try:
+            if probe_fn():
+                LOG.info("Probe successful for service", service=name)
+                cls.reset(name)
+                return True
+        except Exception as e:
+            LOG.warning("Probe failed for service", service=name, error=str(e))
+        return False
+
+    @classmethod
     def update_status(cls, name: str, status: str) -> None:
         cls._get_cache().set(f"status:{name}", status, expire=3600)
+
+        # Automatically manage the {service_name}.source_down signal file
+        if cls._signal_path:
+            signal_file = cls._signal_path / f"{name.lower()}.source_down"
+            if status == "OPEN":
+                signal_file.touch(exist_ok=True)
+            elif status == "CLOSED":
+                signal_file.unlink(missing_ok=True)
 
     @classmethod
     def get_last_failure_time(cls, name: str) -> float:
@@ -60,10 +98,10 @@ class ServiceRegistry:
     def set_last_failure_time(cls, name: str, timestamp: float) -> None:
         cls._get_cache().set(f"last_fail:{name}", timestamp)
 
-    @classmethod
-    def get_retry_attempts(cls, name: str) -> int:
-        """Tracks consecutive recovery failures for exponential backoff."""
-        return int(cls._get_cache().get(f"retries:{name}", 0))
+    # @classmethod
+    # def get_retry_attempts(cls, name: str) -> int:
+    #     """Tracks consecutive recovery failures for exponential backoff."""
+    #     return int(cls._get_cache().get(f"retries:{name}", 0))
 
     @classmethod
     def get_failure_count(cls, name: str) -> int:
@@ -92,15 +130,21 @@ class ServiceRegistry:
             cache.set(f"fails:{name}", new_total, expire=3600)
             cache.set(f"last_reported:{name}", now, expire=3600)
 
-            # Perform Autonomous Logic: Trip the circuit if threshold reached
-            if new_total >= 3:  # Example threshold
+            # Update the last failure timestamp globally
+            cache.set(f"last_fail:{name}", now)
+
+            # --- TRIP LOGIC ---
+            # We keep this INSIDE the transaction to ensure that the
+            # status transition is atomic with the count increment.
+            if new_total >= 3 and cache.get(f"status:{name}") != "OPEN":
                 LOG.warning(
                     "Circuit breaker tripping",
                     service=name,
                     failures=new_total,
                     window=window_seconds,
                 )
-                cache.set(f"status:{name}", "OPEN", expire=300)
+                # We use cache.set directly to stay within the transaction
+                cache.set(f"status:{name}", "OPEN", expire=3600)
 
             return new_total
 
@@ -117,7 +161,7 @@ class ServiceRegistry:
             cache.delete(f"fails:{name}")
             cache.delete(f"last_fail:{name}")
             cache.delete(f"retries:{name}")
-            cache.set(f"status:{name}", "CLOSED")
+            cls.update_status(name, "CLOSED")
 
 
 def protect_service(

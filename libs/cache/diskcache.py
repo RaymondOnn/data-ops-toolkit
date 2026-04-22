@@ -1,5 +1,6 @@
 import fnmatch
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -28,8 +29,18 @@ class DiskCache(KeyValueCache):
 
     def iterkeys(self, pattern: str = "*") -> Iterable[str]:
         for key in self._cache.iterkeys():
-            if fnmatch.fnmatch(str(key), pattern):
-                yield key
+            # Ensure the key is a string to satisfy the Iterable[str] return type
+            key_str = key.decode("utf-8") if isinstance(key, bytes) else str(key)
+            if fnmatch.fnmatch(key_str, pattern):
+                yield key_str
+
+    @contextmanager
+    def transact(self) -> Iterator[None]:
+        """
+        Provides an atomic transaction context using diskcache's native transaction support.
+        """
+        with self._cache.transact():
+            yield
 
     def __getitem__(self, key: str) -> Any:
         return self._cache[key]
@@ -41,7 +52,9 @@ class DiskCache(KeyValueCache):
         return key in self._cache
 
     def __len__(self) -> int:
-        return len(self._cache)
+        # Explicitly call __len__ and cast to int to satisfy type checkers
+        # that don't recognize diskcache.Cache as Sized.
+        return int(self._cache.__len__())
 
     def is_empty(self) -> bool:
-        return len(self._cache) == 0
+        return len(self) == 0

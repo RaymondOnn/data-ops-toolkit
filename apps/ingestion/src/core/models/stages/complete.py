@@ -3,8 +3,8 @@ import time
 from datetime import datetime, timedelta
 
 import msgspec
-from apps.ingestion.src.core.models.job import Task
-from apps.ingestion.src.core.models.job.manifest import CompletePayload
+from apps.ingestion.src.core.models.task import Task, TaskSignal
+from apps.ingestion.src.core.models.task.manifest import CompletePayload
 from apps.ingestion.src.services.base import Archive
 from apps.ingestion.src.services.factory import ServiceFactory
 from loguru import logger
@@ -81,7 +81,7 @@ class CompleteStage(ExecutionStage):
             # 2. Store Manifest in Database (Current Execution Table)
             # Decision: By moving manifest data to SQL, we allow the BI team to
             # monitor job performance without needing file system access.
-            task.request_status_sync(deep_sync=True)
+            task.request_status_sync(TaskSignal.DONE)
 
             # 4. Final Finalize (Post-Purge)
             # We don't use a symlink here; we just record SUCCESS in the DB/State Store

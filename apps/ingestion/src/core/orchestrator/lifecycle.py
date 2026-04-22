@@ -2,15 +2,16 @@ import shutil
 from pathlib import Path
 
 import msgspec
+from core.orchestrator.manager import TaskManger
+from loguru import logger
+
 from apps.ingestion.src.core.contexts import ExecutionContext, TaskContext
-from apps.ingestion.src.core.models.job import ExecutionStatus, Task
 from apps.ingestion.src.core.models.states.terminal import HoldState
-from apps.ingestion.src.core.orchestrator.engine import IngestionEngine
+from apps.ingestion.src.core.models.task import ExecutionStatus, Task, TaskSignal
 from apps.ingestion.src.core.orchestrator.state import StateStore
 from apps.ingestion.src.utils.common import find_path
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
 from apps.ingestion.src.utils.dates import is_expired
-from loguru import logger
 
 LOG = logger
 
@@ -19,7 +20,7 @@ class LifecycleManager:
     def __init__(
         self,
         state_store: StateStore,
-        engine: IngestionEngine,
+        engine: TaskManger,
         exec_ctx: ExecutionContext,
     ) -> None:
         self.state_store = state_store
@@ -93,7 +94,7 @@ class LifecycleManager:
 
             # 5. Re-queue into the Ingestion Engine
             # Use standardized config name 'config.json'
-            self.engine.queue_jobs(
+            self.engine.queue_tasks(
                 identifier=task.id,
                 run_id=task.run_id,
                 config_file_path=str(task.folder / CONFIG_FILENAME),
@@ -101,7 +102,7 @@ class LifecycleManager:
             )
 
             # 6. Signal the state change to observers (Heartbeat)
-            task.request_status_sync()
+            task.request_status_sync(TaskSignal.SYNC)
             self.state_store.flush()
         except Exception:
             LOG.exception("Recovery failed", path=str(folder_path))

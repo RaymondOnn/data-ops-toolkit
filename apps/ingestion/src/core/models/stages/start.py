@@ -4,14 +4,14 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 import msgspec
-from apps.ingestion.src.core.models.job.manifest import BasePayload
+from apps.ingestion.src.core.models.task.manifest import BasePayload
 from loguru import logger
 
 from .base import ExecutionStage
 from .enums import StageName
 
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.models.job import Task
+    from apps.ingestion.src.core.models.task import Task
 
 
 LOG = logger

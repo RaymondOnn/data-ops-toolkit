@@ -7,22 +7,23 @@ from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import msgspec
-from apps.ingestion.src.core.contexts import TaskContextBuilder
-from apps.ingestion.src.core.models.job import ExecutionStatus, Task
-from apps.ingestion.src.core.models.stages.enums import StageName
-from apps.ingestion.src.services.factory import ServiceFactory
-from apps.ingestion.src.utils.common import make_short_hash
-from apps.ingestion.src.utils.constants import CONFIG_FILENAME, DISK_THRESHOLD_HALT
 from apscheduler.events import EVENT_JOB_ERROR, JobExecutionEvent
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
-from libs.resilience.heartbeat import Heartbeat
-from libs.utils.system import get_disk_usage, get_system_vitals
 from loguru import logger
 
-from .engine import IngestionEngine
+from apps.ingestion.src.core.contexts import TaskContextBuilder
+from apps.ingestion.src.core.models.stages.enums import StageName
+from apps.ingestion.src.core.models.task import ExecutionStatus, Task, TaskSignal
+from apps.ingestion.src.services.factory import ServiceFactory
+from apps.ingestion.src.utils.common import make_short_hash
+from apps.ingestion.src.utils.constants import CONFIG_FILENAME, DISK_THRESHOLD_HALT
+from libs.resilience.heartbeat import Heartbeat
+from libs.utils.system import get_disk_usage, get_system_vitals
+
 from .enums import JobRecord, TaskMetadata
 from .lifecycle import LifecycleManager
+from .manager import TaskManger
 from .signals import SignalProcessor
 from .state import StateStore
 from .trigger import FileTriggerEvent, TimeTriggerEvent, TriggerEvent
@@ -38,6 +39,7 @@ INTERVAL_DB_POLL_SECS = 60
 INTERVAL_STATE_SYNC_SECS = 30
 INTERVAL_ENGINE_SCAN_SECS = 5
 INTERVAL_RECOVERY_SWEEP_SECS = 300
+INTERVAL_PROBE_SECS = 3600
 
 
 def generate_run_id() -> str:
@@ -68,10 +70,12 @@ class Orchestrator:
         ).to_dict()
 
         self.heartbeat = Heartbeat()
-        self.engine = IngestionEngine(self.exec_ctx)
+        self.engine = TaskManger(self.exec_ctx)
 
         # Service Discovery: Use the resolved app settings from the builder
-        db_config = deepcopy(self.builder.app_settings.get("services.clickhouse", {}))
+        db_config = deepcopy(
+            self.builder.app_settings.get("services.clickhouse", {}).to_dict()
+        )
         service_name = db_config.pop("type")
 
         ServiceFactory.get_provider(self.exec_ctx.env, self.exec_ctx.provider_config)
@@ -84,11 +88,16 @@ class Orchestrator:
         if "password" in db_config:
             register_log_masking([db_config["password"]])
 
+        # Initialize the Global Registry with the environment's cache configuration
+        # ServiceRegistry.configure(
+        #     self.exec_ctx.workspace_dir, self.exec_ctx.cache_config
+        # )
+
         # Initialize background scheduler
         # We limit max_workers to reduce DB contention and prevent thundering herd issues
-        executors = {"default": ThreadPoolExecutor(max_workers=4)}
         self.scheduler = BackgroundScheduler(
-            timezone=ZoneInfo(self.exec_ctx.timezone), executors=executors
+            timezone=ZoneInfo(self.exec_ctx.timezone),
+            executors={"default": ThreadPoolExecutor(max_workers=4)},
         )
         self.scheduler.add_listener(self._on_job_error, EVENT_JOB_ERROR)
 
@@ -183,6 +192,9 @@ class Orchestrator:
         self.scheduler.add_job(
             self._perform_maintenance, "interval", seconds=INTERVAL_RECOVERY_SWEEP_SECS
         )
+        self.scheduler.add_job(
+            self._probe_services, "interval", seconds=INTERVAL_PROBE_SECS
+        )
 
         self.scheduler.start()
         # Trigger initial poll immediately so we don't wait for the first interval
@@ -230,7 +242,7 @@ class Orchestrator:
         if self.engine.cache.is_empty():
             return
 
-        self.engine._process_jobs()
+        self.engine._process_tasks()
 
     def _perform_maintenance(self) -> None:
         """Performs scheduled recovery and expiry sweeps."""
@@ -244,6 +256,19 @@ class Orchestrator:
             self.lifecycle.handle_expiry()
         except Exception:
             LOG.exception("Maintenance sweep failed")
+
+    def _probe_services(self) -> None:
+        """Periodic call to check if downed services have recovered."""
+        # Scan signals directory for .source_down files
+        for signal in self.exec_ctx.signal_path.glob("*.source_down"):
+            service_name = signal.name.replace(".source_down", "")
+
+            # Define how to probe (e.g. ping the database service)
+            # For now, we use a generic probe if the service is known
+            LOG.debug("Probing service for recovery", service=service_name)
+
+            # Logic inside registry handles resetting the circuit if probe_fn returns True
+            # ServiceRegistry.probe(service_name, probe_fn=...)
 
     def _run_synchronous_task(
         self,
@@ -275,7 +300,7 @@ class Orchestrator:
 
         while True:
             # Run the engine cycle to drive the job forward
-            self.engine._process_jobs()
+            self.engine._process_tasks()
             self.signals._process_worker_signals(run_ids)
 
             # Check for global timeout
@@ -348,7 +373,7 @@ class Orchestrator:
     ) -> None:
         """
         Evaluates each job against its trigger type and
-        fans out tables to the IngestionEngine.
+        fans out tables to the TaskManger.
 
         Misfire Policy is handled here based on GRACE_PERIOD_SECS:
         -1: Fire Immediately (Always True)
@@ -480,7 +505,7 @@ class Orchestrator:
                 f.write(msgspec.json.encode(task_ctx))
 
             # 4. Queue to Engine (Immediate move to DiskCache)
-            self.engine.queue_jobs(
+            self.engine.queue_tasks(
                 identifier=identifier,
                 run_id=run_id,
                 config_file_path=str(config_path),
@@ -510,7 +535,7 @@ class Orchestrator:
                 "current_stage": ExecutionStatus.CANCELLED,
             }
         )
-        task.request_status_sync(deep_sync=True)
+        task.request_status_sync(TaskSignal.DONE)
 
         # 2. Sync the StateStore
         # Since request_status_sync created the .done file, we tell the StateStore
