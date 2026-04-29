@@ -7,28 +7,31 @@ from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import msgspec
-from apscheduler.events import EVENT_JOB_ERROR, JobExecutionEvent
-from apscheduler.executors.pool import ThreadPoolExecutor
-from apscheduler.schedulers.background import BackgroundScheduler
-from loguru import logger
-
 from apps.ingestion.src.core.contexts import TaskContextBuilder
+from apps.ingestion.src.core.contexts.execution import ExecutionContext
 from apps.ingestion.src.core.models.stages.enums import StageName
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task, TaskSignal
+from apps.ingestion.src.core.models.task import (
+    ExecutionStatus,
+    Task,
+    TaskSignal,
+    create_task_folder,
+)
 from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.utils.common import make_short_hash
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, DISK_THRESHOLD_HALT
-from libs.resilience.heartbeat import Heartbeat
+from apscheduler.events import JobExecutionEvent
 from libs.utils.system import get_disk_usage, get_system_vitals
+from loguru import logger
 
-from .enums import JobRecord, TaskMetadata
-from .lifecycle import LifecycleManager
-from .manager import TaskManger
+from .janitor import Janitor
+from .manager import TaskManager
 from .signals import SignalProcessor
 from .state import StateStore
-from .trigger import FileTriggerEvent, TimeTriggerEvent, TriggerEvent
+from .trigger import TriggerManager
 
 if TYPE_CHECKING:
+    from apps.ingestion.src.core.contexts.task import TaskContext
+
     from .enums import TaskMetadata
 
 LOG = logger
@@ -40,13 +43,6 @@ INTERVAL_STATE_SYNC_SECS = 30
 INTERVAL_ENGINE_SCAN_SECS = 5
 INTERVAL_RECOVERY_SWEEP_SECS = 300
 INTERVAL_PROBE_SECS = 3600
-
-
-def generate_run_id() -> str:
-    """Generates a unique run ID for a task."""
-    timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
-    short_hash = make_short_hash(8)
-    return f"{timestamp}-{short_hash}"
 
 
 # TODO: Check Disk Space
@@ -61,73 +57,41 @@ def generate_run_id() -> str:
 # TODO: Dynamic Stage Order (e.g. Archive before Write)
 
 
+def generate_run_id() -> str:
+    """Generates a unique run ID for a task."""
+    timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+    short_hash = make_short_hash(8)
+    return f"{timestamp}-{short_hash}"
+
+
 class Orchestrator:
     def __init__(self, builder: TaskContextBuilder):
         self.builder = builder
         self.exec_ctx = builder.get_execution_context()
-        self.exec_ctx.provider_config = self.builder.app_settings.get(
-            "secret_provider", {}
-        ).to_dict()
-
-        self.heartbeat = Heartbeat()
-        self.engine = TaskManger(self.exec_ctx)
-
-        # Service Discovery: Use the resolved app settings from the builder
-        db_config = deepcopy(
-            self.builder.app_settings.get("services.clickhouse", {}).to_dict()
-        )
-        service_name = db_config.pop("type")
-
-        ServiceFactory.get_provider(self.exec_ctx.env, self.exec_ctx.provider_config)
-        self.db_service = ServiceFactory.get_service(service_name, **db_config)
-        self.state_store = StateStore(self.db_service, self.exec_ctx)
-
-        # Logic to register initial sensitive values (e.g. DB passwords)
-        from libs.utils.log import register_log_masking
-
-        if "password" in db_config:
-            register_log_masking([db_config["password"]])
 
         # Initialize the Global Registry with the environment's cache configuration
         # ServiceRegistry.configure(
         #     self.exec_ctx.workspace_dir, self.exec_ctx.cache_config
         # )
-
-        # Initialize background scheduler
-        # We limit max_workers to reduce DB contention and prevent thundering herd issues
-        self.scheduler = BackgroundScheduler(
-            timezone=ZoneInfo(self.exec_ctx.timezone),
-            executors={"default": ThreadPoolExecutor(max_workers=4)},
-        )
-        self.scheduler.add_listener(self._on_job_error, EVENT_JOB_ERROR)
-
-        # Component Injection
-        self.signals = SignalProcessor(self.state_store, self.engine, self.exec_ctx)
-        self.lifecycle = LifecycleManager(self.state_store, self.engine, self.exec_ctx)
-
-        # 2. Wire the Signals to the Handlers (The Refactor Fix)
-        self.signals.register_command("RECOVER_ALL.cmd", self.lifecycle.handle_recovery)
-        self.signals.register_command("PURGE_EXPIRED.cmd", self.lifecycle.handle_expiry)
-        # self.signals.register_command("RELOAD_CONFIG.cmd", self._reload_internal_config)
-
         self._perform_platform_preflight()
+        self._setup_components(exec_ctx=self.exec_ctx)
+        self._check_system_health()
+
         LOG.info("Orchestrator initialized")
 
     def _perform_platform_preflight(self) -> None:
         """Validates critical shared infrastructure."""
         # 1. Verify connection to the State Tracking database
         try:
-            with self.db_service.client.get_connection() as _:
-                LOG.debug("Preflight: Database connectivity verified.")
+            self._init_services(self.exec_ctx)
         except Exception as e:
-            LOG.critical("Preflight: Could not connect to database", error=str(e))
-            sys.exit(1)
+            LOG.critical("Failed to initialize services", error=str(e))
+            raise e
 
         # 2. Ensure signal directory is writable
         self.exec_ctx.signal_path.mkdir(parents=True, exist_ok=True)
-
-        # 3. Enhanced System Health Check
-        self._check_system_health()
+        self.exec_ctx.active_path.mkdir(parents=True, exist_ok=True)
+        self.exec_ctx.data_path.mkdir(parents=True, exist_ok=True)
 
     def _check_system_health(self) -> None:
         """Monitors system vitals to apply backpressure."""
@@ -141,40 +105,56 @@ class Orchestrator:
         if vitals.mem_pct > 85:
             LOG.warning("High memory pressure detected", usage=vitals.mem_pct)
             # Degrade engine performance to prevent OOM
-            self.engine.is_degraded = True
+            self.tasks.is_degraded = True
         else:
-            self.engine.is_degraded = False
+            self.tasks.is_degraded = False
 
-    def run(
-        self,
-        job_id: str,
-        dataset_id: str,
-        partition_date_str: str | None = None,
-        overrides: dict[str, Any] | None = None,
-    ) -> None:
-        if self.exec_ctx.always_on:
-            self._start_always_on_loop()
-            self.mode = "ALWAYS_ON"
-        else:
-            self._run_synchronous_task(
-                job_id,
-                dataset_id=dataset_id,
-                partition_date_str=partition_date_str,
-                overrides=overrides,
+    def _init_services(self, exec_ctx: ExecutionContext):
+        try:
+            exec_ctx.provider_config = self.builder.app_settings.get(
+                "secret_provider", {}
+            ).to_dict()
+            ServiceFactory.get_provider(exec_ctx.env, exec_ctx.provider_config)
+
+            db_config = deepcopy(
+                self.builder.app_settings.get("services.clickhouse", {}).to_dict()
             )
-            self.mode = "TRIGGER"
+            self.db_service = ServiceFactory.get_service(
+                service_type=db_config.pop("type"), **db_config
+            )
 
-    def _start_always_on_loop(self) -> None:
-        """
-        ARCHITECTURAL NOTE: We use a Polling Control Loop instead of an Event Watchdog.
-        1. Portability: Works identically on EC2 (local disk) and K8S (EFS/NFS)
-        where inotify events often fail to propagate across pods.
-        2. Backpressure: Prevents 'thundering herd' spikes by batching signal
-        processing into predictable 'ticks'.
-        3. Self-Healing: Every tick performs a full state reconciliation,
-        ensuring we recover from crashes automatically.
-        """
-        self.heartbeat.ready()
+        except Exception as e:
+            LOG.error(f"Failed to initialize services: {e}")
+            raise e
+
+    def _setup_components(self, exec_ctx: ExecutionContext) -> None:
+        self.tasks = TaskManager(exec_ctx)
+        self.triggers = TriggerManager(exec_ctx)
+        self.state_store = StateStore(self.db_service, exec_ctx)
+        self.signals = SignalProcessor(self.state_store, exec_ctx)
+        self.janitor = Janitor(self.state_store, self.tasks, exec_ctx)
+
+        # 2. Wire the Signals to the Handlers (The Refactor Fix)
+        self.signals.register_command(
+            "RECOVER_ALL.cmd", self.janitor.recover_failed_tasks
+        )
+        # self.signals.register_command(
+        #     "PURGE_EXPIRED.cmd", self.janitor.purge_expired_workspaces
+        # )
+        # self.signals.register_command("RELOAD_CONFIG.cmd", self._reload_internal_config)
+
+    def _setup_scheduler(self):
+        from apscheduler.events import EVENT_JOB_ERROR
+        from apscheduler.executors.pool import ThreadPoolExecutor
+        from apscheduler.schedulers.background import BackgroundScheduler
+
+        # We limit max_workers to reduce DB contention and
+        # prevent thundering herd issues
+        self.scheduler = BackgroundScheduler(
+            timezone=ZoneInfo(self.exec_ctx.timezone),
+            executors={"default": ThreadPoolExecutor(max_workers=4)},
+        )
+        self.scheduler.add_listener(self._on_job_error, EVENT_JOB_ERROR)
 
         # Register background maintenance tasks
         self.scheduler.add_job(
@@ -187,6 +167,11 @@ class Orchestrator:
             self.state_store.flush, "interval", seconds=INTERVAL_STATE_SYNC_SECS
         )
         self.scheduler.add_job(
+            self.state_store._flush_buffer_to_stream,
+            "interval",
+            seconds=5,  # Flush buffer every 5 seconds
+        )
+        self.scheduler.add_job(
             self._drive_engine, "interval", seconds=INTERVAL_ENGINE_SCAN_SECS
         )
         self.scheduler.add_job(
@@ -197,6 +182,41 @@ class Orchestrator:
         )
 
         self.scheduler.start()
+
+    def run(
+        self,
+        job_id: str,
+        dataset_id: str,
+        partition_date_str: str | None = None,
+        overrides: dict[str, Any] | None = None,
+    ) -> None:
+        if self.exec_ctx.always_on:
+            self._start_always_on_loop()
+        else:
+            self._run_synchronous_task(
+                job_id,
+                dataset_id=dataset_id,
+                partition_date_str=partition_date_str,
+                overrides=overrides,
+            )
+
+    def _start_always_on_loop(self) -> None:
+        """
+        ARCHITECTURAL NOTE: We use a Polling Control Loop instead of an Event Watchdog.
+        1. Portability: Works identically on EC2 (local disk) and K8S (EFS/NFS)
+        where inotify events often fail to propagate across pods.
+        2. Backpressure: Prevents 'thundering herd' spikes by batching signal
+        processing into predictable 'ticks'.
+        3. Self-Healing: Every tick performs a full state reconciliation,
+        ensuring we recover from crashes automatically.
+        """
+        from libs.resilience.heartbeat import Heartbeat
+
+        self.heartbeat = Heartbeat()
+        self.heartbeat.ready()
+
+        self._setup_scheduler()
+
         # Trigger initial poll immediately so we don't wait for the first interval
         self._poll_and_evaluate()
         LOG.info(
@@ -215,6 +235,7 @@ class Orchestrator:
             self.scheduler.shutdown()
             self.stop()
 
+    # Scheduler Job
     def _on_job_error(self, event: JobExecutionEvent) -> None:
         """Listener to capture and log APScheduler job failures."""
         if event.exception:
@@ -227,36 +248,68 @@ class Orchestrator:
                 traceback=str(event.traceback) if event.traceback else "N/A",
             )
 
+    # Scheduler Job
     def _poll_and_evaluate(self) -> None:
         """Polls the DB view and evaluates triggers."""
         if self.exec_ctx.always_on:
             # Clear builder cache to pick up any manual config changes during this poll
             self.builder._settings_cache.clear()
-            active_definitions = self.state_store.get_latest_state(force_refresh=True)
-            self._evaluate_triggers(list(active_definitions.values()))
 
+            # Refresh from database
+            active_definitions = self.state_store.get_latest_state(force_refresh=True)
+
+            # 3. Decision Hub: Structured Decisions via TriggerRules
+            decisions = self.triggers.evaluate(list(active_definitions.values()))
+
+            # 4. Action Coordination (Respecting dry_run)
+            for decision in decisions:
+                log = LOG.bind(
+                    run_id=decision.record.RUN_ID,
+                    rule=decision.rule_name,
+                    dry_run=self.exec_ctx.is_dry_run,
+                )
+
+                if decision.action == "purge":
+                    log.warning("Intent: Purge record")
+                    if not self.exec_ctx.is_dry_run:
+                        self.janitor.process_expired_run(
+                            decision.record, decision.context
+                        )
+
+                elif decision.action == "trigger":
+                    log.debug("Intent: Trigger record")
+                    if not self.exec_ctx.is_dry_run:
+                        self._trigger_job(
+                            decision.record.JOB_ID,
+                            decision.record.DATASET_ID,
+                            partition_date_str=decision.record.PARTITION_DATE,
+                            run_id=decision.record.RUN_ID,
+                        )
+
+    # Scheduler Job
     def _drive_engine(self) -> None:
         """Drives the ingestion engine queues."""
         # Only drive the engine if there are actually tasks in the queue.
         # DiskCache len() is an O(1) operation.
-        if self.engine.cache.is_empty():
+        if self.tasks.cache.is_empty():
             return
 
-        self.engine._process_tasks()
+        self.tasks._process_tasks()
 
+    # Scheduler Job
     def _perform_maintenance(self) -> None:
         """Performs scheduled recovery and expiry sweeps."""
         try:
             # Skip recovery and expiry logic if no active records are tracked.
-            if not self.state_store.active_records:
+            if not self.state_store.active_registry:
                 return
 
-            self.engine.scan_and_recover()
-            self.lifecycle.handle_recovery()
-            self.lifecycle.handle_expiry()
+            self.tasks.recover_zombie_tasks()
+            self.janitor.recover_failed_tasks()
         except Exception:
             LOG.exception("Maintenance sweep failed")
 
+    # Scheduler Job
     def _probe_services(self) -> None:
         """Periodic call to check if downed services have recovered."""
         # Scan signals directory for .source_down files
@@ -280,7 +333,7 @@ class Orchestrator:
     ) -> None:
         """The Dumb Trigger Mode logic"""
         if not overrides:
-            raise ValueError("Dumb mode requires a valid TaskConfig.")
+            raise ValueError("Trigger mode requires a valid TaskConfig.")
 
         run_ids: set[str] = self._trigger_job(
             job_id,
@@ -300,7 +353,7 @@ class Orchestrator:
 
         while True:
             # Run the engine cycle to drive the job forward
-            self.engine._process_tasks()
+            self.tasks._process_tasks()
             self.signals._process_worker_signals(run_ids)
 
             # Check for global timeout
@@ -355,7 +408,7 @@ class Orchestrator:
         for stage_enum in StageName:
             key = f"{stage_enum.label}:{identifier}:{run_id}"
 
-            meta: TaskMetadata = self.engine.cache.get(key)
+            meta: TaskMetadata = self.tasks.cache.get(key)
             if meta:
                 if hasattr(meta, "status") and meta.status in [
                     ExecutionStatus.FAILED.value,
@@ -367,110 +420,19 @@ class Orchestrator:
         # If not found in cache at all, it was successfully popped/finished
         return "success"
 
-    def _evaluate_triggers(
-        self,
-        job_records: list[JobRecord],
-    ) -> None:
-        """
-        Evaluates each job against its trigger type and
-        fans out tables to the TaskManger.
-
-        Misfire Policy is handled here based on GRACE_PERIOD_SECS:
-        -1: Fire Immediately (Always True)
-        0 : Skip (Always False if delay > 0)
-        >0: Grace Period (True if within bounds)
-        """
-        now = datetime.now(ZoneInfo(self.exec_ctx.timezone))
-
-        # Map of trigger types to their logic classes
-        trigger_map: dict[str, TriggerEvent] = {
-            "CRON": TimeTriggerEvent(),
-            "FILE": FileTriggerEvent(),
-            "MANUAL": TimeTriggerEvent(),
-        }
-
-        for record in job_records:
-            # Only evaluate triggers for jobs that are currently PENDING
-            if ExecutionStatus.PENDING.value != record.JOB_STATUS:
-                continue
-
-            scheduled_time = record.SCHEDULED_TIMESTAMP
-            if scheduled_time.tzinfo is None:
-                scheduled_time = scheduled_time.replace(
-                    tzinfo=ZoneInfo(self.exec_ctx.timezone)
-                )
-
-            delay = (now - scheduled_time).total_seconds()
-            grace_sec = record.MISFIRE_GRACE_SECS
-
-            # --- 1. MISFIRE POLICY EVALUATION ---
-            if delay > 0:
-                # Case A: Force Fire (-1)
-                if grace_sec == -1:
-                    LOG.info(
-                        "Force-triggering late job", job_id=record.JOB_ID, delay=delay
-                    )
-
-                # Case B: Within Grace Period (Catch-up)
-                elif delay <= grace_sec:
-                    LOG.info(
-                        "Catch-up trigger (within grace period)",
-                        job_id=record.JOB_ID,
-                        delay=delay,
-                        grace=grace_sec,
-                    )
-
-                # Case C: Expired (Beyond Grace)
-                else:
-                    LOG.warning(
-                        "Trigger EXPIRED (Skipping)",
-                        job_id=record.JOB_ID,
-                        delay_sec=delay,
-                        grace_sec=grace_sec,
-                    )
-                    self.state_store.skip_misfired_run(record.JOB_ID)
-                    continue
-
-            # --- 2. TRIGGER EVALUATION ---
-            trigger_type = "FILE" if record.WATCH_FILE_PATH else record.TRIGGER_TYPE
-            trigger = trigger_map.get(trigger_type, trigger_map["CRON"])
-
-            if trigger.should_fire(record):
-                LOG.info(
-                    "Trigger condition met",
-                    job_id=record.JOB_ID,
-                    dataset_id=record.DATASET_ID,
-                    partition_date=record.PARTITION_DATE,
-                    scheduled_time=record.SCHEDULED_TIMESTAMP.isoformat(),
-                    trigger=trigger_type,
-                )
-                self._trigger_job(
-                    job_id=record.JOB_ID,
-                    dataset_id=record.DATASET_ID,
-                    partition_date_str=record.PARTITION_DATE,
-                )
-
-    def stop(self) -> None:
-        """Graceful shutdown for Always-On"""
-        print("Shutting down gracefully...")
-        # Close DB connections, stop Ray actors, etc.
-        sys.exit(0)
-
-    # TODO: Check if able to trigger on a per job or per dataset basis.
     def _trigger_job(
         self,
         job_id: str,
         dataset_id: str,
         partition_date_str: str | None = None,
         overrides: dict[str, Any] | None = None,
+        run_id: str | None = None,
     ) -> set[str]:
 
         run_ids = set()
 
-        LOG.debug("Building task contexts", partition_date=partition_date_str)
         # 1. Get the list of dataset configurations for this Task ID
-        # Uses the injected builder which already has app_settings loaded
-        task_contexts = self.builder.build(
+        task_contexts: list[TaskContext] = self.builder.build(
             job_id=job_id,
             dataset_id=dataset_id,
             partition_date_str=partition_date_str,
@@ -478,8 +440,7 @@ class Orchestrator:
         )
 
         for task_ctx in task_contexts:
-            # B. Generate the Unique Identity for this Run
-            run_id = generate_run_id()
+            run_id = run_id or generate_run_id()
             log = LOG.bind(run_id=run_id, job_id=job_id, dataset_id=dataset_id)
             identifier = self.exec_ctx.get_task_identifier(
                 job_id=task_ctx.job_id,
@@ -495,27 +456,54 @@ class Orchestrator:
                 identifier=identifier,
                 from_stage=task_ctx.from_stage,
             )
-            # Path: storage/active/
-            active_root = self.exec_ctx.active_path
-            active_root.mkdir(parents=True, exist_ok=True)
 
             # E. Freeze the Task Context (The instructions for the workers)
-            config_path = active_root / f"{prefix}_{CONFIG_FILENAME}"
+            config_path = self.exec_ctx.active_path / f"{prefix}_{CONFIG_FILENAME}"
             with config_path.open("wb") as f:
                 f.write(msgspec.json.encode(task_ctx))
 
+            # F. Seed the State Store Cache
+            # This ensures that emit_state finds the record during the handoff,
+            # which is critical for Dumb Mode and preventing validation errors.
+            self.state_store.create_record(
+                job_id=task_ctx.job_id,
+                dataset_id=task_ctx.dataset_id,
+                partition_date=task_ctx.partition_date,
+                run_id=run_id,
+                status=ExecutionStatus.PROVISIONED.value,
+            )
+
+            # G. Force Workspace Provisioning
+            # Accessing .folder triggers _make_folder() which relocates the config
+            task_folder_path = (
+                self.exec_ctx.active_path
+                / self.exec_ctx.get_task_identifier(
+                    task_ctx.job_id, task_ctx.dataset_id, task_ctx.partition_date
+                )
+                / str(run_id)
+            )
+            create_task_folder(
+                folder_path=task_folder_path, source_config_path=config_path
+            )
+
             # 4. Queue to Engine (Immediate move to DiskCache)
-            self.engine.queue_tasks(
+            self.tasks.queue_tasks(
                 identifier=identifier,
                 run_id=run_id,
                 config_file_path=str(config_path),
             )
 
             # 5. Optional: Update DB so it doesn't trigger again immediately
-            self.state_store.update_status(job_id, ExecutionStatus.QUEUED)
+            # self.state_store.update_status(job_id, ExecutionStatus.QUEUED)
             run_ids.add(run_id)
 
         return run_ids
+
+    def stop(self) -> None:
+        """Graceful shutdown for Always-On"""
+        print("Shutting down gracefully...")
+        # Close DB connections, stop Ray actors, etc.
+        sys.exit(0)
 
     def _terminate_job(
         self, task: Task, status: ExecutionStatus, reason: str | None = None
@@ -544,7 +532,7 @@ class Orchestrator:
 
         # 3. Cleanup logic (Optional: move to failed or delete)
         if status == ExecutionStatus.EXPIRED:
-            self.lifecycle._cleanup_workspace(task.run_id)
+            self.janitor._cleanup_workspace(task.job_id, task.run_id, task.id)
 
 
 def create_orchestrator(app_cfg_path: str | None = None) -> Orchestrator:

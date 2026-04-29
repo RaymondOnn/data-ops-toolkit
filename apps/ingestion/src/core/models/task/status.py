@@ -10,10 +10,10 @@ class ExecutionStatus(StrEnum):
 
     # Initial State
     PENDING = "PENDING"  # Created, waiting for schedule
-    QUEUED = "QUEUED"  # Picked up by Orchestrator, waiting for Worker
+    PROVISIONED = "PROVISIONED"  # Instructions and folder created on disk
+    QUEUED = "QUEUED"  # Accepted by the TaskManager, waiting for a Ray Worker
 
     # Active States
-    PROVISIONING = "PROVISIONING"  # Worker initialized, manifest created
     RUNNING = "RUNNING"  # Actively processing a stage
 
     # Terminal States (End of the road)
@@ -31,7 +31,7 @@ class ExecutionStatus(StrEnum):
 
     @classmethod
     def active_statuses(cls) -> set["ExecutionStatus"]:
-        return {cls.QUEUED, cls.PENDING, cls.RUNNING, cls.PROVISIONING}
+        return {cls.QUEUED, cls.PENDING, cls.RUNNING, cls.PROVISIONED}
 
     @classmethod
     def terminal_statuses(cls) -> set["ExecutionStatus"]:
@@ -39,4 +39,4 @@ class ExecutionStatus(StrEnum):
 
     @classmethod
     def dispatched_statuses(cls) -> set["ExecutionStatus"]:
-        return {cls.PROVISIONING, cls.RUNNING}
+        return {cls.RUNNING}

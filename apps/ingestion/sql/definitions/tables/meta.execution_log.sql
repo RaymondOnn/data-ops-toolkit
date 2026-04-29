@@ -1,14 +1,13 @@
 DROP TABLE IF EXISTS META.EXECUTION_LOG;
 CREATE TABLE META.EXECUTION_LOG (
-    ROW_ID                  UInt64 DEFAULT sipHash64(toString(generateUUIDv4()))
-    , RUN_ID                Nullable(FixedString(26))
+    RUN_ID                  FixedString(26)
     , JOB_ID                LowCardinality(String)
     , DATASET_ID            LowCardinality(String)
     , PARTITION_DATE        Nullable(Date)
-    , SCHEDULED_TIMESTAMP   DateTime64(3)
-    , START_TIMESTAMP       Nullable(DateTime64(3))
-    , END_TIMESTAMP         Nullable(DateTime64(3))
-    , LAST_UPDATED_AT_TS    DateTime64(3) DEFAULT now64()
+    , SCHEDULED_TIMESTAMP_LC   DateTime64(3, 'Asia/Singapore')
+    , START_TIMESTAMP_LC       Nullable(DateTime64(3, 'Asia/Singapore'))
+    , END_TIMESTAMP_LC         Nullable(DateTime64(3, 'Asia/Singapore'))
+    , LAST_UPDATED_AT_TS_LC    DateTime64(3, 'Asia/Singapore') DEFAULT now64(3, 'Asia/Singapore')
     , JOB_STATUS            LowCardinality(String)
     , CURRENT_STEP          LowCardinality(Nullable(String))
     , JOB_BITMASK           UInt16 DEFAULT 0
@@ -19,8 +18,9 @@ CREATE TABLE META.EXECUTION_LOG (
     , SOURCE_ROW_COUNT      Nullable(UInt64) 
     , FINAL_ROW_COUNT       Nullable(UInt64) 
     , FINAL_MANIFEST        Nullable(String) -- JSON representation
+    , REMARKS               Nullable(String)
 )
 ENGINE = MergeTree
-PARTITION BY toYYYYMM(LAST_UPDATED_AT_TS)
-ORDER BY (JOB_ID, DATASET_ID, LAST_UPDATED_AT_TS, ROW_ID)
-TTL LAST_UPDATED_AT_TS + INTERVAL 12 MONTH;
+PARTITION BY toYYYYMM(LAST_UPDATED_AT_TS_LC)
+ORDER BY (JOB_ID, DATASET_ID, RUN_ID, LAST_UPDATED_AT_TS_LC)
+TTL LAST_UPDATED_AT_TS_LC + INTERVAL 12 MONTH;

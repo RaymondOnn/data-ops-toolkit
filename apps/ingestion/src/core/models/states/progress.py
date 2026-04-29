@@ -1,0 +1,28 @@
+from typing import TYPE_CHECKING, Any
+
+from apps.ingestion.src.core.models.task.enums import TaskSignal
+from loguru import logger
+
+from .base import LifecycleState
+from .success import SuccessState
+
+if TYPE_CHECKING:
+    from apps.ingestion.src.core.models.task.base import Task
+
+LOG = logger
+
+
+class ProgressState(LifecycleState):
+    folder_name = "active"
+
+    @classmethod
+    def is_applicable(cls, task: "Task", exception: Exception | None = None) -> bool:
+        """Happy path but not yet finished."""
+        return not exception and not SuccessState.is_applicable(task)
+
+    def on_enter(self, data: dict[str, Any]) -> None:
+        """Signals progress to the orchestrator."""
+        self.task.request_status_sync(TaskSignal.SYNC)
+
+    def can_recover(self) -> bool:
+        return False

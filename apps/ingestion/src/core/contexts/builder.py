@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 import msgspec
 from apps.ingestion.src.core.contexts.execution import ExecutionContext, ExecutionMode
-from apps.ingestion.src.core.contexts.job import TaskContext
+from apps.ingestion.src.core.contexts.task import TaskContext
 from apps.ingestion.src.utils.constants import (
     APP_CONFIG_ROOT,
     APP_CURRENT_ENV,
@@ -103,8 +103,8 @@ class TaskContextBuilder:
             LOG.info("Resolved App Config", config=self.app_settings.to_dict())
         except Exception:
             LOG.exception("Could not serialize app config for logging")
-            raise 
-        
+            raise
+
     def _resolve_partition_date(
         self,
         spec: dict[str, Any],
@@ -458,5 +458,4 @@ class TaskContextBuilder:
                     ctx_data.setdefault("custom_overrides", {})[key] = value
 
         # Validate via msgspec
-        return msgspec.json.decode(msgspec.json.encode(ctx_data), type=TaskContext)
         return msgspec.json.decode(msgspec.json.encode(ctx_data), type=TaskContext)

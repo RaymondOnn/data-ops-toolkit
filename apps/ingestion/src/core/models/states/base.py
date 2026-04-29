@@ -11,6 +11,12 @@ class LifecycleState(ABC):
     def __init__(self, task: "Task"):
         self.task = task
 
+    @classmethod
+    @abstractmethod
+    def is_applicable(cls, task: "Task", exception: Exception | None = None) -> bool:
+        """Logic to determine if the task outcome matches this state."""
+        pass
+    
     @abstractmethod
     def on_enter(self, data: dict[str, Any]) -> None:
         """Logic executed when a task is moved into this state."""

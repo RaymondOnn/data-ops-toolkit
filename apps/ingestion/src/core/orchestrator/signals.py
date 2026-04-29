@@ -1,17 +1,15 @@
-import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING
-
-from loguru import logger
 
 from apps.ingestion.src.core.models.task.status import ExecutionStatus
 from apps.ingestion.src.utils.common import find_path
+from loguru import logger
 
 if TYPE_CHECKING:
-    from core.orchestrator.manager import TaskManger
-
     from apps.ingestion.src.core.contexts import ExecutionContext
     from apps.ingestion.src.core.orchestrator.state import StateStore
+
 
 LOG = logger
 
@@ -25,13 +23,61 @@ class SignalProcessor:
     def __init__(
         self,
         state_store: "StateStore",
-        engine: "TaskManger",
         exec_ctx: "ExecutionContext",
     ):
         self.state_store = state_store
-        self.engine = engine
         self.exec_ctx = exec_ctx
         self._commands: dict[str, Callable] = {}
+        self._signal_handlers: dict[str, Callable[[str, Path | None], None]] = {
+            ".fail": self._handle_fail_signal,
+            ".done": self._handle_done_signal,
+            ".retry": self._handle_retry_signal,
+            ".sync": self._handle_sync_signal,
+        }
+
+    def _handle_fail_signal(self, run_id: str, folder_path: Path | None) -> None:
+        """Handles a .fail signal, performing a deep sync to capture error details."""
+        LOG.error("Syncing terminal failure to StateStore", run_id=run_id)
+        if folder_path:
+            self.state_store.sync_from_folder(folder_path)
+        else:
+            LOG.warning(
+                "Failed signal for non-existent folder, emitting synthetic expiry",
+                run_id=run_id,
+            )
+            # If folder is gone, emit a synthetic expiry to mark it as failed in DB
+            self.state_store.emit_expiry(
+                run=self.state_store.active_registry.get(run_id),  # type: ignore
+                context=None,
+                reason=f"Failed signal received, but folder not found for {run_id}",
+            )
+
+    def _handle_done_signal(self, run_id: str, folder_path: Path | None) -> None:
+        """Handles a .done signal, performing a deep sync for completion."""
+        LOG.success("Syncing task completion to StateStore", run_id=run_id)
+        if folder_path:
+            self.state_store.sync_from_folder(folder_path)
+        else:
+            LOG.warning(
+                "Done signal for non-existent folder, emitting synthetic expiry",
+                run_id=run_id,
+            )
+            # If folder is gone, emit a synthetic expiry to mark it as done in DB
+            self.state_store.emit_expiry(
+                run=self.state_store.active_registry.get(run_id),  # type: ignore
+                context=None,
+                reason=f"Done signal received, but folder not found for {run_id}",
+            )
+
+    def _handle_retry_signal(
+        self, run_id: str, folder_path: Path | None = None
+    ) -> None:
+        """Handles a .retry signal, updating the job status."""
+        self.state_store.update_run(run_id, {"JOB_STATUS": ExecutionStatus.RETRY.value})
+
+    def _handle_sync_signal(self, run_id: str, folder_path: Path | None = None) -> None:
+        """Handles a .sync signal, updating the last active timestamp."""
+        self.state_store.update_run(run_id, {})
 
     def register_command(self, name: str, handler: Callable):
         """Registers handlers for .cmd files."""
@@ -69,7 +115,7 @@ class SignalProcessor:
                     continue
 
                 ext = file.suffix
-                LOG.debug("Processing task signal", run_id=run_id, type=ext)
+                LOG.debug("Processing task signal", run_id=run_id, signal_type=ext)
 
                 # --- THE GLOBAL STATE SYNC LOGIC ---
 
@@ -77,32 +123,12 @@ class SignalProcessor:
                 # find_path looks for the directory name matches run_id
                 folder_path = find_path(self.exec_ctx.workspace_dir, run_id)
 
-                if not folder_path:
+                if handler := self._signal_handlers.get(ext):
+                    handler(run_id, folder_path)
+                else:
                     LOG.warning(
-                        "Signal received but task folder not found", run_id=run_id
+                        "Unknown signal file extension", filename=file.name, ext=ext
                     )
-                    file.unlink()
-                    continue
-
-                if ext == ".fail":
-                    # TRIGGER: Deep sync on failure to capture error message and traceback
-                    LOG.error("Syncing terminal failure to StateStore", run_id=run_id)
-                    self.state_store.sync_from_folder(folder_path)
-
-                elif ext == ".done":
-                    # TRIGGER: Success sync
-                    LOG.success("Syncing task completion to StateStore", run_id=run_id)
-                    self.state_store.sync_from_folder(folder_path)
-
-                elif ext == ".retry":
-                    # TRIGGER: Status update for intermediate retry
-                    self.state_store.update_run(
-                        run_id, {"status": ExecutionStatus.RETRY}
-                    )
-
-                elif ext == ".sync":
-                    # TRIGGER: Basic heartbeat/progress update
-                    self.state_store.update_run(run_id, {"last_active": time.time()})
 
             except Exception:
                 LOG.exception("Failed to process signal file", filename=file.name)

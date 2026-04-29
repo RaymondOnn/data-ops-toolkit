@@ -1,12 +1,14 @@
+import re
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from apps.ingestion.src.services.database.base import DatabaseSink, DatabaseSource
 from apps.ingestion.src.services.factory import ServiceFactory
 from libs.database.clients.clickhouse import ClickhouseClient
-from loguru import logger
 
 LOG = logger
 
@@ -29,6 +31,7 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             port=config.get("port", 8123),
             user=config.get("user", "default"),
             password=resolved_password,
+            database=config.get("database", "default"),
         )
 
     def stage_data(
@@ -39,12 +42,17 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         file_ext: str = "parquet",
         audit_values: dict[str, Any] | None = None,
     ) -> tuple[str, int] | None:
-        name = target_table.split(".", 1)[
-            -1
-        ]  # Use table name as part of staging table for clarity
+        # Extract database and table names to fully qualify the staging table
+        parts = target_table.split(".", 1)
+        db_name = parts[0] if len(parts) > 1 else None
+        table_name = parts[-1]
+
+        timestamp = datetime.now().astimezone().strftime("%Y%m%d%H%M%S")
+        staging_table_name = f"stg_{table_name}_{timestamp}"
         staging_table = (
-            f"stg_{name}_{int(datetime.now().astimezone().strftime('%Y%m%d%H%M%S'))}"
+            f"{db_name}.stg_{table_name}_{timestamp}" if db_name else staging_table_name
         )
+
         audit_values = audit_values or {}
         success = False
         try:
@@ -145,10 +153,14 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
                 sql=insert_sql,
             )
 
-            rows_promoted = self.get_row_count(target_table)
+            rows_promoted = self.get_row_count(
+                table_name=target_table,
+                where_clause=f"{partition_col} = '{partition_val}'",
+            )
             if rows_promoted != expected_count:
                 raise ValueError(
-                    f"Row count mismatch after promotion. Expected {expected_count}, got {rows_promoted}."
+                    "Row count mismatch after promotion. "
+                    f"Expected {expected_count}, got {rows_promoted}."
                 )
 
             LOG.success(
@@ -160,7 +172,10 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             success = True
 
         except Exception:
-            LOG.exception("Error during promotion to ClickHouse")
+            LOG.exception(
+                "Error during promotion to ClickHouse table: {table}",
+                table=target_table,
+            )
             raise
         finally:
             # Always drop the staging table after the swap attempt
@@ -210,11 +225,28 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         LOG.info("Cloning table structure", source=reference, destination=other)
         self.client.sql(sql)
 
-    def get_row_count(self, table_name: str) -> int:
-        """Returns the total row count for a specified table."""
-        res = self.client.sql(f"SELECT COUNT(*) FROM {table_name}")
-        return int(res[0][0]) if res and res[0] else 0
+    def get_row_count(self, table_name: str, where_clause: str | None = None) -> int:
+        # 1. Clean the where clause (Case-Insensitive)
+        clean_where = "1=1"
+        if where_clause and where_clause.strip():
+            # Removes "where " or "WHERE " from the start
+            clean_where = re.sub(r"(?i)^where\s+", "", where_clause.strip())
+
+        # Protect table_name by wrapping in backticks and removing existing ones
+        # safe_table = '"{}"'.format(table_name.replace('"', '""'))
+
+        query = f"SELECT COUNT(*) FROM {table_name} WHERE {clean_where.rstrip('; ')}"
+
+        try:
+            res = self.client.sql(query)
+            return int(res[0][0]) if res and len(res) > 0 else 0
+        except Exception:
+            # Log error using Loguru!
+            # logger.error(f"Query failed: {e}")
+            LOG.exception("Failed to get row count", table=table_name, query=query)
+            return 0
 
     def fetch(self, query: str) -> list[Sequence[Any]]:
         """Proxy to the client's sql method for standard DB access."""
+        return self.client.sql(query)
         return self.client.sql(query)

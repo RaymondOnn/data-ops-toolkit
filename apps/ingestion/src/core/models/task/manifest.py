@@ -115,6 +115,7 @@ class TaskManifest(msgspec.Struct, kw_only=True):
     current_stage: str
     bitmask: int
     retry_count: int = 0
+    remarks: str | None = None
 
     # Step-Specific Data (The "Body")
     start: BasePayload | None = None

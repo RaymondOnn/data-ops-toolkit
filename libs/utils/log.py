@@ -45,8 +45,14 @@ def _console_formatter(record):
             display_parts.append(f"{k}={val}")
 
         extras_str = ", ".join(display_parts)
-        return f"{fmt}{prefix} <light-magenta>({extras_str})</light-magenta>\n"
-    return f"{fmt}{prefix}\n"
+        line = f"{fmt}{prefix} <light-magenta>({extras_str})</light-magenta>\n"
+    else:
+        line = f"{fmt}{prefix}\n"
+
+    # Ensure exception traceback is appended if present
+    if record["exception"] is not None:
+        line += "{exception}\n"
+    return line
 
 
 class InterceptHandler(logging.Handler):

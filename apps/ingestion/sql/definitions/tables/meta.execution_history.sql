@@ -4,12 +4,13 @@ CREATE TABLE IF NOT EXISTS META.EXECUTION_HISTORY (
     , JOB_ID                LowCardinality(String)
     , DATASET_ID            LowCardinality(String)
     , PARTITION_DATE        Nullable(Date)
-    , START_TIMESTAMP       DateTime64(3)
-    , END_TIMESTAMP         DateTime64(3)
+    , START_TIMESTAMP_LC       DateTime64(3)
+    , END_TIMESTAMP_LC         DateTime64(3)
     , JOB_STATUS            LowCardinality(String)
     , SOURCE_ROW_COUNT      UInt64
     , FINAL_ROW_COUNT       UInt64
     , FINAL_MANIFEST        String
+    , REMARKS               Nullable(String)
 ) 
 ENGINE = MergeTree()
 ORDER BY (JOB_ID, DATASET_ID, RUN_ID);

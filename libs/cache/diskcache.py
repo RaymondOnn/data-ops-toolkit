@@ -25,7 +25,9 @@ class DiskCache(KeyValueCache):
         return self._cache.pop(key, default=default)
 
     def delete(self, key: str) -> None:
-        del self._cache[key]
+        # Use pop with a default to make deletion idempotent.
+        # This prevents KeyError if the key was already removed or never existed.
+        self._cache.pop(key, None)
 
     def iterkeys(self, pattern: str = "*") -> Iterable[str]:
         for key in self._cache.iterkeys():

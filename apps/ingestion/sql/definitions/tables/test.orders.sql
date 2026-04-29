@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS TEST.ORDERS (
     status LowCardinality(String),
     updated_at DateTime64(3),
     -- Metadata Columns
-    _created_at_ts DateTime64(3) DEFAULT now(),
+    _created_at_ts DateTime64(3) DEFAULT now('Asia/Singapore'),
     _partition String,
     _source LowCardinality(String),
     _run_id String,

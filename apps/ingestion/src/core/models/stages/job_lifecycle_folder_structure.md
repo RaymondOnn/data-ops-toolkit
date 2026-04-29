@@ -94,11 +94,11 @@ If a stage results in an unhandled exception or encounters an intentional barrie
 
 *Notice the hierarchy simplifies since we no longer rely on `{dataset}_{date}` composite keys in the terminal hierarchies.*
 
-The orchestrator’s `LifecycleManager` will occasionally run a "sweep" routine across the `HOLD/` and `FAILED/` directories. If a stopped job's state allows it to resume, the orchestrator pulls its `manifest.json`, reconstructs the state context, and re-queues it back into the Active structure.
+The orchestrator’s `Janitor` will occasionally run a "sweep" routine across the `HOLD/` and `FAILED/` directories. If a stopped job's state allows it to resume, the orchestrator pulls its `manifest.json`, reconstructs the state context, and re-queues it back into the Active structure.
 
 ### Expiry and Garbage Collection
 
-If a job reaches `COMPLETE`, or has stagnated beyond its TTL (Time-To-Live), the `LifecycleManager` triggers physical cleanup:
+If a job reaches `COMPLETE`, or has stagnated beyond its TTL (Time-To-Live), the `Janitor` triggers physical cleanup:
 1. The `active` folder tree for the `run_id` is permanently deleted.
 2. The orchestrator walks the `data/` trees looking for files prefixed with `{job_id}_*` and purges those corresponding raw payloads.
 

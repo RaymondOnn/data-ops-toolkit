@@ -18,7 +18,7 @@ class AWSSessionManager:
         self._base_session = boto3.Session(region_name=region)
 
     def get_assumed_role_session(
-        self, role_arn: str, session_name: str = "TaskManger"
+        self, role_arn: str, session_name: str = "TaskManager"
     ) -> boto3.Session:
         """
         Returns a boto3.Session that automatically refreshes its credentials

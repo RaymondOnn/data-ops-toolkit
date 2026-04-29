@@ -1,4 +1,4 @@
-from .base import Task
+from .base import Task, create_task_folder
 from .manifest import (
     AuditPayload,
     CompletePayload,

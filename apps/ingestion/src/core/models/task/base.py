@@ -6,17 +6,47 @@ from pathlib import Path
 from typing import Any, Self
 
 import msgspec
+from loguru import logger
+
 from apps.ingestion.src.core.contexts import ExecutionContext, TaskContext
-from apps.ingestion.src.core.models.task.manifest import TaskManifest
-from apps.ingestion.src.core.models.task.status import ExecutionStatus
 from apps.ingestion.src.core.models.stages.base import ExecutionStage
 from apps.ingestion.src.core.models.stages.enums import StageName
+from apps.ingestion.src.core.models.task.manifest import TaskManifest
+from apps.ingestion.src.core.models.task.status import ExecutionStatus
+from apps.ingestion.src.utils.common import recursive_merge
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
-from loguru import logger
 
 from .enums import TaskSignal
 
 LOG = logger
+
+
+def create_task_folder(
+    folder_path: Path | str,
+    source_config_path: Path,  # The path to the config file in active_path
+) -> None:
+    """
+    Creates the task's dedicated workspace folder and relocates its config file.
+    This ensures that when a task is marked PROVISIONED, its physical files exist.
+    """
+    # 1. Determine the final destination folder
+    task_folder = Path(folder_path)
+
+    # 2. Physically create the folder if missing
+    if not task_folder.exists():
+        LOG.info("Creating job run directory", path=str(task_folder))
+        task_folder.mkdir(parents=True, exist_ok=True)
+
+    # 3. Relocate the config file from the active root to the task's folder
+    dest_config_path = task_folder / CONFIG_FILENAME
+
+    if source_config_path.exists() and not dest_config_path.exists():
+        LOG.info(
+            "Relocating configuration file",
+            src=str(source_config_path),
+            dst=str(dest_config_path),
+        )
+        shutil.move(source_config_path, dest_config_path)
 
 
 # TODO: Rename folders to include worker id?
@@ -107,14 +137,15 @@ class Task:
         """
         # 1. Physically create the folder if missing
         if not self._folder.exists():
-            self._make_folder()
+            LOG.info("Creating job run directory", path=str(self._folder))
+            self._folder.mkdir(parents=True, exist_ok=True)
 
         # 2. Initialize the manifest directly in the run folder if missing
         if not self._manifest_path.exists():
             LOG.info("Initializing run manifest", run_id=self.run_id)
             self.update_manifest(
                 {
-                    "job_id": self.job_id,
+                    "job_id": self.job_id,  # Initial manifest status should be PROVISIONED
                     "run_id": self.run_id,
                     "dataset_id": self.dataset_id,
                     "status": ExecutionStatus.RUNNING,
@@ -162,14 +193,10 @@ class Task:
         try:
             # Priority 1: Check for the standardized 'config.json'
             config_path = self.folder / CONFIG_FILENAME
-            if not config_path.exists():
-                # Fallback: Look for the original complex filename if not yet renamed
-                config_path = next(self.folder.glob(f"*_{CONFIG_FILENAME}"))
-
             with config_path.open(mode="rb") as f:
                 return msgspec.json.decode(f.read(), type=TaskContext)
-        except (StopIteration, FileNotFoundError):
-            LOG.exception(
+        except (FileNotFoundError, IndexError, StopIteration):
+            LOG.debug(
                 "TaskContext configuration missing on disk", folder=str(self.folder)
             )
             # Return an empty/default context if appropriate for your logic
@@ -229,63 +256,34 @@ class Task:
             # The stage finalize already handled the move/manifest update
             raise e
 
-    def _make_folder(self) -> None:
-        # 1. Assignment (Ensures paths are correctly calculated)
-        self._folder = self.exec_ctx.get_run_path(
-            self.job_id, self.dataset_id, self.partition_date, self.run_id
-        )
-
-        # 2. Physically create the folder if missing
-        if not self._folder.exists():
-            LOG.info("Creating job run directory", path=str(self._folder))
-            self._folder.mkdir(parents=True, exist_ok=True)
-
-        # 3. Relocate the config file if it's still in the active root
-        # The Orchestrator prefix uses a colon between the identifier and run_id
-        cfg_file = f"{self.id}:{self.run_id}_{CONFIG_FILENAME}"  # Kept for backward compat with Orchestrator output
-        source_path = self.exec_ctx.active_path / cfg_file
-        dest_path = self._folder / CONFIG_FILENAME
-
-        if source_path.exists() and not dest_path.exists():
-            LOG.info(
-                "Relocating configuration file",
-                src=str(source_path),
-                dst=str(dest_path),
-            )
-            shutil.move(source_path, dest_path)
-
     def update_manifest(self, updates: dict[str, Any] | None = None) -> None:
         """
         Performs an atomic partial update directly to the disk.
         """
         updates = updates or {}
 
-        # 1. Read current state
-        data = msgspec.to_builtins(self.manifest)
+        # 1. Read current state as a raw dictionary.
+        # We avoid using self.manifest here because it performs strict type
+        # validation which will crash if the disk state is partially updated.
+        if not self._manifest_path.exists() or self._manifest_path.stat().st_size == 0:
+            data = msgspec.to_builtins(self.manifest)
+        else:
+            with self._manifest_path.open("rb") as f:
+                data = msgspec.json.decode(f.read())
 
-        # 2. Apply updates
-        data.update(updates)
+        # 2. Apply updates using a recursive deep merge
+        recursive_merge(data, updates)
 
-        # If a stage payload was updated, also update the bitmask
-        for stage in StageName:
-            if stage.label in updates and updates[stage.label] is not None:
-                data["bitmask"] |= stage.bitmask.value
-
-        # Debug log for state changes
         LOG.debug("Updating manifest", run_id=self.run_id, updates=updates)
 
         # 3. Atomic Write to avoid corruption during crashes
         # (Write to .tmp then replace)
         tmp_path = self._manifest_path.with_suffix(".tmp")
-
-        # Safety: Ensure the folder exists before attempting to write the manifest
-        self._make_folder()
-
+        self._folder.mkdir(parents=True, exist_ok=True)
         with tmp_path.open(mode="wb") as f:
             f.write(msgspec.json.encode(data))
             f.flush()
             os.fsync(f.fileno())  # Ensure bits are physically on the platter
-
         tmp_path.replace(self._manifest_path)
 
     def check_in(self, stage_name: str) -> None:
@@ -306,7 +304,7 @@ class Task:
             )
             initial_manifest_data = {
                 "job_id": self.job_id,
-                "run_id": self.run_id,
+                "run_id": self.run_id,  # Initial manifest status should be RUNNING
                 "dataset_id": self.dataset_id,
                 "status": ExecutionStatus.RUNNING,
                 "current_stage": stage_name,  # Use the actual stage being checked in
@@ -380,20 +378,28 @@ class Task:
         if signal == TaskSignal.RETRY:
             (self.folder / ".retrying").touch()
 
-    # TODO: Consider if this is needed
-    # @property
-    # def progress_report(self) -> dict[str, str]:
-    #     """
-    #     Returns a human-readable checklist of job progress.
-    #     Example: {"ingest": "DONE", "transform": "PENDING", "complete": "DONE"}
-    #     """
-    #     current_mask = self.manifest.bitmask
-    #     report = {}
+    def purge(self) -> None:
+        """Physically deletes the task metadata and associated data vaults."""
+        # 1. Clean Metadata Folder
+        if self._folder.exists():
+            LOG.debug("Purging task workspace", path=str(self._folder))
+            shutil.rmtree(self._folder)
 
-    #     # Iterate through our ordered enum to build the checklist
-    #     for stage in StepOrder:
-    #         # Check if the specific bit for this stage is flipped
-    #         is_done = bool(current_mask & stage.bitmask_flag)
-    #         report[stage.label] = "DONE" if is_done else "PENDING"
-
-    #     return report
+        # 2. Clean physical data artifacts in data vaults
+        data_root = self.exec_ctx.data_path
+        if data_root.exists():
+            for stage_dir in data_root.iterdir():
+                if not stage_dir.is_dir():
+                    continue
+                # Clean up all data folders belonging to this job ID
+                # Pattern: {job_id}_*
+                for physical_folder in stage_dir.glob(f"{self.job_id}_*"):
+                    try:
+                        shutil.rmtree(physical_folder)
+                        LOG.debug("Purged data vault", folder=physical_folder.name)
+                    except Exception as e:
+                        LOG.error(
+                            "Vault purge failed",
+                            folder=physical_folder.name,
+                            error=str(e),
+                        )

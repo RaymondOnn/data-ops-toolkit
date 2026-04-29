@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 
-from apps.ingestion.src.core.contexts.job import TaskContext
+from core.contexts.task import TaskContext
 from loguru import logger
 
 LOG = logger

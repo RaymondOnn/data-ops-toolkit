@@ -26,6 +26,14 @@ default:
     enable_archival: true
     archive_type: "standard_archive"
 
+  # Global Feature Flag Defaults
+  feature_flags:
+    benchmark_mode: false       # Logic gate for ServiceFactory tool swapping
+    pre_prod_sim: false         # Enable environment mocks or shadow logic
+    shadow_write_enabled: false # concurrent writes to primary and experimental sinks
+    archive_first: false        # Default flow: Load -> Archive
+    dry_run: false              # Process but skip terminal DB/S3 commits
+
 local:
   workspace_dir: "./.workspace/"
   archive_base_path: "file:///tmp/archive"

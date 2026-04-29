@@ -4,6 +4,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
+from loguru import logger
+
 from apps.ingestion.src.utils.constants import DISKCACHE_FILE_PATH
 from libs.cache.base import KeyValueCache
 from libs.cache.utils import get_cache
@@ -12,7 +14,6 @@ from libs.resilience.circuit_breaker import (
     CircuitBreakerState,
     CircuitBreakerTripped,
 )
-from loguru import logger
 
 LOG = logger
 
@@ -65,7 +66,7 @@ class ServiceRegistry:
         Attempts to verify if a service is back online.
         If successful, resets the circuit breaker.
 
-        Use this in the Orchestrator or LifecycleManager to verify recovery
+        Use this in the Orchestrator or Janitor to verify recovery
         before re-queuing blocked tasks.
         """
         try:
@@ -158,9 +159,15 @@ class ServiceRegistry:
             if was_open:
                 LOG.info("Circuit breaker has been reset to CLOSED", service=name)
 
-            cache.delete(f"fails:{name}")
-            cache.delete(f"last_fail:{name}")
-            cache.delete(f"retries:{name}")
+            # Only attempt deletion if keys exist to minimize cache I/O,
+            # though DiskCache.delete is now idempotent.
+            for key in [
+                f"fails:{name}",
+                f"last_fail:{name}",
+                f"retries:{name}",
+                f"last_reported:{name}",
+            ]:
+                cache.delete(key)
             cls.update_status(name, "CLOSED")
 
 

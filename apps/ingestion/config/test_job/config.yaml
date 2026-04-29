@@ -13,6 +13,13 @@ default:
     archive:
       enable_archival: true
       service_ref: "standard_archive"
+    
+    # Job-level feature flag overrides
+    feature_flags:
+      archive_first: true  # Use case: Archive to S3 before loading to DB
+      benchmark_mode: false
+      experimental_sink_type: null
+      experimental_config: {}
 
   # ── Datasets (each key = dataset_id, values override job defaults) ─────────
   datasets:
@@ -36,6 +43,13 @@ default:
       archive:
         enable_archival: false    # per-dataset archival override
         # service_ref: "s3_archive"
+      
+      # Dataset-level override for cost comparison
+      feature_flags:
+        benchmark_mode: true
+        experimental_sink_type: "snowflake_db"
+        experimental_config:
+          warehouse: "XSMALL"
 
 
 # ── Local env overrides ──────────────────────────────────────────────────────

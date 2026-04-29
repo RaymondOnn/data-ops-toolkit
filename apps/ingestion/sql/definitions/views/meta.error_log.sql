@@ -6,9 +6,9 @@ WITH run_summaries AS (
         JOB_ID,
         DATASET_ID, -- Added to the CTE selection
         PARTITION_DATE,   -- Added to the CTE selection
-        min(multiIf(JOB_STATUS = 'FAILED', LAST_UPDATED_AT_TS, NULL)) AS ERROR_TIMESTAMP,
-        argMax(JOB_STATUS, LAST_UPDATED_AT_TS) AS LATEST_STATUS,
-        argMax(FINAL_MANIFEST, multiIf(JOB_STATUS = 'FAILED', LAST_UPDATED_AT_TS, NULL)) AS ERROR_DETAILS
+        min(multiIf(JOB_STATUS = 'FAILED', LAST_UPDATED_AT_TS_LC, NULL)) AS ERROR_TIMESTAMP,
+        argMax(JOB_STATUS, LAST_UPDATED_AT_TS_LC) AS LATEST_STATUS,
+        argMax(FINAL_MANIFEST, multiIf(JOB_STATUS = 'FAILED', LAST_UPDATED_AT_TS_LC, NULL)) AS ERROR_DETAILS
     FROM META.EXECUTION_LOG
     -- Include all identifying columns in the GROUP BY to make them available in the scope
     GROUP BY 
@@ -25,6 +25,6 @@ SELECT
     ERROR_TIMESTAMP,
     ERROR_DETAILS,
     multiIf(LATEST_STATUS = 'SUCCESS', 1, 0) AS RESOLVED,
-    LATEST_STATUS
+    LATEST_STATUS,
 FROM run_summaries
 WHERE ERROR_TIMESTAMP IS NOT NULL;

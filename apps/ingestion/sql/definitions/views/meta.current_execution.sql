@@ -1,53 +1,73 @@
 DROP VIEW IF EXISTS META.CURRENT_EXECUTION;
 CREATE VIEW META.CURRENT_EXECUTION AS 
 
--- 1. Get Scheduled slots that are DUE (Intent)
-SELECT 
-    CAST(NULL, 'Nullable(FixedString(26))') AS RUN_ID
-    , JOB_ID
-    , DATASET_ID
-    , CAST(NULL, 'Nullable(Date)') AS PARTITION_DATE -- Blank from DB for schedules
-    , NEXT_RUN_TS AS SCHEDULED_TIMESTAMP
-    , CAST(NULL, 'Nullable(DateTime64(3))') AS START_TIMESTAMP
-    , CAST(NULL, 'Nullable(DateTime64(3))') AS END_TIMESTAMP
-    , NOW_TS_UTC AS LAST_UPDATED_AT_TS
-    , CAST('PENDING', 'LowCardinality(String)') AS JOB_STATUS
-    , CAST(NULL, 'LowCardinality(Nullable(String))') AS CURRENT_STEP
-    , CAST(0, 'UInt16') AS JOB_BITMASK
-    , CAST(1, 'UInt8') AS IS_SCHEDULED
-    , CAST(NULL, 'Nullable(String)') AS RUNTIME_OVERRIDES
-    , CAST(0, 'UInt8') AS RETRY_ATTEMPTS
-    , 'CRON' AS TRIGGER_TYPE
-    , WATCH_FILE_PATH
-FROM META.CURRENT_SCHEDULES
-WHERE IS_DUE = 1
-UNION ALL
+with published_runs AS (
+    SELECT 
+        RUN_ID
+        , JOB_ID
+        , DATASET_ID
+        , toString(PARTITION_DATE) AS PARTITION_DATE
+        , SCHEDULED_TIMESTAMP_LC
+        , START_TIMESTAMP_LC
+        , END_TIMESTAMP_LC
+        , LAST_UPDATED_AT_TS_LC
+        , JOB_STATUS
+        , CURRENT_STEP
+        , JOB_BITMASK
+        , IS_SCHEDULED
+        , RUNTIME_OVERRIDES
+        , RETRY_ATTEMPTS
+        , WATCH_FILE_PATH
+        , REMARKS
+        , cron_next(if(empty(S.CRON_EXPR), '0 0 * * *', S.CRON_EXPR), SCHEDULED_TIMESTAMP_LC) AS EXPIRATION_THRESHOLD
+        , S.IS_SNAPSHOT
+    FROM META.EXECUTION_LOG
+    LEFT ANY JOIN (
+        SELECT JOB_ID, DATASET_ID, IS_SNAPSHOT, CRON_EXPR 
+        FROM META.JOB_SCHEDULES 
+        LIMIT 1 BY JOB_ID, DATASET_ID
+    ) S ON META.EXECUTION_LOG.JOB_ID = S.JOB_ID AND META.EXECUTION_LOG.DATASET_ID = S.DATASET_ID
+    WHERE toDate(SCHEDULED_TIMESTAMP_LC) = toDate(now('Asia/Singapore'))
+    LIMIT 1 BY RUN_ID
+)
 
+SELECT *
+FROM (
+    SELECT *
+    FROM published_runs
 
--- 2. Get existing runs from the log that are still in an active state (Reality)
-SELECT 
-    RUN_ID
-    , JOB_ID
-    , DATASET_ID
-    , toString(PARTITION_DATE) AS PARTITION_DATE
-    , SCHEDULED_TIMESTAMP
-    , START_TIMESTAMP
-    , END_TIMESTAMP
-    , LAST_UPDATED_AT_TS
-    , JOB_STATUS
-    , CURRENT_STEP
-    , JOB_BITMASK
-    , IS_SCHEDULED
-    , RUNTIME_OVERRIDES
-    , RETRY_ATTEMPTS
-    , 'CRON' AS TRIGGER_TYPE
-    , WATCH_FILE_PATH
-FROM META.EXECUTION_LOG
-WHERE JOB_STATUS IN (
-        'PENDING',
-        'QUEUED',
-        'PROVISIONING',
-        'RUNNING',
-        'DEFERRED',
-        'HELD'
-    );
+    UNION ALL
+
+    SELECT 
+        NULL AS RUN_ID
+        , JOB_ID
+        , DATASET_ID
+        , NULL AS PARTITION_DATE 
+        , NEXT_RUN_TS_LC AS SCHEDULED_TIMESTAMP_LC
+        , NULL AS START_TIMESTAMP_LC
+        , NULL AS END_TIMESTAMP_LC
+        , LAST_UPDATED_AT_TS_LC
+        , 'PENDING' AS JOB_STATUS
+        , NULL AS CURRENT_STEP
+        , 0 AS JOB_BITMASK
+        , 1 AS IS_SCHEDULED
+        , NULL AS RUNTIME_OVERRIDES
+        , 0 AS RETRY_ATTEMPTS
+        , WATCH_FILE_PATH
+        , NULL AS REMARKS
+        , cron_next(if(empty(S.CRON_EXPR), '0 0 * * *', S.CRON_EXPR), NEXT_RUN_TS_LC) AS EXPIRATION_THRESHOLD
+        , S.IS_SNAPSHOT
+    FROM META.CURRENT_SCHEDULES
+    LEFT ANY JOIN (
+        SELECT JOB_ID, DATASET_ID, IS_SNAPSHOT, CRON_EXPR 
+        FROM META.JOB_SCHEDULES 
+        LIMIT 1 BY JOB_ID, DATASET_ID
+    ) S ON META.CURRENT_SCHEDULES.JOB_ID = S.JOB_ID AND META.CURRENT_SCHEDULES.DATASET_ID = S.DATASET_ID
+    WHERE toDate(SCHEDULED_TIMESTAMP_LC) = toDate(now('Asia/Singapore'))
+    -- Anti-join: Only show if this specific slot hasn't been pushed to the log yet
+    AND (JOB_ID, DATASET_ID, NEXT_RUN_TS_LC) NOT IN (
+        SELECT JOB_ID, DATASET_ID, SCHEDULED_TIMESTAMP_LC 
+        FROM published_runs
+    )
+)
+ORDER BY SCHEDULED_TIMESTAMP_LC ASC;

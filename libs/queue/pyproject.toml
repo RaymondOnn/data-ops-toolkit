@@ -1,0 +1,12 @@
+[project]
+name = "queue"
+version = "0.1.0"
+description = "Queues"
+dependencies = [
+    "diskcache",
+]
+requires-python = ">=3.11"
+
+[tool.setuptools]
+packages = ["queue"]
+package-dir = { "queue" = "." }

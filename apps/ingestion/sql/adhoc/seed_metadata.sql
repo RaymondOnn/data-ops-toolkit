@@ -12,10 +12,10 @@ INSERT INTO META.JOB_SCHEDULES (
     , MISFIRE_GRACE_SECS
     , WATCH_FILE_PATH
     -- , PARTITION_DATE
-    -- , NEXT_RUN_TS
-    -- , PREV_RUN_TS
-    , LAST_UPDATED_AT_TS
-    , CREATED_AT_TS
+    -- , NEXT_RUN_TS_LC
+    -- , PREV_RUN_TS_LC
+    , LAST_UPDATED_AT_TS_LC
+    , CREATED_AT_TS_LC
 ) VALUES (
     'test_job', 'orders', 'Customer Orders', '* * * * *', TRUE, TRUE,
     1, 3600, 1, 300, NULL, 

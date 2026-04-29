@@ -15,7 +15,8 @@ services:
       - ./clickhouse/clickhouse_settings.xml:/etc/clickhouse-server/config.d/clickhouse_settings.xml
       - ./clickhouse/cron_next_function.xml:/etc/clickhouse-server/cron_next_function.xml
       - ./clickhouse/udf:/var/lib/clickhouse/user_scripts:ro
-      - ./.tmp/clickhouse:/var/lib/clickhouse
+      # Named volume touse the native Linux filesystem (ext4) inside the Docker VM that supports RENAME_EXCHANGE operation
+      - clickhouse_data:/var/lib/clickhouse
     ports:
       - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"
       - "${CLICKHOUSE_NATIVE_PORT:-9000}:9000"
@@ -23,6 +24,29 @@ services:
       nofile:
         soft: 262144
         hard: 262144
+    networks:
+      - ch_ntw
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./.tmp/prometheus:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+    ports:
+      - "9090:9090"
+    networks:
+      - ch_ntw
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - ./.tmp/grafana:/var/lib/grafana
     networks:
       - ch_ntw
 
@@ -40,6 +64,9 @@ services:
   #     - "./.tmp/localstack:/var/lib/localstack"
   #   networks:
   #     - ch_ntw
+
+volumes:
+  clickhouse_data:
 
 networks:
   ch_ntw:

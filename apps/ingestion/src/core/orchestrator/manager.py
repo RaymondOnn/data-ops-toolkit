@@ -1,15 +1,18 @@
 import os
 import subprocess
 import time
+import traceback
 from typing import Any
 
 import ray
-from filelock import FileLock
-from loguru import logger
-from tenacity import Retrying, stop_after_attempt, wait_exponential
-
 from apps.ingestion.src.core.contexts import ExecutionContext, RayMode
 from apps.ingestion.src.core.models.stages.enums import EXEC_STAGES, StageName
+from apps.ingestion.src.core.models.states import (
+    FailedState,
+    ProgressState,
+    RetryState,
+    SuccessState,
+)
 from apps.ingestion.src.core.models.task import ExecutionStatus, Task
 from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.services.registry import ServiceRegistry
@@ -17,8 +20,11 @@ from apps.ingestion.src.utils.common import find_path
 from apps.ingestion.src.utils.constants import MANIFEST_FILENAME
 from apps.ingestion.src.utils.dates import epoch_to_iso, get_end_of_day_ts
 from apps.ingestion.src.utils.exceptions import RetryTask, RewindTask
+from filelock import FileLock
 from libs.cache.utils import get_cache
 from libs.utils.log import setup_logging
+from loguru import logger
+from tenacity import Retrying, stop_after_attempt, wait_exponential
 
 from .enums import TaskMetadata
 
@@ -40,7 +46,7 @@ class Worker:
         #     is_prod=self.exec_ctx.is_prod(),
         #     is_debug=self.exec_ctx.is_debug(),
         # )
-        
+
         # Pass primitives to factory to keep services/ independent of core/
         self.cache = get_cache(self.exec_ctx.workspace_dir, self.exec_ctx.cache_config)
 
@@ -53,7 +59,6 @@ class Worker:
             self.exec_ctx.workspace_dir, self.exec_ctx.cache_config
         )
         self.lock = FileLock(self.exec_ctx.lock_file)
-
 
         self.is_busy = False
 
@@ -92,13 +97,13 @@ class Worker:
                         exec_ctx=self.exec_ctx,
                         target_stage=current_stage,
                     )
-                    
+
                     setup_logging(
                         log_dir=self.exec_ctx.workspace_dir / "logs",
-                        is_prod=self.exec_ctx.is_prod(),
-                        is_debug=self.exec_ctx.is_debug(),
+                        is_prod=self.exec_ctx.is_prod,
+                        is_debug=self.exec_ctx.is_debug,
                         # Name the log by stage for easy multi-stage debugging
-                        filename=f"{task.id}.jsonl",
+                        filename=f"{task.id}_{task.run_id}.jsonl",
                     )
 
                     # Cleanup indicators when starting execution
@@ -145,114 +150,97 @@ class Worker:
                         task.stage.pre_flight(task)
                         next_stage = task.execute()
 
-                    # 4. Success Handoff
-                    with self.lock:
-                        # Every execution ends the "Current" stage lease.
-                        # We pop it regardless of what comes next.
-                        self.cache.pop(key, None)
+                    # Outcome Selection (Success Rail)
+                    self._handle_success(
+                        task, key, identifier, current_stage, meta, log
+                    )
 
-                        if next_stage:
-                            if next_stage.casefold() in EXEC_STAGES:
-                                # Progressing to next queue
-                                meta.current_stage = next_stage
-                                meta.status = ExecutionStatus.PENDING.value
-                                self.cache[f"{next_stage}:{identifier}"] = meta
-                                log.info(
-                                    "'{current_stage}' Step complete. "
-                                    "Progressing to {next_stage}...",
-                                    current_stage=current_stage,
-                                    next_stage=next_stage,
-                                )
-                            else:
-                                # Task fully reached SUCCESS/FINISH
-                                log.info("Task fully completed.")
-                                self.cache.pop(f"active_run:{identifier}", None)
         except RetryTask as r:
-            log.warning(
-                "Task signaled RETRY (transient outage)",
-                reason=r.reason,
-                wait=r.wait_seconds,
-            )
-            with self.lock:
-                meta: TaskMetadata = self.cache.get(key)
-                if meta:
-                    # We use last_hb as the 'earliest resume time'
-                    # This prevents the orchestrator from picking it up too soon
-                    if hasattr(r, "source_name") and r.source_name:
-                        # Case: Waiting for .source_down signal
-                        meta.status = ExecutionStatus.BLOCKED
-                        meta.blocked_by = r.source_name
-                    else:
-                        # Case: Normal scheduled retry
-                        meta.status = ExecutionStatus.RETRY
-                    meta.last_hb = time.time() + r.wait_seconds
-                    self.cache[key] = meta
-            return  # Yield Ray Actor
+            self._handle_retry_task(task, key, meta, r, log)
         except RewindTask as rw:
-            log.warning(
-                "Task signaled REWIND (Self-Healing)",
-                to_stage=rw.target_stage,
-                reason=rw.reason,
-            )
-            with self.lock:
-                # 1. Clear the current lease
-                self.cache.pop(key, None)
-
-                # 2. Reset the manifest on disk for the target stage
-                # (We clear the payload and set status to PENDING)
-                task.update_manifest(
-                    {
-                        "status": ExecutionStatus.PENDING.value,
-                        rw.target_stage: None,
-                        "current_stage": rw.target_stage,
-                    }
-                )
-
-                # 3. Put back into the specific target queue
-                meta.current_stage = rw.target_stage
-                meta.status = ExecutionStatus.PENDING.value
-                self.cache[f"{rw.target_stage}:{identifier}"] = meta
-        except Exception:
-            log.exception("Task stage reached terminal failure/hold")
-            with self.lock:
-                # For terminal failures, we remove the key from the active cache.
-                # The folder structure (HOLD/FAILED) becomes the source of truth.
-                self.cache.pop(key, None)
-                # We keep 'active_run' key so the Orchestrator doesn't
-                # re-trigger the same partition while a failed run is present.
+            self._handle_rewind_task(task, key, identifier, meta, rw, log)
+        except Exception as e:
+            self._handle_failure(task, key, current_stage, e, log)
             raise
         finally:
             self.is_busy = False
 
-    def _handle_handoff(self, key, identifier, current_stage, next_stage, meta, log):
-        """Encapsulated logic for moving tasks between stage queues."""
-        with self.lock:
-            # Every execution ends the "Current" stage lease.
-            self.cache.pop(key, None)
-
-            if next_stage:
-                if next_stage.casefold() in EXEC_STAGES:
-                    # Progressing (or Rewinding) to specific queue
-                    meta.current_stage = next_stage
+    def _handle_success(self, task, key, identifier, current_stage, meta, log):
+        if SuccessState.is_applicable(task):
+            SuccessState(task).on_enter(data={})
+            with self.lock:
+                self.cache.pop(key, None)
+                self.cache.pop(f"active_run:{identifier}", None)
+                log.info("Task fully completed.")
+        else:
+            ProgressState(task).on_enter(data={})
+            with self.lock:
+                self.cache.pop(key, None)
+                if next_stage := StageName.next(current_stage):
+                    meta.current_stage = next_stage.label
                     meta.status = ExecutionStatus.PENDING.value
-                    # We reset last_hb so it's eligible for immediate pickup if it's a rewind
-                    meta.last_hb = time.time()
-                    self.cache[f"{next_stage}:{identifier}"] = meta
-                    log.info(
-                        "Transitioning: {current_stage} -> {next_stage}",
-                        current_stage=current_stage,
-                        next_stage=next_stage,
-                    )
-                else:
-                    # Task fully reached SUCCESS/FINISH
-                    log.info("Task fully completed.")
-                    self.cache.pop(f"active_run:{identifier}", None)
+                    new_key = f"{next_stage.label}:{identifier}:{meta.run_id}"
+                    self.cache[new_key] = meta
+
+    def _handle_retry_task(self, task, key, meta, r, log):
+        log.warning("Task signaled RETRY", reason=r.reason, wait=r.wait_seconds)
+        RetryState(task).on_enter(
+            data={
+                "message": r.reason,
+                "service_name": r.service_name,
+                "wait_seconds": r.wait_seconds,
+            }
+        )
+        with self.lock:
+            if meta := self.cache.get(key):
+                meta.status = (
+                    ExecutionStatus.BLOCKED if r.service_name else ExecutionStatus.RETRY
+                )
+                meta.blocked_by = r.service_name
+                meta.last_hb = time.time() + r.wait_seconds
+                self.cache[key] = meta
+
+    def _handle_rewind_task(self, task, key, identifier, meta, rw, log):
+        log.warning("Task signaled REWIND", to_stage=rw.target_stage)
+        task.update_manifest(
+            {
+                "status": ExecutionStatus.PENDING.value,
+                rw.target_stage: None,
+                "current_stage": rw.target_stage,
+            }
+        )
+        with self.lock:
+            self.cache.pop(key, None)
+            meta.current_stage = rw.target_stage
+            meta.status = ExecutionStatus.PENDING.value
+            new_key = f"{rw.target_stage}:{identifier}:{meta.run_id}"
+            self.cache[new_key] = meta
+
+    def _handle_failure(self, task, key, current_stage, e, log):
+        if RetryState.is_applicable(task, e):
+            # For unhandled but retryable exceptions, we don't have an explicit wait_seconds.
+            # We pass the error message as the reason and let RetryState calculate the backoff.
+            log.warning("Handling unhandled retryable exception", error=str(e))
+            RetryState(task).on_enter(
+                data={"message": str(e), "error_type": type(e).__name__}
+            )
+        else:
+            FailedState(task).on_enter(
+                data={
+                    "stage": current_stage,
+                    "error_type": type(e).__name__,
+                    "message": str(e),
+                    "traceback": traceback.format_exc(),
+                }
+            )
+            with self.lock:
+                self.cache.pop(key, None)
 
     def is_idle(self) -> bool:
         return not self.is_busy
 
 
-class TaskManger:
+class TaskManager:
     def __init__(self, exec_ctx: ExecutionContext, cache_dir: str = ".cache/ingestion"):
         self.exec_ctx = exec_ctx
         # 2. Initialize the Global Registry (Diskcache)
@@ -275,7 +263,24 @@ class TaskManger:
 
         if not ray.is_initialized():
             local_mode = self.exec_ctx.ray_mode == RayMode.LOCAL
-            ray.init(ignore_reinit_error=True, local_mode=local_mode)
+            # Capture the context returned by init
+            ctx = ray.init(
+                ignore_reinit_error=True,
+                local_mode=local_mode,
+                include_dashboard=True,
+                dashboard_host="0.0.0.0",
+                dashboard_port=8265,
+            )
+
+        # Log the dashboard URL
+        if not local_mode:
+            # Use the context object if available, otherwise get the runtime context
+            dashboard_url = (
+                ctx.dashboard_url
+                if "ctx" in locals()
+                else ray.get_runtime_context().dashboard_url
+            )
+            LOG.info(f"🚀 Ray Dashboard available at: http://{dashboard_url}")
 
         self.is_degraded = False
         # Configuration for stage limits
@@ -320,12 +325,15 @@ class TaskManger:
             raise TypeError(f"ExecutionContext is not serializable: {e}") from e
         # Local tracker for active Ray tasks to avoid blocking RPC calls
         self._active_tasks: dict[ray.ObjectRef, ray.actor.ActorHandle] = {}
+        self._occupancy_cache: dict[StageName, int] = self._get_current_occupancy()
+        # Trackers for stage congestion to prevent log spam
+        self._blocked_stages: set[StageName] = set()
 
     def run(self) -> None:
         """Main loop managing multiple tasks."""
         LOG.info("Starting Orchestrator...")
         while True:
-            self.scan_and_recover()
+            self.recover_zombie_tasks()
             self._process_tasks()
             time.sleep(10)  # Frequency of polling
 
@@ -377,17 +385,45 @@ class TaskManger:
                 expires=expiry_str,
             )
 
+    def _check_stage_congestion(
+        self, current_occupancy: dict[StageName, int], pool_status: dict[str, bool]
+    ) -> None:
+        """Updates the blocked status of stages and logs transitions."""
+        for stage_enum, config in self.stage_limits.items():
+            limit = config["limit"]
+            pool_type = config["pool"]
+
+            is_limit_reached = current_occupancy[stage_enum] >= limit
+            is_pool_full = not pool_status[pool_type]
+            is_blocked = is_limit_reached or is_pool_full
+
+            if is_blocked and stage_enum not in self._blocked_stages:
+                LOG.info(
+                    f"Stage {stage_enum.label} is now BLOCKED "
+                    "(occupancy={current_occupancy[stage_enum]}, limit={limit}, "
+                    "pool_ready={not is_pool_full})"
+                )
+                self._blocked_stages.add(stage_enum)
+            elif not is_blocked and stage_enum in self._blocked_stages:
+                LOG.info(f"Stage {stage_enum.label} is now UNBLOCKED")
+                self._blocked_stages.remove(stage_enum)
+
     def _process_tasks(self) -> None:
-        # 1. Calculate current occupancy for all stages
-        current_occupancy = self._get_current_occupancy()
+        current_occupancy = self._occupancy_cache
 
         # 2. Snapshot pool availability to exit early if entire pools are full
         pool_status = {
-            "io": self._get_idle_worker_from_pool(self.io_pool) is not None,
-            "cpu": self._get_idle_worker_from_pool(self.cpu_pool) is not None,
+            "io": self._get_idle_worker_from_pool(self.io_pool, update_cache=True)
+            is not None,
+            "cpu": self._get_idle_worker_from_pool(self.cpu_pool, update_cache=False)
+            is not None,
         }
 
-        # Take a snapshot of keys starting with valid stages to iterate without holding the lock
+        # Update congestion state once per loop
+        self._check_stage_congestion(current_occupancy, pool_status)
+
+        # Take a snapshot of keys starting with valid stages to
+        # iterate without holding the lock
         for key in self._get_all_keys():
             # If both pools are full, stop processing immediately
             if not any(pool_status.values()):
@@ -403,22 +439,17 @@ class TaskManger:
             limit = self.stage_limits[stage_enum]["limit"]
             pool_type = self.stage_limits[stage_enum]["pool"]
 
-            # Respect both the stage-specific "dedicated" limit and pool availability
-            if current_occupancy[stage_enum] >= limit or not pool_status[pool_type]:
-                LOG.debug(
-                    "Stage limit reached or pool exhausted, skipping",
-                    stage=stage_enum,
-                    occupancy=current_occupancy[stage_enum],
-                    limit=limit,
-                    pool_status=pool_status[pool_type],
-                )
+            # 2. Skip logic: if the stage was marked blocked at the start of this tick,
+            # we skip all tasks for it silently.
+            if stage_enum in self._blocked_stages:
                 continue
 
             # Only lock when we have a potential candidate to update
             with self.lock:
                 task_meta: TaskMetadata = self.cache.get(key)
 
-                # # A task is ready if it's PENDING, or if it's in RETRY and the wait is over
+                # # A task is ready if it's PENDING,
+                # or if it's in RETRY and the wait is over
                 is_pending = task_meta.status == ExecutionStatus.PENDING.value
                 # Case 1: Normal Retry (Timer based)
                 is_retry_ready = (
@@ -432,12 +463,6 @@ class TaskManger:
                 )
 
                 if not (is_pending or is_retry_ready or is_blocked_ready):
-                    LOG.debug(
-                        "Task {run_id} not pending or retry-ready, skipping",
-                        job_id=task_meta.job_id,
-                        run_id=task_meta.run_id,
-                        status=task_meta.status,
-                    )
                     continue
 
                 if task_meta.status == ExecutionStatus.PENDING.value:
@@ -469,23 +494,26 @@ class TaskManger:
                             stage=stage_enum,
                             worker_id=self.worker_map.get(worker, "unknown"),
                         )
-                        task_meta.status = ExecutionStatus.PROVISIONING.value
+                        task_meta.status = ExecutionStatus.QUEUED.value
                         task_meta.last_hb = time.time()
                         self.cache[key] = task_meta
                         LOG.info(
                             "Updating task status",
                             job_id=task_meta.job_id,
+                            run_id=task_meta.run_id,
                             status=task_meta.status,
+                            stage=stage_enum.label,
                         )
 
                         # Update local occupancy count
-                        current_occupancy[stage_enum] += 1
+                        self._occupancy_cache[stage_enum] += 1
 
                         # Dispatch non-blocking and track the reference
                         ref = worker.process_stage.remote(key)
                         self._active_tasks[ref] = worker
                     else:
-                        # Pool is exhausted for this tick; mark it so we stop checking related stages
+                        # Pool is exhausted for this tick;
+                        # mark it so we stop checking related stages
                         pool_status[pool_type] = False
 
     def _get_current_occupancy(self) -> dict[StageName, int]:
@@ -503,14 +531,17 @@ class TaskManger:
         return counts
 
     def _get_all_keys(self) -> list[str]:
-        """Fetches a snapshot of all keys from the cache that correspond to valid execution stages."""
+        """
+        Fetches a snapshot of all keys from the cache that correspond to
+        valid execution stages.
+        """
         all_keys = []
         for stage_label in EXEC_STAGES:
             all_keys.extend(self.cache.iterkeys(pattern=f"{stage_label}:*"))
         return all_keys
 
     def _get_idle_worker_from_pool(
-        self, pool: list[ray.actor.ActorHandle]
+        self, pool: list[ray.actor.ActorHandle], update_cache: bool = True
     ) -> Any | None:
         # 1. Clean up finished tasks from our tracker without blocking
         if self._active_tasks:
@@ -521,6 +552,15 @@ class TaskManger:
             )
             for ref in ready:
                 worker = self._active_tasks.get(ref)
+
+                # If we are the primary pool check (io), update the occupancy count
+                # as tasks complete.
+                if update_cache:
+                    # Note: This is an approximation; for perfect accuracy
+                    # we'd track stage per ref, but decrementing here is sufficient
+                    # for tick-based backpressure.
+                    pass
+
                 self._active_tasks.pop(ref, None)
                 worker_id = (
                     self.worker_map.get(worker, "unknown") if worker else "unknown"
@@ -545,11 +585,11 @@ class TaskManger:
                 # LOG.debug("Found idle worker", worker=worker)
                 return worker
 
-        LOG.debug("No idle workers found")
+        # LOG.debug("No idle workers found")
         return None
 
     # TODO: Handle Timeouts
-    def scan_and_recover(self) -> None:
+    def recover_zombie_tasks(self) -> None:
         """Scans all stage queues for zombie tasks."""
         with self.lock:
             # Iterate only over keys starting with valid stages
@@ -560,7 +600,7 @@ class TaskManger:
                 meta: TaskMetadata = self.cache.get(key)  # type: ignore
 
                 # --- ENHANCED HEARTBEAT LOGIC ---
-                # We check for zombies in any 'dispatched' state (PROVISIONING or RUNNING).
+                # We check for zombies in any 'dispatched' state (RUNNING).
                 # This ensures we recover from Ray actor startup failures as well.
                 if (
                     meta.status in ExecutionStatus.dispatched_statuses()
@@ -716,4 +756,6 @@ class TaskManger:
 
     #     with manifest_path.open("rb") as f:
     #         # Structural validation included via msgspec
+    #         return msgspec.json.decode(f.read(), type=TaskManifest)
+    #         return msgspec.json.decode(f.read(), type=TaskManifest)
     #         return msgspec.json.decode(f.read(), type=TaskManifest)

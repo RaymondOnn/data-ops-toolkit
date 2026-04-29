@@ -10,7 +10,7 @@ dependencies = [
     "utils", # Depends on libs/utils
     "database", # Depends on libs/database
     "cache", # Depends on libs/cache
-    "ray>=2.39.0",
+    "ray[default]>=2.39.0",
     "polars",
     "pandas", # Required by Ray Data
     "pyarrow",
@@ -20,7 +20,6 @@ dependencies = [
     "filelock",
     "dynaconf",
     "boto3",
-    "croniter",
     "apscheduler",
     "tenacity",
 ]

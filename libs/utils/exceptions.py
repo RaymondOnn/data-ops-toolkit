@@ -17,17 +17,17 @@ class TransientError(Error):
 
 
 class AuthFailure(TerminalError):
-    """Raised when authentication to an external service fails due to invalid credentials."""
+    """Terminal: Invalid credentials. Retrying will not help."""
 
     pass
 
 
 class HostUnreachable(TransientError):
-    """Raised when the target host is unreachable, e.g., due to network issues or service downtime."""
+    """Transient: Network or DNS issues. Service might come back."""
 
     pass
 
-class AppWarning(Warning):
-    """Base class for non-critical issues that should be logged but do not require job failure."""
 
+class ResourceNotFound(TerminalError):
+    """Terminal: """
     pass

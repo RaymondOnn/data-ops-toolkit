@@ -39,7 +39,16 @@ done
 # 1.5 Global Stop Refreshes
 # This prevents background tasks from conflicting with object creation/replacement.
 echo "🛑 Pausing background refreshes to prevent race conditions..."
-ch_client -q "SYSTEM STOP VIEW REFRESHES" || true
+
+# Add this setting to ensure the "Replace" logic has permission to swap tables
+ch_client -q "SET allow_experimental_refreshable_materialized_view = 1"
+
+# Get all refreshable views and run SYSTEM STOP on each
+ch_client -q "SYSTEM STOP VIEWS" || true
+
+# NEW: Force clear any stuck refreshes by killing active queries
+echo "🧹 Killing any lingering refresh queries..."
+ch_client -q "KILL QUERY WHERE query_kind = 'RefreshView' ASYNC" || true
 
 # 2. Define the EXPLICIT order of SQL execution
 # Add your table definitions here in the order they should be created
@@ -54,7 +63,6 @@ SQL_FILES=(
     "/sql/definitions/views/meta.execution_history.sql"
     "/sql/definitions/views/meta.error_log.sql"
     "/sql/adhoc/seed_metadata.sql"
-    "/sql/definitions/tables/meta.execution_log_clone.sql"
 )
 
 
@@ -70,6 +78,15 @@ done
 
 # 3. Resume Refreshes
 echo "▶️ Resuming background refreshes..."
-ch_client -q "SYSTEM START VIEWS" || true
+# Get all refreshable views and run SYSTEM START on each
+VIEWS=$(ch_client -q "SELECT concat(database, '.', view) FROM system.view_refreshes WHERE database IN ('META', 'TEST')")
+
+for v in $VIEWS; do
+    echo "  Starting: $v"
+    ch_client -q "SYSTEM START VIEW $v"
+done
+
+echo "📊 Current View Status:"
+ch_client -q "SELECT view, status, exception FROM system.view_refreshes" --format PrettyCompact
 
 echo "✅ ClickHouse initialization complete."

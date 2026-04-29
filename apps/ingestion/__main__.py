@@ -155,7 +155,7 @@ def start(
     # 2. Setup Local-Friendly Logging
     setup_logging(
         log_dir=Path("./.workspace/logs"),
-        is_prod=orchestrator.exec_ctx.is_prod(),
+        is_prod=orchestrator.exec_ctx.is_prod,
         is_debug=debug,
         filename="orchestrator_daemon.jsonl",
     )

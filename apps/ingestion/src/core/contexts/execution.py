@@ -12,6 +12,7 @@ class ExecutionMode(StrEnum):
     NORMAL = "normal"
     DEBUG = "debug"
     TEST = "test"
+    DRY_RUN = "dry_run"
 
 
 class RayMode(StrEnum):
@@ -60,10 +61,6 @@ class ExecutionContext(msgspec.Struct):
         return self.workspace_dir / "data"
 
     @property
-    def hold_path(self) -> Path:
-        return self.workspace_dir / "HOLD"
-
-    @property
     def failed_path(self) -> Path:
         return self.workspace_dir / "FAILED"
 
@@ -71,17 +68,24 @@ class ExecutionContext(msgspec.Struct):
     def lock_file(self) -> Path:
         return self.workspace_dir / "orchestrator.lock"
 
+    @property
     def is_debug(self) -> bool:
         return self.execution_mode == ExecutionMode.DEBUG
 
+    @property
     def is_test(self) -> bool:
         return self.execution_mode == ExecutionMode.TEST
 
+    @property
     def is_normal(self) -> bool:
         return self.execution_mode == ExecutionMode.NORMAL
+    @property
+    def is_dry_run(self) -> bool:
+        return self.execution_mode == ExecutionMode.DRY_RUN
 
+    @property
     def is_prod(self) -> bool:
-        return self.env == ExecutionMode.NORMAL
+        return self.env == Env.PROD
 
     def get_task_identifier(
         self, job_id: str, dataset_id: str, partition_date: str

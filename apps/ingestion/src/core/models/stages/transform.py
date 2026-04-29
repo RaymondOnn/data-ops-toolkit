@@ -1,22 +1,20 @@
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import msgspec
 import polars as pl
 import ray
+from apps.ingestion.src.core.models.task import Task
 from apps.ingestion.src.core.models.task.manifest import TransformPayload
 from apps.ingestion.src.core.strategies.transform import (
     TransformContext,
     TransformFactory,
 )
+from apps.ingestion.src.utils.exceptions import RewindTask
 from loguru import logger
 
 from .base import ExecutionStage
 from .enums import StageName
-
-if TYPE_CHECKING:
-    from apps.ingestion.src.core.models.task import Task
-
 
 LOG = logger
 APP_TRANSFORM_OUTPUT_EXT = "parquet"
@@ -26,6 +24,46 @@ class TransformStage(ExecutionStage):
     name = StageName.TRANSFORM.label
     manifest: TransformPayload
 
+    def pre_flight(self, task: Task) -> None:
+        """
+        Verify that the artifacts from the EXTRACT stage are present and valid.
+        """
+        super().pre_flight(task)
+        meta = task.manifest.extract
+
+        # 1. Gate: Metadata must exist (Differentiates 'no data' from 'never ran')
+        if meta is None:
+            raise RewindTask(StageName.EXTRACT.label, "Extraction metadata missing.")
+
+        # 2. Gate: If we expect data, it must physically exist and be non-zero.
+        # Note: If meta.file_count is 0, we skip the disk check entirely.
+        if meta.file_count > 0:
+            path = task.folder / "extract"
+            # Combined check for directory existence and non-empty parquet files
+            if not path.exists() or not any(
+                f.stat().st_size > 0 for f in path.glob("*.parquet")
+            ):
+                raise RewindTask(
+                    StageName.EXTRACT.label, "Physical artifacts missing or empty."
+                )
+                
+        # 3. Gate: Validate Transformer Registration
+        try:
+            # We check if we can get the transformer class
+            TransformFactory.get_transformer(
+                task.context.transform.transform_type,
+                dataset_id=task.dataset_id,
+                job_id=task.job_id,
+            )
+        except Exception as e:
+            # If the transformer type is unknown or config is broken, fail early
+            LOG.error("Transformer initialization failed in pre_flight", error=str(e))
+            raise ValueError(f"Invalid transformer configuration: {e}") from e
+
+        # 4. Gate: TransformContext Validation
+        if not task.context.transform.transform_type:
+            raise ValueError("Transform type is not defined in TaskContext.")
+    
     def execute(self, task: "Task") -> str:
         """
         Decision: Use LazyFrame Streaming for 50M rows.

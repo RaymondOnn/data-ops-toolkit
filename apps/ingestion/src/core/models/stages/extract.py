@@ -13,7 +13,6 @@ from apps.ingestion.src.core.strategies.extract import (
     ReaderFactory,
 )
 from apps.ingestion.src.services.factory import ServiceFactory
-from apps.ingestion.src.utils.exceptions import TaskBlocked
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreakerTripped
 from loguru import logger
@@ -183,11 +182,9 @@ class ExtractStage(ExecutionStage):
 
             # 4. State Transition
             return str(self._transit(task))
-        except ClientCantConnect as ccc:
-            LOG.exception("Halt by client connection.", stage=self.name)
-            raise TaskBlocked(str(ccc)) from ccc
-        except CircuitBreakerTripped:
-            LOG.exception("Halt by circuit breaker.", stage=self.name)
+        except (ClientCantConnect, CircuitBreakerTripped) as e:
+            LOG.warning(f"Ingestion halted: {e}", stage=self.name)
+            self.finalize(task, exception=e)
             raise
         except Exception as e:
             LOG.exception("Extract Step failed", stage=self.name)

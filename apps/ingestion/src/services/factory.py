@@ -2,9 +2,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
+from apps.ingestion.src.extras.flags import feature_flag
+from apps.ingestion.src.utils.exceptions import RetryTask
 from libs.auth.factory import AuthFactory
 from libs.auth.models import Secret
 from libs.cache.base import KeyValueCache
+from libs.clients.base import ClientCantConnect
+from libs.resilience.circuit_breaker import CircuitBreakerTripped
+from libs.utils.exceptions import AuthFailure, HostUnreachable
 from loguru import logger
 
 from .base import Archive, Sink, Source
@@ -48,13 +53,27 @@ class ServiceFactory:
         cls._provider = AuthFactory.get_provider(env=env, **config)
 
     @classmethod
-    def get_service(cls, service_type: str, **config: Any) -> Any:
+    def get_service(
+        cls, service_type: str, flags: Any | None = None, **config: Any
+    ) -> Any:
         """
         Acts as the Singleton Manager.
         Returns a service instance based on account_id.
         """
+        # FEATURE TOGGLE: Cost/Tool Benchmarking
+        # If benchmark_mode is on, we can swap the requested service
+        # for an experimental one
+        effective_type = service_type
+        effective_type = service_type
+        if (flags 
+            and getattr(flags, "benchmark_mode", False)
+            and (experimental := getattr(flags, "experimental_sink_type", None))
+        ):
+            effective_type = experimental
+            LOG.info(f"🚀 BENCHMARK MODE: Swapping {service_type} -> {effective_type}")
+
         config_hash = hash(cls._make_hashable(config))
-        instance_key = f"{service_type}:{config_hash}"
+        instance_key = f"{effective_type}:{config_hash}"
 
         if instance_key not in cls._INSTANCES:
             LOG.debug(
@@ -66,9 +85,9 @@ class ServiceFactory:
                 "Available services in registry",
                 services=list(cls._SERVICES.keys()),
             )
-            service_cls = cls._SERVICES.get(service_type.casefold())
+            service_cls = cls._SERVICES.get(effective_type.casefold())
             if not service_cls:
-                raise ServiceNotFound(f"No service found for {service_type}")
+                raise ServiceNotFound(f"No service found for {effective_type}")
 
             # --- CENTRALIZED SECRET LOGIC ---
             # If 'secret_key' (the ID) is present, wrap it in a Secret object.
@@ -81,7 +100,22 @@ class ServiceFactory:
 
                 config["password"] = Secret(config["secret_key"], cls._provider)
 
-            cls._INSTANCES[instance_key] = service_cls(name=instance_key, **config)
+            try:
+                cls._INSTANCES[instance_key] = service_cls(name=instance_key, **config)
+            except (HostUnreachable, ClientCantConnect, CircuitBreakerTripped) as e:
+                LOG.error(
+                    "Transient connectivity failure during service initialization",
+                    service_type=service_type,
+                    error=str(e),
+                )
+                raise RetryTask(
+                    reason=f"Service {service_type} unavailable: {e!s}",
+                    service_name=service_type,
+                    wait_seconds=300,  # Default cooldown for service outages
+                ) from e
+            except AuthFailure:
+                # Let terminal AuthFailures bubble up to be handled by FailedState
+                raise
         else:
             LOG.debug(
                 "Returning cached service instance",
@@ -92,24 +126,30 @@ class ServiceFactory:
         return cls._INSTANCES[instance_key]
 
     @classmethod
-    def get_source(cls, service_type: str, **config: Any) -> Source:
-        service = cls.get_service(service_type, **config)
+    def get_source(
+        cls, service_type: str, flags: Any | None = None, **config: Any
+    ) -> Source:
+        service = cls.get_service(service_type, flags=flags, **config)
         if not isinstance(service, Source):
             raise TypeError(f"Service {service_type} does not implement Source.")
         return service
         # return cast(Source, service)
 
     @classmethod
-    def get_sink(cls, service_type: str, **config: Any) -> Sink:
-        service = cls.get_service(service_type, **config)
+    def get_sink(
+        cls, service_type: str, flags: Any | None = None, **config: Any
+    ) -> Sink:
+        service = cls.get_service(service_type, flags=flags, **config)
         if not isinstance(service, Sink):
             raise TypeError(f"Service {service_type} does not implement Sink.")
         return service
         # return cast(Sink, service)
 
     @classmethod
-    def get_archive(cls, service_type: str, **config: Any) -> Archive:
-        service = cls.get_service(service_type, **config)
+    def get_archive(
+        cls, service_type: str, flags: Any | None = None, **config: Any
+    ) -> Archive:
+        service = cls.get_service(service_type, flags=flags, **config)
         if not isinstance(service, Archive):
             raise TypeError(f"Service {service_type} does not implement Archive.")
         return service
@@ -133,6 +173,4 @@ class ServiceFactory:
 
         # Default to lean mode (Diskcache)
         cache_filepath = cache_cfg.get("filepath", ".cache")
-        return DiskCache(cache_path=(workspace_dir / cache_filepath).resolve())
-        return DiskCache(cache_path=(workspace_dir / cache_filepath).resolve())
         return DiskCache(cache_path=(workspace_dir / cache_filepath).resolve())

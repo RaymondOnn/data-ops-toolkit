@@ -2,12 +2,13 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 import msgspec
+from loguru import logger
+
 from apps.ingestion.src.core.models.task.manifest import PublishPayload
 from apps.ingestion.src.core.strategies.load.load import LoadContext, Loader
 from apps.ingestion.src.services.base import Sink
 from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.utils.exceptions import RetryTask, RewindTask
-from loguru import logger
 
 from .base import ExecutionStage
 from .enums import StageName
@@ -36,22 +37,10 @@ class PublishStage(ExecutionStage):
         """
         # 1. Initialize Service & Check Connectivity
         # (This logic is the 'new' pre-flight abstraction)
-        try:
-            task_ctx = task.context
-            self.service = ServiceFactory.get_sink(
-                task_ctx.load.sink_type, **task_ctx.load.sink_config
-            )
-        except Exception as e:
-            LOG.error(
-                "Failed to initialize sink service",
-                error=str(e),
-                sink_type=task_ctx.load.sink_type,
-                sink_config=task_ctx.load.sink_config,
-            )
-            raise RetryTask(
-                reason=f"Service {task_ctx.load.sink_type} unavailable",
-                source_name=task_ctx.load.sink_type,
-            ) from e
+        task_ctx = task.context
+        self.service = ServiceFactory.get_sink(
+            task_ctx.load.sink_type, **task_ctx.load.sink_config
+        )
 
         # 2. Check Staging Artifact (Self-Healing Rewind)
         write_meta = task.manifest.write

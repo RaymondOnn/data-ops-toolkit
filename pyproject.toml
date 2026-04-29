@@ -11,6 +11,10 @@ dependencies = [
     "ingestion",
 ]
 
+[tool.uv]
+# Self-healing: Force the workspace to stable Polars versions to avoid yanked 1.39.2
+override-dependencies = ["polars>=1.21.0"]
+
 [tool.uv.sources] # local workspace packages
 ingestion = { workspace = true }
 utils = { workspace = true }
@@ -21,6 +25,7 @@ clients = { workspace = true }
 resilience = { workspace = true }
 cloud = { workspace = true }
 cache = { workspace = true }
+queue = { workspace = true }
 
 
 [tool.uv.workspace]

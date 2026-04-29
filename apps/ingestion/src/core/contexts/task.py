@@ -1,7 +1,13 @@
-from typing import Any, Literal
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
 from apps.ingestion.src.core.models.stages.enums import StageName
+from apps.ingestion.src.extras.flags import FeatureFlags
+from apps.ingestion.src.utils.constants import CONFIG_FILENAME
+
+if TYPE_CHECKING:
+    from apps.ingestion.src.core.orchestrator.enums import JobRecord
 
 
 class ExtractConfig(msgspec.Struct):
@@ -78,3 +84,39 @@ class TaskContext(msgspec.Struct):
     expires_at: float | None = None
     custom_overrides: dict[str, Any] = msgspec.field(default_factory=dict)
     extras: dict[str, Any] = msgspec.field(default_factory=dict)
+    # Feature Flags: The 'One Spot' to manage toggles
+    feature_flags: FeatureFlags = msgspec.field(default_factory=FeatureFlags)
+
+    @classmethod
+    def create_placeholder(cls, run: "JobRecord") -> "TaskContext":
+        """Creates a synthetic context for audit logging of untriggered/expired jobs."""
+        return cls(
+            job_id=run.JOB_ID,
+            dataset_id=run.DATASET_ID,
+            partition_date=str(run.PARTITION_DATE),
+            output_path="",
+            extract=ExtractConfig(source_type="N/A", source_identifier="N/A"),
+            transform=TransformConfig(transform_type="N/A"),
+            load=LoadConfig(
+                sink_type="N/A",
+                sink_identifier="N/A",
+                partition_col="N/A",
+                partition_value="N/A",
+            ),
+            archive=ArchiveConfig(
+                enabled=False, retention_days=None, base_path=None, type=None
+            ),
+            feature_flags=FeatureFlags(),
+        )
+
+
+def load_task_context(folder: Path) -> TaskContext:
+    """
+    Standardized utility to load a TaskContext from a physical workspace folder.
+    """
+    config_path = folder / CONFIG_FILENAME
+    if not config_path.exists():
+        raise FileNotFoundError(f"Missing {CONFIG_FILENAME} in {folder}")
+
+    with config_path.open(mode="rb") as f:
+        return msgspec.json.decode(f.read(), type=TaskContext)
