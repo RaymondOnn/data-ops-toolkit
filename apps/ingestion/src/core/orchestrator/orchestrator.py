@@ -9,7 +9,6 @@ import msgspec
 import pendulum
 from apps.ingestion.src.core.contexts import TaskContextBuilder
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
-from apps.ingestion.src.core.models.stages.enums import StageName
 from apps.ingestion.src.core.models.task import (
     ExecutionStatus,
     Task,
@@ -19,6 +18,7 @@ from apps.ingestion.src.core.models.task import (
 from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.utils.common import make_short_hash
 from apps.ingestion.src.utils.constants import (
+    CACHE_TASK_NAMESPACE,
     CONFIG_FILENAME,
     DISK_THRESHOLD_HALT,
     STRIP_TZ_FOR_DB,
@@ -37,7 +37,6 @@ from .trigger import TriggerManager
 if TYPE_CHECKING:
     from apps.ingestion.src.core.contexts.task import TaskContext
 
-    from .enums import TaskMetadata
 
 LOG = logger
 
@@ -383,14 +382,16 @@ class Orchestrator:
                 run_stats[status] += 1
 
             # 4. Exit condition: Total Terminal (Success + Failure) == Total Triggered
-            terminal_count = run_stats["success"] + run_stats["failed"]
-            if terminal_count == len(run_ids):
+            total_terminal = sum(
+                count for status, count in run_stats.items() if status.is_terminal
+            )
+            if total_terminal == len(run_ids):
                 LOG.info(
                     "Synchronous monitoring loop exited",
                     job_id=job_id,
                     total=len(run_ids),
-                    success=run_stats["success"],
-                    failed=run_stats["failed"],
+                    success=run_stats[ExecutionStatus.SUCCESS],
+                    failed=run_stats[ExecutionStatus.FAILED],
                 )
                 break
 
@@ -404,31 +405,36 @@ class Orchestrator:
         dataset_id: str,
         partition_date: str | None,
         run_id: str | None = None,
-    ) -> str:
+    ) -> ExecutionStatus:
         """
         Determines the detailed runtime status of a specific run.
-        Returns: 'active' | 'success' | 'failed'
         """
         if not run_id:
-            return "success"  # Unknown/Missing treated as done
+            return ExecutionStatus.SUCCESS  # Missing treated as done
 
         identifier = self.exec_ctx.get_task_identifier(
             job_id, dataset_id, partition_date or ""
         )
-        for stage_enum in StageName:
-            key = f"{stage_enum.label}:{identifier}:{run_id}"
 
-            meta: TaskMetadata = self.tasks.cache.get(key)
-            if meta:
-                if hasattr(meta, "status") and meta.status in [
-                    ExecutionStatus.FAILED.value,
-                    ExecutionStatus.EXPIRED.value,
-                ]:
-                    return "failed"
-                return "active"
+        # 1. Check TaskManager Cache (Hot State)
+        # Format: task:{status}:{stage}:{identifier}:{run_id}
+        pattern = f"{CACHE_TASK_NAMESPACE}:*:*:{identifier}:{run_id}"
+        for key in self.tasks.cache.iterkeys(pattern=pattern):
+            # If it's in the cache, it's still being managed (Active)
+            if run_id in key:
+                return ExecutionStatus.RUNNING
+
+        # 2. Check StateStore Registry (Database Mirror)
+        # If it's gone from the task cache, it has been popped. 
+        # We check the registry to see if it was popped because of failure.
+        record = self.state_store.active_registry.get(run_id)
+        if record:
+            status_val = ExecutionStatus(record.JOB_STATUS)
+            if status_val.is_failure:
+                return ExecutionStatus.FAILED
 
         # If not found in cache at all, it was successfully popped/finished
-        return "success"
+        return ExecutionStatus.SUCCESS
 
     def _trigger_job(
         self,

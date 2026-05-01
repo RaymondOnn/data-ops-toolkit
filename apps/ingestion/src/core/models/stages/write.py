@@ -71,7 +71,6 @@ class WriteStage(ExecutionStage):
                 "_run_id": task.run_id,
                 "_source": task_ctx.extract.source_identifier,
             }
-            print("Audit Values in WriteStage:", audit_values)
             staging_artifact, rows_loaded = loader.load(
                 service=self.service,
                 source_dir=source_dir,

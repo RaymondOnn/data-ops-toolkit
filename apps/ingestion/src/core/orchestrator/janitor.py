@@ -1,5 +1,4 @@
 import shutil
-from datetime import datetime
 from pathlib import Path
 
 import msgspec
@@ -116,7 +115,8 @@ class Janitor:
         prefix = f"{identifier}:{run_id}"
         pending_config = self.exec_ctx.active_path / f"{prefix}_{CONFIG_FILENAME}"
         reason = "TTL_EXPIRED" if run.has_been_triggered else "UNTRIGGERED_STALE"
-        LOG.warning(f"Evicting run {run_id} (Reason: {reason})")
+        full_reason = f"{reason} | Scheduled: {run.SCHEDULED_TIMESTAMP_LC}"
+        LOG.warning(f"Evicting run {run_id} ({full_reason})")
 
         # 2. Physical Cleanup
         if run.has_been_triggered:
@@ -128,7 +128,7 @@ class Janitor:
                 exec_ctx=self.exec_ctx,
             )
             task.purge()
-            
+
         # Defensive: Always check for the orphaned config in the root
         if pending_config.exists():
             pending_config.unlink()
@@ -136,7 +136,7 @@ class Janitor:
 
         # 5. Atomic State Transition & Eviction
         # We emit the terminal state (Queuing for flush) and pop from registry
-        self.state_store.emit_expiry(run, task_ctx, reason)
+        self.state_store.emit_expiry(run, task_ctx, full_reason)
         self.state_store.remove_record(run.RUN_ID)
 
     def _get_expiry_context(self, job_path: Path, pending_config: Path) -> TaskContext:

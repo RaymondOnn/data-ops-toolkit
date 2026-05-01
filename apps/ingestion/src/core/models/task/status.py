@@ -29,13 +29,28 @@ class ExecutionStatus(StrEnum):
 
     UNKNOWN = "UNKNOWN"
 
+    @property
+    def is_terminal(self) -> bool:
+        """Returns True if the status represents a final state."""
+        return self in self.terminal_statuses()
+
+    @property
+    def is_failure(self) -> bool:
+        """Returns True if the status represents a non-successful terminal state."""
+        return self in {self.FAILED, self.CANCELLED, self.EXPIRED}
+
+    @property
+    def is_success(self) -> bool:
+        """Returns True if the status represents a successful completion."""
+        return self == self.SUCCESS
+
     @classmethod
     def active_statuses(cls) -> set["ExecutionStatus"]:
         return {cls.QUEUED, cls.PENDING, cls.RUNNING, cls.PROVISIONED}
 
     @classmethod
     def terminal_statuses(cls) -> set["ExecutionStatus"]:
-        return {cls.SUCCESS, cls.FAILED, cls.CANCELLED}
+        return {cls.SUCCESS, cls.FAILED, cls.CANCELLED, cls.EXPIRED}
 
     @classmethod
     def dispatched_statuses(cls) -> set["ExecutionStatus"]:

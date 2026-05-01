@@ -41,7 +41,7 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         file_ext: str = "parquet",
         audit_values: dict[str, Any] | None = None,
     ) -> tuple[str, int]:
-        
+
         # Extract database and table names to fully qualify the staging table
         parts = target_table.split(".", 1)
         db_name = parts[0] if len(parts) > 1 else None
@@ -56,7 +56,7 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         audit_values = audit_values or {}
         success = False
         try:
-            # Different stages use separate sessions. 
+            # Different stages use separate sessions.
             # Hence, TEMP Table approach not feasible.
             tmp_sql = f"""CREATE OR REPLACE TABLE {staging_table} 
                     ENGINE = MergeTree() 
@@ -123,13 +123,33 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         target_schema = self.client.sql(f"DESCRIBE TABLE {target_table}")
         staging_schema = self.client.sql(f"DESCRIBE TABLE {staging_table}")
 
-        LOG.info(
-            "Auditing schemas before promotion",
-            target=target_table,
-            target_columns=[row[0] for row in target_schema],
-            staging=staging_table,
-            staging_columns=[row[0] for row in staging_schema],
-        )
+        # Convert schema results to dictionaries: {column_name: data_type}
+        target_cols = {row[0]: row[1] for row in target_schema}
+        staging_cols = {row[0]: row[1] for row in staging_schema}
+
+        if target_cols != staging_cols:
+            missing_in_staging = set(target_cols.keys()) - set(staging_cols.keys())
+            extra_in_staging = set(staging_cols.keys()) - set(target_cols.keys())
+            type_mismatches = {
+                col: {"target": target_cols[col], "staging": staging_cols[col]}
+                for col in set(target_cols.keys()) & set(staging_cols.keys())
+                if target_cols[col] != staging_cols[col]
+            }
+
+            LOG.error(
+                "Schema mismatch detected during promotion",
+                target_table=target_table,
+                staging_table=staging_table,
+                missing_in_staging=list(missing_in_staging),
+                extra_in_staging=list(extra_in_staging),
+                type_mismatches=type_mismatches,
+            )
+            raise ValueError(
+                f"Cannot promote {staging_table} to {target_table}: Schema mismatch. "
+                f"Missing: {missing_in_staging}, Extra: {extra_in_staging}, Mismatches: {type_mismatches}"
+            )
+
+        LOG.info("Schema audit successful", target=target_table, staging=staging_table)
 
         success = False
         try:

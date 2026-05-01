@@ -2,8 +2,10 @@ import os
 import subprocess
 import time
 import traceback
+from collections import Counter
 from typing import Any
 
+import msgspec
 import ray
 from apps.ingestion.src.core.contexts import ExecutionContext, RayMode
 from apps.ingestion.src.core.models.stages.enums import EXEC_STAGES, StageName
@@ -17,7 +19,7 @@ from apps.ingestion.src.core.models.task import ExecutionStatus, Task
 from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.services.registry import ServiceRegistry
 from apps.ingestion.src.utils.common import find_path
-from apps.ingestion.src.utils.constants import MANIFEST_FILENAME
+from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE, MANIFEST_FILENAME
 from apps.ingestion.src.utils.dates import epoch_to_iso, get_end_of_day_ts
 from apps.ingestion.src.utils.exceptions import RetryTask, RewindTask
 from filelock import FileLock
@@ -63,8 +65,12 @@ class Worker:
         self.is_busy = False
 
     def process_stage(self, key: str) -> None:
-        run_id = key.rsplit(":", maxsplit=1)[-1]
-        current_stage, identifier = key.split(":", 1)
+        # Key Format: {CACHE_TASK_NAMESPACE}:{status}:{stage}:{job}:{dataset}:{date}:{run_id}
+        parts = key.split(":")
+        current_stage = parts[2]
+        identifier = ":".join(parts[3:6])
+        run_id = parts[6]
+
         log = logger.bind(worker_id=self.worker_id, stage=current_stage, run_id=run_id)
 
         try:
@@ -76,18 +82,17 @@ class Worker:
                 with attempt, logger.contextualize(run_id=run_id):
                     # 1. Rehydrate Task
                     with self.lock:
-                        # Update status to RUNNING immediately so Engine occupancy tracking is accurate
                         meta: TaskMetadata = self.cache.get(key)
+                        self.cache.pop(key, None)
                         meta.status = ExecutionStatus.RUNNING.value
                         meta.last_hb = time.time()
-                        self.cache[key] = meta
 
-                        LOG.info(
-                            "Updating job status",
-                            job_id=meta.job_id,
-                            run_id=meta.run_id,
-                            status=meta.status,
+                        # Transition key to RUNNING
+                        new_key = (
+                            f"{CACHE_TASK_NAMESPACE}:{meta.status}:{current_stage}:"
+                            f"{identifier}:{run_id}"
                         )
+                        self.cache[new_key] = meta
 
                     task: Task = Task(
                         composite_key=f"{meta.job_id}:{meta.dataset_id}",
@@ -148,39 +153,46 @@ class Worker:
                         # 2. OPTION B: Direct Import Execution (Dev/Fallback Mode)
                         task.check_in(current_stage)
                         task.stage.pre_flight(task)
-                        next_stage = task.execute()
+                        task.execute()
 
                     # Outcome Selection (Success Rail)
                     self._handle_success(
-                        task, key, identifier, current_stage, meta, log
+                        task, new_key, identifier, current_stage, meta, log
                     )
 
         except RetryTask as r:
-            self._handle_retry_task(task, key, meta, r, log)
+            self._handle_retry_task(task, new_key, meta, r, log)
         except RewindTask as rw:
-            self._handle_rewind_task(task, key, identifier, meta, rw, log)
+            self._handle_rewind_task(task, new_key, identifier, meta, rw, log)
         except Exception as e:
-            self._handle_failure(task, key, current_stage, e, log)
+            self._handle_failure(task, new_key, current_stage, e, log)
             raise
         finally:
             self.is_busy = False
 
     def _handle_success(self, task, key, identifier, current_stage, meta, log):
         if SuccessState.is_applicable(task):
-            SuccessState(task).on_enter(data={})
+            SuccessState(task).on_enter(data={"stage": current_stage})
             with self.lock:
                 self.cache.pop(key, None)
                 self.cache.pop(f"active_run:{identifier}", None)
                 log.info("Task fully completed.")
         else:
-            ProgressState(task).on_enter(data={})
+            # Determine next stage once to ensure consistency between logging and transition
+            next_stage = StageName.next(current_stage)
+            next_label = next_stage.label if next_stage else "FINISH"
+
+            ProgressState(task).on_enter(data={"next_stage": next_label})
             with self.lock:
-                self.cache.pop(key, None)
-                if next_stage := StageName.next(current_stage):
-                    meta.current_stage = next_stage.label
-                    meta.status = ExecutionStatus.PENDING.value
-                    new_key = f"{next_stage.label}:{identifier}:{meta.run_id}"
-                    self.cache[new_key] = meta
+                if next_stage:
+                    meta_to_move = self.cache.pop(key)
+                    meta_to_move.current_stage = next_stage.label
+                    meta_to_move.status = ExecutionStatus.PENDING.value
+                    new_key = (
+                        f"{CACHE_TASK_NAMESPACE}:{meta_to_move.status}:{next_stage.label}:"
+                        f"{identifier}:{meta_to_move.run_id}"
+                    )
+                    self.cache[new_key] = meta_to_move
 
     def _handle_retry_task(self, task, key, meta, r, log):
         log.warning("Task signaled RETRY", reason=r.reason, wait=r.wait_seconds)
@@ -192,13 +204,20 @@ class Worker:
             }
         )
         with self.lock:
-            if meta := self.cache.get(key):
-                meta.status = (
+            if meta_to_update := self.cache.pop(key, None):
+                meta_to_update.status = (
                     ExecutionStatus.BLOCKED if r.service_name else ExecutionStatus.RETRY
                 )
-                meta.blocked_by = r.service_name
-                meta.last_hb = time.time() + r.wait_seconds
-                self.cache[key] = meta
+                meta_to_update.blocked_by = r.service_name
+                meta_to_update.last_hb = time.time() + r.wait_seconds
+
+                parts = key.split(":")
+                # New key with updated status
+                new_key = (
+                    f"{CACHE_TASK_NAMESPACE}:{meta_to_update.status}:{parts[2]}:"
+                    f"{':'.join(parts[3:6])}:{parts[6]}"
+                )
+                self.cache[new_key] = meta_to_update
 
     def _handle_rewind_task(self, task, key, identifier, meta, rw, log):
         log.warning("Task signaled REWIND", to_stage=rw.target_stage)
@@ -210,11 +229,15 @@ class Worker:
             }
         )
         with self.lock:
-            self.cache.pop(key, None)
-            meta.current_stage = rw.target_stage
-            meta.status = ExecutionStatus.PENDING.value
-            new_key = f"{rw.target_stage}:{identifier}:{meta.run_id}"
-            self.cache[new_key] = meta
+            meta_to_move = self.cache.pop(key, None)
+            if meta_to_move:
+                meta_to_move.current_stage = rw.target_stage
+                meta_to_move.status = ExecutionStatus.PENDING.value
+                new_key = (
+                    f"{CACHE_TASK_NAMESPACE}:{meta_to_move.status}:{rw.target_stage}:"
+                    f"{identifier}:{meta_to_move.run_id}"
+                )
+                self.cache[new_key] = meta_to_move
 
     def _handle_failure(self, task, key, current_stage, e, log):
         if RetryState.is_applicable(task, e):
@@ -259,6 +282,7 @@ class TaskManager:
             )
 
         self.cache = get_cache(self.exec_ctx.workspace_dir, self.exec_ctx.cache_config)
+        self._loop_counter = 0
         self.lock = FileLock(self.exec_ctx.lock_file)
 
         if not ray.is_initialized():
@@ -349,7 +373,10 @@ class TaskManager:
         """Checks config, creates tasks if not in cache, and submits them."""
         # Always start in the 'start' queue
         current_stage = current_stage or "start"
-        queue_key = f"{current_stage}:{identifier}:{run_id}"
+        queue_key = (
+            f"{CACHE_TASK_NAMESPACE}:{ExecutionStatus.PENDING.value}:{current_stage}:"
+            f"{identifier}:{run_id}"
+        )
         job_id, dataset_id, partition_date = identifier.split(":")
 
         # ?: Logic to determine if this is a snapshot (e.g., based on
@@ -411,6 +438,12 @@ class TaskManager:
                 self._blocked_stages.remove(stage_enum)
 
     def _process_tasks(self) -> None:
+        # Periodically perform a deep refresh of occupancy to prevent drift
+        self._loop_counter += 1
+        if self._loop_counter % 10 == 0:
+            self._occupancy_cache = self._get_current_occupancy()
+            self._loop_counter = 0
+
         current_occupancy = self._occupancy_cache
 
         # 2. Snapshot pool availability to exit early if entire pools are full
@@ -424,21 +457,29 @@ class TaskManager:
         # Update congestion state once per loop
         self._check_stage_congestion(current_occupancy, pool_status)
 
-        # Take a snapshot of keys starting with valid stages to
-        # iterate without holding the lock
-        for key in self._get_all_keys():
+        # Scan for tasks that are ready for processing (PENDING, RETRY, or BLOCKED)
+        candidate_patterns = [
+            f"{CACHE_TASK_NAMESPACE}:PENDING:*",
+            f"{CACHE_TASK_NAMESPACE}:RETRY:*",
+            f"{CACHE_TASK_NAMESPACE}:BLOCKED:*",
+        ]
+        candidate_keys = []
+        for pattern in candidate_patterns:
+            candidate_keys.extend(self.cache.iterkeys(pattern=pattern))
+
+        for key in candidate_keys:
             # If both pools are full, stop processing immediately
             if not any(pool_status.values()):
                 LOG.debug("Both pools are full, stopping processing")
                 break
 
-            # Convert the string label from the cache key to a ExecutionStage enum
-            stage_label = key.split(":", 1)[0]
-            stage_enum = StageName.from_label(stage_label)
-            if stage_enum not in self.stage_limits:
-                continue
+            parts = key.split(":")
+            status = parts[1]
+            stage_label = parts[2]
+            identifier = ":".join(parts[3:6])
+            run_id = parts[6]
 
-            limit = self.stage_limits[stage_enum]["limit"]
+            stage_enum = StageName.from_label(stage_label)
             pool_type = self.stage_limits[stage_enum]["pool"]
 
             # 2. Skip logic: if the stage was marked blocked at the start of this tick,
@@ -449,17 +490,18 @@ class TaskManager:
             # Only lock when we have a potential candidate to update
             with self.lock:
                 task_meta: TaskMetadata = self.cache.get(key)
+                if not task_meta:
+                    continue
 
-                # # A task is ready if it's PENDING,
-                # or if it's in RETRY and the wait is over
-                is_pending = task_meta.status == ExecutionStatus.PENDING.value
+                is_pending = status == ExecutionStatus.PENDING.value
                 # Case 1: Normal Retry (Timer based)
                 is_retry_ready = (
-                    task_meta.status == "RETRY" and time.time() >= task_meta.last_hb
+                    status == ExecutionStatus.RETRY.value
+                    and time.time() >= task_meta.last_hb
                 )
                 # Case 2: Service Outage (Signal based)
                 is_blocked_ready = (
-                    task_meta.status == "BLOCKED"
+                    status == ExecutionStatus.BLOCKED.value
                     and ServiceRegistry.is_healthy(task_meta.blocked_by or "")
                     and time.time() >= task_meta.last_hb
                 )
@@ -496,22 +538,21 @@ class TaskManager:
                             stage=stage_enum,
                             worker_id=self.worker_map.get(worker, "unknown"),
                         )
+                        self.cache.pop(key, None)
                         task_meta.status = ExecutionStatus.QUEUED.value
                         task_meta.last_hb = time.time()
-                        self.cache[key] = task_meta
-                        LOG.info(
-                            "Updating task status",
-                            job_id=task_meta.job_id,
-                            run_id=task_meta.run_id,
-                            status=task_meta.status,
-                            stage=stage_enum.label,
+
+                        new_key = (
+                            f"{CACHE_TASK_NAMESPACE}:{task_meta.status}:{stage_label}:"
+                            f"{identifier}:{run_id}"
                         )
+                        self.cache[new_key] = task_meta
 
                         # Update local occupancy count
                         self._occupancy_cache[stage_enum] += 1
 
-                        # Dispatch non-blocking and track the reference
-                        ref = worker.process_stage.remote(key)
+                        # Dispatch with the updated key
+                        ref = worker.process_stage.remote(new_key)
                         self._active_tasks[ref] = (worker, stage_enum)
                     else:
                         # Pool is exhausted for this tick;
@@ -520,27 +561,31 @@ class TaskManager:
 
     def _get_current_occupancy(self) -> dict[StageName, int]:
         """Counts how many workers are active in each stage."""
-        counts = dict.fromkeys(self.stage_limits, 0)
-        for stage_enum in self.stage_limits:
-            # Only iterate over keys for specific stages to avoid full cache scans
-            for key in self.cache.iterkeys(pattern=f"{stage_enum.label}:*"):
-                meta = self.cache.get(key)
-                if (
-                    isinstance(meta, TaskMetadata)
-                    and meta.status in ExecutionStatus.dispatched_statuses()
-                ):
-                    counts[stage_enum] += 1
-        return counts
+        # Use Counter for cleaner aggregation
+        counts = Counter()
+        dispatched = {s.value for s in ExecutionStatus.dispatched_statuses()}
+
+        # Optimized: Scan keys directly to avoid fetching/decoding blobs
+        for key in self.cache.iterkeys(pattern=f"{CACHE_TASK_NAMESPACE}:*:*"):
+            parts = key.split(":")
+            if len(parts) >= 3:
+                status = parts[1]
+                if status in dispatched:
+                    stage_label = parts[2]
+                    try:
+                        stage_enum = StageName.from_label(stage_label)
+                        counts[stage_enum] += 1
+                    except ValueError:
+                        continue
+
+        # Ensure all stages are present even with 0 count to satisfy downstream logic
+        return {s: counts[s] for s in self.stage_limits}
 
     def _get_all_keys(self) -> list[str]:
         """
-        Fetches a snapshot of all keys from the cache that correspond to
-        valid execution stages.
+        Fetches a snapshot of all task keys from the cache.
         """
-        all_keys = []
-        for stage_label in EXEC_STAGES:
-            all_keys.extend(self.cache.iterkeys(pattern=f"{stage_label}:*"))
-        return all_keys
+        return list(self.cache.iterkeys(pattern=f"{CACHE_TASK_NAMESPACE}:*"))
 
     def _get_idle_worker_from_pool(
         self, pool: list[ray.actor.ActorHandle], update_cache: bool = True
@@ -591,20 +636,20 @@ class TaskManager:
     def recover_zombie_tasks(self) -> None:
         """Scans all stage queues for zombie tasks."""
         with self.lock:
-            # Iterate only over keys starting with valid stages
-            for key in self._get_all_keys():
-                key_str = key if isinstance(key, str) else key.decode("utf-8")
-                stage_label, rest = key_str.split(":", 1)
+            dispatched_statuses = {
+                s.value for s in ExecutionStatus.dispatched_statuses()
+            }
+            for key in self.cache.iterkeys(pattern=f"{CACHE_TASK_NAMESPACE}:*:*"):
+                parts = key.split(":")
+                status = parts[1]
+                if status not in dispatched_statuses:
+                    continue
 
-                meta: TaskMetadata = self.cache.get(key)  # type: ignore
+                meta: TaskMetadata = self.cache.get(key)
+                if not meta:
+                    continue
 
-                # --- ENHANCED HEARTBEAT LOGIC ---
-                # We check for zombies in any 'dispatched' state (RUNNING).
-                # This ensures we recover from Ray actor startup failures as well.
-                if (
-                    meta.status in ExecutionStatus.dispatched_statuses()
-                    and time.time() - meta.last_hb > 300
-                ):
+                if time.time() - meta.last_hb > 300:
                     # Check the 'Physical Heartbeat' (Manifest timestamp)
                     # before declaring it a zombie.
                     active_path = find_path(self.exec_ctx.active_path, meta.run_id)
@@ -620,52 +665,50 @@ class TaskManager:
                             self.cache[key] = meta
                             continue
 
-                    LOG.warning(
-                        "Zombie task detected - no activity on cache or disk",
-                        key=key_str,
-                    )
-                    self._recover_task(stage_label, rest)
+                    LOG.warning("Zombie task detected", key=key)
+                    self._recover_task(key)
 
-    def _recover_task(self, stage_name: str, rest_of_key: str) -> None:
+    def _recover_task(self, key: str) -> None:
         """
         Recovers a stalled task by checking its physical progress.
         """
         with self.lock:
-            key = f"{stage_name}:{rest_of_key}"
+            parts = key.split(":")
+            stage_label = parts[2]
+            identifier = ":".join(parts[3:6])
+            run_id = parts[6]
 
             # .get() returns Optional[Any], so we check type and None-ness at once
             task_meta = self.cache.get(key)
             if not isinstance(task_meta, TaskMetadata):
                 return
 
-        job_id = task_meta.job_id
-        run_id = task_meta.run_id
-
         # 1. Verify if the stage actually finished on disk but failed to transit
         # We check for the .success marker in the current stage's folder
-        if self._check_stage_completion_on_disk(run_id, stage_name):
+        if self._check_stage_completion_on_disk(run_id, stage_label):
             # Promotion: Find the next stage using the StageName domain model
-            next_stage_obj = StageName.next(stage_name)
+            next_stage_obj = StageName.next(stage_label)
             next_stage = next_stage_obj.label if next_stage_obj else "complete"
 
             LOG.info(
                 "Recovery: Step was successful on disk. Promoting.",
-                job_id=job_id,
-                from_stage=stage_name,
+                run_id=run_id,
+                from_stage=stage_label,
                 to_stage=next_stage,
             )
 
-            self.cache.delete(key)
             if next_stage.casefold() != EXEC_STAGES[-1].casefold():
+                self.cache.pop(key, None)
                 task_meta.status = ExecutionStatus.PENDING.value
-                self.cache[f"{next_stage}:{rest_of_key}"] = task_meta
+                new_key = f"{CACHE_TASK_NAMESPACE}:{task_meta.status}:{next_stage}:{identifier}:{run_id}"
+                self.cache[new_key] = task_meta
         else:
             # If no symlink exists, the worker died mid-stream or before finalize.
             # Reset to PENDING in the SAME queue to allow a retry.
             LOG.info(
                 "Recovery: No physical proof of success. Resetting for retry.",
-                job_id=job_id,
-                stage=stage_name,
+                run_id=run_id,
+                stage=stage_label,
             )
 
             # Rehydrate the Task to perform a proper manifest reset
@@ -675,7 +718,7 @@ class TaskManager:
                 partition_date=task_meta.partition_date,
                 worker_id="engine-recovery",
                 exec_ctx=self.exec_ctx,
-                target_stage=stage_name,
+                target_stage=stage_label,
             )
 
             task.update_manifest(
@@ -690,24 +733,34 @@ class TaskManager:
             (task.folder / ".retrying").unlink(missing_ok=True)
             (task.folder / ".blocked").unlink(missing_ok=True)
 
+            self.cache.pop(key, None)
             task_meta.status = ExecutionStatus.PENDING.value
             task_meta.last_hb = time.time()
-            self.cache[key] = task_meta
+            new_key = f"{CACHE_TASK_NAMESPACE}:{task_meta.status}:{stage_label}:{identifier}:{run_id}"
+            self.cache[new_key] = task_meta
 
     def _check_stage_completion_on_disk(self, run_id: str, stage_name: str) -> bool:
         """
         Checks if the 'active' symlink for this stage exists.
         This is the definitive proof of success in our new structure.
         """
-        # Find active path
-        # Logic: active/{job_id}:{dataset_id}_{partition_date}/run_id/stage_name
-        active_root = self.exec_ctx.active_path
+        active_path = find_path(self.exec_ctx.active_path, run_id)
+        if not active_path:
+            return False
 
-        active_path = find_path(active_root, run_id)
-        active_path = active_path / stage_name
+        manifest_path = active_path / MANIFEST_FILENAME
+        if not manifest_path.exists():
+            return False
 
-        # It must exist and be a valid link/directory
-        return bool(active_path.exists())
+        try:
+            # Definitive proof: The stage results are recorded in the manifest
+            with manifest_path.open("rb") as f:
+                # We use a generic dict decode here to check key existence
+                manifest_data = msgspec.json.decode(f.read())
+                return manifest_data.get(stage_name) is not None
+        except Exception:
+            LOG.error("Failed to read manifest during recovery check", run_id=run_id)
+            return False
 
     # def _recover_from_manifest(self, job_id: str, run_id: str) -> str:
     #     """

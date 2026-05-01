@@ -21,38 +21,63 @@ class SuccessState(LifecycleState):
     def is_applicable(cls, task: "Task", exception: Exception | None = None) -> bool:
         """Terminal success: Bitmask of 15 or reached the user's to_stage."""
         if exception:
+            LOG.debug(
+                "SuccessState not applicable: Exception present",
+                job_id=task.job_id,
+                run_id=task.run_id,
+                exception_type=type(exception).__name__,
+            )
             return False
 
         # Check manifest directly as finalize() has already updated the mask
-        is_success = (
-            StageBitmask(task.manifest.bitmask).is_fully_complete()
-            or task.context.to_stage == task.stage.name
-        )
-        LOG.info(
-            "Task reached target state",
-            job_id=task.job_id,
-            target=task.context.to_stage,
-        )
-        return is_success
+        # Condition 1: All stages completed (bitmask is full)
+        if StageBitmask(task.manifest.bitmask).is_fully_complete():
+            LOG.info(
+                "SuccessState applicable: All stages completed (bitmask full)",
+                job_id=task.job_id,
+                run_id=task.run_id,
+                bitmask=task.manifest.bitmask,
+            )
+            return True
 
-    def on_enter(self, data: dict[str, Any]) -> None:
+        # Condition 2: Task reached the user-defined 'to_stage'
+        if task.context.to_stage and task.context.to_stage == task.stage.name:
+            LOG.info(
+                "SuccessState applicable: Task reached user-defined 'to_stage'",
+                job_id=task.job_id,
+                run_id=task.run_id,
+                target_stage=task.context.to_stage,
+                current_stage=task.stage.name,
+            )
+            return True
+
+        LOG.debug(
+            "SuccessState not applicable: Neither full bitmask nor target stage reached",
+            job_id=task.job_id,
+            run_id=task.run_id,
+            bitmask=task.manifest.bitmask,
+            current_stage=task.stage.name,
+            target_stage=task.context.to_stage,
+        )
+        return False
+
+    def on_enter(self, data: dict[str, Any] | None = None) -> None:
         """
         Finalizes the manifest status.
         Physical cleanup is deferred to the CompleteStage.
         """
 
-        bitmask_inc = data.get("bitmask_increment", 0)
-
+        data = data or {}
         try:
-            # 1. Update Manifest & Bitmask
+            # 1. Update Manifest to terminal state
             self.task.update_manifest(
                 {
                     "status": ExecutionStatus.SUCCESS.value,
-                    # "bitmask": self.task.manifest.bitmask | bitmask_inc,
                 }
             )
 
-            self.task.request_status_sync(TaskSignal.SYNC)
+            # 2. Signal DONE so StateStore performs a deep sync of the success status
+            self.task.request_status_sync(TaskSignal.DONE)
 
         except Exception:
             LOG.exception("Failed to update success status")
@@ -60,4 +85,3 @@ class SuccessState(LifecycleState):
 
     def can_recover(self) -> bool:
         return False
-

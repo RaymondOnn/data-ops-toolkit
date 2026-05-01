@@ -2,6 +2,7 @@ from pathlib import Path
 
 ALWAYS_ON_MODE = False
 DISKCACHE_FILE_PATH = ".cache/cache.db"
+CACHE_TASK_NAMESPACE = "task"
 APP_CURRENT_ENV = "local"  # local / dev / test / production
 APP_TIMEZONE_LC = "Asia/Singapore"
 APP_CONFIG_ROOT = Path("./apps/ingestion/config")
