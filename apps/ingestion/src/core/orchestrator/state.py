@@ -4,43 +4,27 @@ from datetime import datetime
 from pathlib import Path
 from threading import Lock
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import msgspec
 import polars as pl
-from loguru import logger
-from tenacity import retry, stop_after_attempt, wait_exponential
-
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
 from apps.ingestion.src.core.contexts.task import TaskContext
 from apps.ingestion.src.core.models.task import ExecutionStatus, TaskManifest
-from apps.ingestion.src.core.orchestrator.enums import JobRecord
+from apps.ingestion.src.core.orchestrator.enums import JobRecord, to_ch_datetime
 from apps.ingestion.src.services.database import DatabaseSink
 from apps.ingestion.src.utils.constants import (
     CONFIG_FILENAME,
     MANIFEST_FILENAME,
     MISFIRE_GRACE_PERIOD_SECS,
+    STRIP_TZ_FOR_DB,
 )
+from libs.utils.dates import get_current_timestamp
+from loguru import logger
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 LOG = logger
 SOURCE_TBL = "META.CURRENT_EXECUTION"
 DESTINATION_TBL = "META.EXECUTION_LOG"
-
-
-def to_ch_datetime(ts: Any) -> datetime | None:
-    """
-    Converts various timestamp formats into a timezone-naive datetime object
-    suitable for ClickHouse DateTime64 columns (which interpret naive values
-    in their defined timezone).
-    """
-    if not ts:
-        return None
-    if isinstance(ts, str):
-        try:
-            ts = datetime.fromisoformat(ts)
-        except ValueError:
-            return None  # Return None if string cannot be parsed as datetime
-    return ts.replace(tzinfo=None)
 
 
 # TODO: Logging to Error Log? Workflow for refresh current_execution for the day
@@ -69,28 +53,32 @@ class StateStore:
     def _create_updated_record(
         self, base_record: JobRecord | None, updates: dict[str, Any]
     ) -> JobRecord:
-        """
-        Creates a new JobRecord by merging updates into an existing record.
-        Ensures LAST_UPDATED_AT_TS_LC is always current.
-        """
-        # Start with a base dictionary from the existing record, or an empty one
         base_dict = msgspec.to_builtins(base_record) if base_record else {}
 
-        # Apply updates, ensuring LAST_UPDATED_AT_TS_LC is always current and naive
-        merged_dict = dict(ChainMap(updates, base_dict))
+        # Apply sanitization dynamically based on column names
+        merged_dict = {}
+        for k, v in ChainMap(updates, base_dict).items():
+            # Explicitly sanitize all timestamp-like columns during merge
+            if (
+                "TIMESTAMP" in k
+                or k.endswith("_TS")
+                or k.endswith("_LC")
+                or k == "EXPIRATION_THRESHOLD"
+            ):
+                v = to_ch_datetime(v)
+            merged_dict[k] = v
+
+        # Always update the Last Updated TS cleanly
         merged_dict["LAST_UPDATED_AT_TS_LC"] = to_ch_datetime(
-            datetime.now(ZoneInfo(self.exec_ctx.timezone))
+            get_current_timestamp(
+                timezone=self.exec_ctx.timezone, strip_tz=STRIP_TZ_FOR_DB
+            )
         )
 
         try:
             return msgspec.convert(merged_dict, JobRecord)
         except msgspec.ValidationError as e:
-            LOG.error(
-                "StateStore Validation Failure: Could not build updated JobRecord",
-                error=str(e),
-                base_record=base_dict,
-                updates=updates,
-            )
+            LOG.error("StateStore Validation Failure", error=str(e))
             raise
 
     @property
@@ -119,14 +107,20 @@ class StateStore:
         status_filter = ", ".join(active_statuses)
 
         # Debug: Check the ClickHouse "Now" to ensure no timezone drift
-        tz = self.exec_ctx.timezone
-        ch_now = self.db.fetch(f"SELECT now64(3, '{tz}')")[0][0]
+        ch_now = self.db.fetch("SELECT now64(3) + INTERVAL 8 HOUR AS NOW_TS_LC")[0][0]
 
         sql = f"""
+             WITH dates AS (
+                SELECT
+                    8 AS OFFSET_HOURS
+                    , now64(3) + INTERVAL OFFSET_HOURS HOUR AS NOW_TS_LC
+                    , toDate(NOW_TS_LC) AS TODAY_LC
+                    , toStartOfDay(NOW_TS_LC) AS TODAY_START_LC
+            ) 
             SELECT * FROM {SOURCE_TBL} 
             WHERE JOB_STATUS IN ({status_filter})
             AND RUN_ID IS NOT NULL
-            AND SCHEDULED_TIMESTAMP_LC <= now64(3, '{tz}') 
+            AND SCHEDULED_TIMESTAMP_LC <= (SELECT NOW_TS_LC FROM dates) 
             + INTERVAL {lookahead_mins} MINUTE
         """
 
@@ -153,13 +147,21 @@ class StateStore:
                     else r
                 )
 
-                # ClickHouse FixedString(N) columns pad strings with null bytes
-                # to fill the fixed length N;
-                # we must decode to str for msgspec
-                raw_dict = {
-                    k: (v.decode("utf-8").rstrip("\x00") if isinstance(v, bytes) else v)
-                    for k, v in data.items()
-                }
+                # Sanitize raw data: decode bytes and ensure naive datetimes
+                # This prevents aware datetimes from entering the Registry via DB refresh
+                raw_dict = {}
+                for k, v in data.items():
+                    if isinstance(v, bytes):
+                        v = v.decode("utf-8").rstrip("\x00")
+                    if (
+                        isinstance(v, datetime)
+                        or "TIMESTAMP" in k
+                        or k.endswith("_TS")
+                        or k.endswith("_LC")
+                        or k == "EXPIRATION_THRESHOLD"
+                    ):
+                        v = to_ch_datetime(v)
+                    raw_dict[k] = v
 
                 # Instantiate the structured model (Validation happens here)
                 try:
@@ -230,7 +232,9 @@ class StateStore:
             "RUN_ID": run_id,
             "IS_SCHEDULED": 0,
             "SCHEDULED_TIMESTAMP_LC": to_ch_datetime(
-                datetime.now(ZoneInfo(self.exec_ctx.timezone))
+                get_current_timestamp(
+                    timezone=self.exec_ctx.timezone, strip_tz=STRIP_TZ_FOR_DB
+                )
             ),
             "JOB_STATUS": status,  # This will be handled by to_ch_datetime
         }
@@ -249,7 +253,27 @@ class StateStore:
             LOG.debug("Flushing state buffer to stream", count=len(self._update_buffer))
             with self.stream_path.open("ab") as f:
                 for record in self._update_buffer:
-                    line = msgspec.json.encode(msgspec.to_builtins(record)) + b"\n"
+                    # 1. Targeted check on the problematic fields
+                    timestamp_fields = [
+                        "SCHEDULED_TIMESTAMP_LC", 
+                        "START_TIMESTAMP_LC", 
+                        "END_TIMESTAMP_LC", 
+                        "LAST_UPDATED_AT_TS_LC"
+                    ]
+                    
+                    for field in timestamp_fields:
+                        val = getattr(record, field, None)
+                        # Specifically look for 'T' or '+' only in these strings
+                        if val and isinstance(val, str) and ("T" in val or "+" in val):
+                                LOG.error(
+                                    "TS_FORMAT_LEAK", 
+                                    run_id=record.RUN_ID, 
+                                    field=field, 
+                                    value=val
+                                )
+                                
+                    # msgspec will use the strings we sanitized in JobRecord.__setattr__
+                    line = msgspec.json.encode(record) + b"\n"
                     f.write(line)
             self._update_buffer.clear()
 
@@ -404,7 +428,7 @@ class StateStore:
             self._process_stage()
 
             self.last_flush = time.time()
-            LOG.info("StateStore flush successful", batch=batch_id, rows=rows_flushed)
+            LOG.success("StateStore flush successful", batch=batch_id, rows=rows_flushed)
 
         except Exception as e:
             LOG.error("StateStore flush failed", error=str(e))
@@ -463,40 +487,45 @@ class StateStore:
         # Map manifest/context attributes to DB columns.
         # We only define fields that have changed or are derived from files.
         incoming_update = {
-            "RUN_ID": manifest.run_id,  # type: ignore
-            "JOB_ID": manifest.job_id,  # type: ignore
-            "DATASET_ID": manifest.dataset_id,  # type: ignore
-            "PARTITION_DATE": context.partition_date,  # type: ignore
-            "JOB_STATUS": status,  # type: ignore
-            "CURRENT_STEP": manifest.current_stage.upper(),  # type: ignore
-            "JOB_BITMASK": manifest.bitmask,  # type: ignore
-            "RETRY_ATTEMPTS": manifest.retry_count,  # type: ignore
+            "RUN_ID": manifest.run_id,
+            "JOB_ID": manifest.job_id,
+            "DATASET_ID": manifest.dataset_id,
+            "PARTITION_DATE": context.partition_date,
+            "JOB_STATUS": status,
+            "CURRENT_STEP": manifest.current_stage.upper(),
+            "JOB_BITMASK": manifest.bitmask,
+            "RETRY_ATTEMPTS": manifest.retry_count,
+            # Use the new sanitizer
             "START_TIMESTAMP_LC": to_ch_datetime(
                 getattr(manifest.start, "start_timestamp_utc", None)
             ),
             "END_TIMESTAMP_LC": to_ch_datetime(
                 getattr(manifest.complete, "end_timestamp_utc", None)
             ),
-            "SOURCE_ROW_COUNT": getattr(manifest.extract, "source_row_count", None),  # type: ignore
-            "FINAL_ROW_COUNT": getattr(manifest.publish, "final_count", None),  # type: ignore
+            "SOURCE_ROW_COUNT": getattr(manifest.extract, "source_row_count", None),
+            "FINAL_ROW_COUNT": getattr(manifest.publish, "final_count", None),
             "RUNTIME_OVERRIDES": context.custom_overrides or None,
             "FINAL_MANIFEST": msgspec.to_builtins(manifest) if deep_sync else None,
-            # Fallback values for fields that might not be in manifest/context but are in JobRecord
+            # Sanitize fallback records
             "SCHEDULED_TIMESTAMP_LC": to_ch_datetime(
                 getattr(
                     current_record,
                     "SCHEDULED_TIMESTAMP_LC",
-                    datetime.now(ZoneInfo(self.exec_ctx.timezone)),
+                    get_current_timestamp(
+                        timezone=self.exec_ctx.timezone, strip_tz=STRIP_TZ_FOR_DB
+                    ),
                 )
             ),
-            "IS_SCHEDULED": getattr(current_record, "IS_SCHEDULED", 0),  # type: ignore
-            "WATCH_FILE_PATH": getattr(current_record, "WATCH_FILE_PATH", None),  # type: ignore
-            "IS_SNAPSHOT": getattr(current_record, "IS_SNAPSHOT", False),  # type: ignore
+            "IS_SCHEDULED": getattr(current_record, "IS_SCHEDULED", 0),
+            "WATCH_FILE_PATH": getattr(current_record, "WATCH_FILE_PATH", None),
+            "IS_SNAPSHOT": getattr(current_record, "IS_SNAPSHOT", False),
             "EXPIRATION_THRESHOLD": to_ch_datetime(
                 getattr(current_record, "EXPIRATION_THRESHOLD", None)
-            ),  # type: ignore
-            "MISFIRE_GRACE_SECS": getattr(current_record, "MISFIRE_GRACE_SECS", MISFIRE_GRACE_PERIOD_SECS),  # type: ignore
-            "TRIGGER_TYPE": getattr(current_record, "TRIGGER_TYPE", "CRON"),  # type: ignore
+            ),
+            "MISFIRE_GRACE_SECS": getattr(
+                current_record, "MISFIRE_GRACE_SECS", MISFIRE_GRACE_PERIOD_SECS
+            ),
+            "TRIGGER_TYPE": getattr(current_record, "TRIGGER_TYPE", "CRON"),
         }
 
         # Merge with metadata overrides (e.g. remarks)
@@ -514,6 +543,18 @@ class StateStore:
         if not current:
             LOG.warning("Update failed: Run ID not found in registry", run_id=run_id)
             return
+
+        # DEBUG LOGGING: Inspect types and values of problematic columns
+        for col in ["SCHEDULED_TIMESTAMP_LC", "START_TIMESTAMP_LC"]:
+            val = updates.get(col)
+            if val:
+                LOG.debug(
+                    "PRE-FLUSH INSPECTION",
+                    column=col,
+                    value=val,
+                    type=str(type(val)),
+                    has_tzinfo=bool(getattr(val, "tzinfo", None)),
+                )
 
         # Generate the new record outside the lock, then update atomically
         new_record = self._create_updated_record(current, updates)

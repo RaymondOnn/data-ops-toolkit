@@ -1,7 +1,14 @@
 DROP VIEW IF EXISTS META.CURRENT_EXECUTION;
 CREATE VIEW META.CURRENT_EXECUTION AS 
 
-with published_runs AS (
+WITH dates AS (
+    SELECT
+        8 AS OFFSET_HOURS
+        , now64(3) + INTERVAL OFFSET_HOURS HOUR AS NOW_TS_LC
+        , toDate(NOW_TS_LC) AS TODAY_LC
+        , toStartOfDay(NOW_TS_LC) AS TODAY_START_LC
+) 
+, published_runs AS (
     SELECT 
         RUN_ID
         , JOB_ID
@@ -27,7 +34,8 @@ with published_runs AS (
         FROM META.JOB_SCHEDULES 
         LIMIT 1 BY JOB_ID, DATASET_ID
     ) S ON META.EXECUTION_LOG.JOB_ID = S.JOB_ID AND META.EXECUTION_LOG.DATASET_ID = S.DATASET_ID
-    WHERE toDate(SCHEDULED_TIMESTAMP_LC) = toDate(now('Asia/Singapore'))
+    WHERE toDate(SCHEDULED_TIMESTAMP_LC) = (SELECT TODAY_LC FROM dates)
+    
     LIMIT 1 BY RUN_ID
 )
 
@@ -63,7 +71,7 @@ FROM (
         FROM META.JOB_SCHEDULES 
         LIMIT 1 BY JOB_ID, DATASET_ID
     ) S ON META.CURRENT_SCHEDULES.JOB_ID = S.JOB_ID AND META.CURRENT_SCHEDULES.DATASET_ID = S.DATASET_ID
-    WHERE toDate(SCHEDULED_TIMESTAMP_LC) = toDate(now('Asia/Singapore'))
+    WHERE toDate(SCHEDULED_TIMESTAMP_LC) = (SELECT TODAY_LC FROM dates)
     -- Anti-join: Only show if this specific slot hasn't been pushed to the log yet
     AND (JOB_ID, DATASET_ID, NEXT_RUN_TS_LC) NOT IN (
         SELECT JOB_ID, DATASET_ID, SCHEDULED_TIMESTAMP_LC 

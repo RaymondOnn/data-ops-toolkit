@@ -1,10 +1,10 @@
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 import msgspec
 from apps.ingestion.src.core.models.task.manifest import WritePayload
 from apps.ingestion.src.core.strategies.load.load import LoadContext, Loader
 from apps.ingestion.src.services.factory import ServiceFactory
+from libs.utils.dates import get_current_timestamp
 from loguru import logger
 
 from .base import ExecutionStage
@@ -29,7 +29,7 @@ class WriteStage(ExecutionStage):
         )
 
     def execute(self, task: "Task") -> str:
-        start_ts = datetime.now().astimezone().isoformat()
+        start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
         task_ctx = task.context
         transform_meta = task.manifest.transform
         if not transform_meta:

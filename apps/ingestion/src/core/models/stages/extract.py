@@ -1,6 +1,5 @@
 import hashlib
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,6 +14,7 @@ from apps.ingestion.src.core.strategies.extract import (
 from apps.ingestion.src.services.factory import ServiceFactory
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreakerTripped
+from libs.utils.dates import get_current_timestamp
 from loguru import logger
 
 from .base import ExecutionStage
@@ -43,7 +43,7 @@ class ExtractStage(ExecutionStage):
     def execute(self, task: "Task") -> str:
 
         task_ctx = task.context
-        start_ts = datetime.now().astimezone().isoformat()
+        start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
         try:
             # 1. Prepare Reader Context
             # This object is serialized and sent to Ray workers.

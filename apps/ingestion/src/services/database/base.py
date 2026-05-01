@@ -98,6 +98,7 @@ class DatabaseSink(DatabaseService, Sink):
         self,
         source_dir: Path,
         target_table: str,
+        expected_count: int,
         file_ext: str = "parquet",
         audit_values: dict[str, Any] | None = None,
     ) -> tuple[str, int]:
@@ -111,6 +112,7 @@ class DatabaseSink(DatabaseService, Sink):
         target_table: str,
         partition_col: str,
         partition_val: str,
+        expected_count: int,
     ) -> None:
         """Phase 2: Moves data to production (Swap/Merge/Append)."""
         pass

@@ -1,13 +1,14 @@
 import hashlib
 import json
 import logging
-from datetime import datetime
+from datetime import datetime  # Keep for type hinting reference_date
 from pathlib import Path
 from typing import Any
 
 import fsspec
 import polars as pl
 from libs.file.formats import FormatFactory
+from libs.utils.dates import get_current_timestamp
 
 LOG = logging.getLogger(__name__)
 
@@ -113,16 +114,14 @@ class CASArchiveMixin:
         Use reference_date for backfills to ensure data is logically correctly placed.
         """
         # Use the provided date (backfill) or current date (standard run)
-        target_date = reference_date or datetime.now().astimezone()
+        target_date = reference_date or get_current_timestamp()
         date_path = target_date.strftime("%Y/%m/%d")
-
-        manifest_dir = f"{self.url}/archive/jobs/{job_id}/{date_path}"
         manifest_path = f"{manifest_dir}/manifest.json"
 
         manifest_data = {
             "job_id": job_id,
             "logical_date": date_path,
-            "processed_at": datetime.now().astimezone().isoformat(),
+            "processed_at": get_current_timestamp(strip_tz=True).isoformat(sep=" "),
             "content_hash": file_hash,
             "physical_path": vault_path,
             "metadata": meta or {},

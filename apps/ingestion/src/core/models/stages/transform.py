@@ -1,4 +1,3 @@
-from datetime import datetime
 from typing import Any
 
 import msgspec
@@ -11,6 +10,7 @@ from apps.ingestion.src.core.strategies.transform import (
     TransformFactory,
 )
 from apps.ingestion.src.utils.exceptions import RewindTask
+from libs.utils.dates import get_current_timestamp
 from loguru import logger
 
 from .base import ExecutionStage
@@ -46,7 +46,7 @@ class TransformStage(ExecutionStage):
                 raise RewindTask(
                     StageName.EXTRACT.label, "Physical artifacts missing or empty."
                 )
-                
+
         # 3. Gate: Validate Transformer Registration
         try:
             # We check if we can get the transformer class
@@ -63,7 +63,7 @@ class TransformStage(ExecutionStage):
         # 4. Gate: TransformContext Validation
         if not task.context.transform.transform_type:
             raise ValueError("Transform type is not defined in TaskContext.")
-    
+
     def execute(self, task: "Task") -> str:
         """
         Decision: Use LazyFrame Streaming for 50M rows.
@@ -71,7 +71,7 @@ class TransformStage(ExecutionStage):
         always processing the latest sanitized data without needing
         to know the specific physical timestamped folder.
         """
-        start_ts = datetime.now().astimezone().isoformat()
+        start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
         LOG.info(
             "Starting transformation",
             stage=self.name,
@@ -105,7 +105,7 @@ class TransformStage(ExecutionStage):
                 task.exec_ctx.workspace_dir
                 / "data"
                 / self.name
-                / f"{task.job_id}_{int(datetime.now().astimezone().timestamp())}"
+                / f"{task.job_id}_{int(get_current_timestamp(strip_tz=True).timestamp())}"
             )
             data_store.mkdir(parents=True, exist_ok=True)
 

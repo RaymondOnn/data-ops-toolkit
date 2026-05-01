@@ -1,8 +1,8 @@
-from datetime import datetime
 from typing import Any
 
 import msgspec
 from apps.ingestion.src.core.models.task.status import ExecutionStatus
+from libs.utils.dates import get_current_timestamp
 from msgspec import field
 
 
@@ -23,7 +23,7 @@ class ErrorPayload(msgspec.Struct):
     message: str
     traceback: str | None = None
     timestamp_utc: str = field(
-        default_factory=lambda: datetime.now().astimezone().isoformat()
+        default_factory=lambda: get_current_timestamp(strip_tz=True).isoformat(sep=" ")
     )
 
 
@@ -32,7 +32,7 @@ class BasePayload(msgspec.Struct, kw_only=True):
     source_params: dict[str, Any] = {}
     worker_id: str = ""
     start_timestamp_utc: str = field(
-        default_factory=lambda: datetime.now().astimezone().isoformat()
+        default_factory=lambda: get_current_timestamp(strip_tz=True).isoformat(sep=" ")
     )
 
 
@@ -44,7 +44,7 @@ class ExtractPayload(msgspec.Struct, kw_only=True):
     schema_signature: dict[str, str] = {}  # Column names and types
     start_timestamp_utc: str = ""
     end_timestamp_utc: str = field(
-        default_factory=lambda: datetime.now().astimezone().isoformat()
+        default_factory=lambda: get_current_timestamp(strip_tz=True).isoformat(sep=" ")
     )
 
 
@@ -57,7 +57,7 @@ class TransformPayload(msgspec.Struct, kw_only=True):
     artifact_folder: str
     start_timestamp_utc: str
     end_timestamp_utc: str = field(
-        default_factory=lambda: datetime.now().astimezone().isoformat()
+        default_factory=lambda: get_current_timestamp(strip_tz=True).isoformat(sep=" ")
     )
 
 
@@ -70,7 +70,7 @@ class WritePayload(msgspec.Struct, kw_only=True):
     sink_identifier: str
     start_timestamp_utc: str
     end_timestamp_utc: str = field(
-        default_factory=lambda: datetime.now().astimezone().isoformat()
+        default_factory=lambda: get_current_timestamp(strip_tz=True).isoformat(sep=" ")
     )
 
 
@@ -81,7 +81,7 @@ class AuditPayload(msgspec.Struct, kw_only=True):
     external_app_status: str
     start_timestamp_utc: str
     end_timestamp_utc: str = field(
-        default_factory=lambda: datetime.now().astimezone().isoformat()
+        default_factory=lambda: get_current_timestamp(strip_tz=True).isoformat(sep=" ")
     )
 
 
@@ -91,7 +91,7 @@ class PublishPayload(msgspec.Struct, kw_only=True):
     is_idempotent_cleanup_run: bool = False
     start_timestamp_utc: str
     end_timestamp_utc: str = field(
-        default_factory=lambda: datetime.now().astimezone().isoformat()
+        default_factory=lambda: get_current_timestamp(strip_tz=True).isoformat(sep=" ")
     )
 
 
@@ -102,7 +102,7 @@ class CompletePayload(msgspec.Struct, kw_only=True):
     retention_expiry: str | None  # Date when this log/archive can be deleted
     start_timestamp_utc: str
     end_timestamp_utc: str = field(
-        default_factory=lambda: datetime.now().astimezone().isoformat()
+        default_factory=lambda: get_current_timestamp(strip_tz=True).isoformat(sep=" ")
     )
 
 

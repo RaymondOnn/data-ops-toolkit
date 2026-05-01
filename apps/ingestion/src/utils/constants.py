@@ -1,11 +1,9 @@
-import zoneinfo as tz
 from pathlib import Path
 
 ALWAYS_ON_MODE = False
 DISKCACHE_FILE_PATH = ".cache/cache.db"
 APP_CURRENT_ENV = "local"  # local / dev / test / production
-APP_TIMEZONE_LC = tz.ZoneInfo("Asia/Singapore")
-APP_TIMEZONE_UTC = tz.ZoneInfo("UTC")
+APP_TIMEZONE_LC = "Asia/Singapore"
 APP_CONFIG_ROOT = Path("./apps/ingestion/config")
 
 
@@ -25,3 +23,6 @@ DISK_THRESHOLD_HALT = 95
 
 
 MISFIRE_GRACE_PERIOD_SECS = 3600
+
+# App Settings
+STRIP_TZ_FOR_DB = True

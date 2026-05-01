@@ -7,6 +7,7 @@ from apps.ingestion.src.core.models.task import Task, TaskSignal
 from apps.ingestion.src.core.models.task.manifest import CompletePayload
 from apps.ingestion.src.services.base import Archive
 from apps.ingestion.src.services.factory import ServiceFactory
+from libs.utils.dates import get_current_timestamp
 from loguru import logger
 
 from .base import ExecutionStage
@@ -18,13 +19,15 @@ LOG = logger
 class CompleteStage(ExecutionStage):
     name = StageName.COMPLETE.label
     manifest: CompletePayload
+    service: Archive
 
     def pre_flight(self, task: "Task") -> None:
         """Verify source connectivity from the execution node."""
         task_ctx = task.context
         if task_ctx.archive.enabled:
-            self.service = ServiceFactory.get_archive(
-                service_type=task_ctx.archive.type, **task_ctx.archive.config
+            self.service = ServiceFactory.get_service(
+                service_type=str(task_ctx.archive.type), 
+                **task_ctx.archive.config
             )
 
     def execute(self, task: Task) -> str:
@@ -35,7 +38,7 @@ class CompleteStage(ExecutionStage):
         """
 
         task_ctx = task.context
-        start_ts = datetime.now().astimezone().isoformat()
+        start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
 
         try:
             # 1. OPTIONAL ARCHIVAL
@@ -65,11 +68,11 @@ class CompleteStage(ExecutionStage):
                     item.unlink()  # Remove the symlink
 
             # 4. Calculate Timestamps and Duration
-            end_ts = datetime.now().astimezone()
+            end_ts = get_current_timestamp(strip_tz=True)
 
             # 5. FINALIZE CANONICAL PAYLOAD
             payload = CompletePayload(
-                start_timestamp_utc=start_ts,
+                start_timestamp_utc=str(start_ts),
                 end_timestamp_utc=end_ts.isoformat(),
                 cleanup_verified=True,
                 archival_path=str(final_archive_path) if final_archive_path else None,

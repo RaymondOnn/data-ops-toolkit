@@ -1,12 +1,11 @@
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
-from zoneinfo import ZoneInfo
 
 import msgspec
 from apps.ingestion.src.core.contexts.task import TaskContext, load_task_context
 from apps.ingestion.src.core.models.task import ExecutionStatus
-from apps.ingestion.src.utils.constants import CONFIG_FILENAME
+from apps.ingestion.src.utils.constants import CONFIG_FILENAME, STRIP_TZ_FOR_DB
+from libs.utils.dates import get_current_timestamp, standardize_timestamp
 from loguru import logger
 
 if TYPE_CHECKING:
@@ -62,7 +61,7 @@ class TriggerRule(Protocol):
 
 class MisfireRule(TriggerRule):
     def apply(self, record: "JobRecord", **kwargs: Any) -> bool:
-        now = kwargs.get("now", datetime.now(ZoneInfo("Asia/Singapore")))
+        now = kwargs.get("now", get_current_timestamp(strip_tz=STRIP_TZ_FOR_DB))
         return record.is_misfired(now)
 
 
@@ -74,16 +73,29 @@ class ExpiryRule(TriggerRule):
 
 class CronScheduleRule(TriggerRule):
     def apply(self, record: "JobRecord", **kwargs: Any) -> bool:
-        now = kwargs.get("now", datetime.now(ZoneInfo("Asia/Singapore")))
-        tz = record.SCHEDULED_TIMESTAMP_LC.tzinfo or ZoneInfo("Asia/Singapore")
-        return now >= record.SCHEDULED_TIMESTAMP_LC.astimezone(tz)
+        now = kwargs.get("now", get_current_timestamp(strip_tz=STRIP_TZ_FOR_DB))
+        sched = standardize_timestamp(
+            record.SCHEDULED_TIMESTAMP_LC, force_naive=STRIP_TZ_FOR_DB
+        )
+        return now >= sched
 
 
 class FileArrivalRule(TriggerRule):
     def apply(self, record: "JobRecord", **kwargs: Any) -> bool:
         if not record.WATCH_FILE_PATH:
             return False
-        return any(Path().glob(record.WATCH_FILE_PATH))
+
+        # Sanitize: Prevent absolute paths or traversal
+        watch_path = record.WATCH_FILE_PATH.lstrip("/")
+        if ".." in watch_path:
+            LOG.warning(
+                f"Security: Blocked traversal attempt in WATCH_FILE_PATH: {watch_path}"
+            )
+            return False
+
+        # Restrict globbing to the workspace data directory
+        parent = Path(watch_path).parent
+        return any(parent.glob(watch_path))
 
 
 class CompositeRule(TriggerRule):
@@ -119,7 +131,9 @@ class TriggerManager:
 
     def evaluate(self, job_records: list["JobRecord"]) -> list[TriggerDecision]:
         """Applies trigger policies to determine the fate of each record."""
-        now = datetime.now(ZoneInfo(self.exec_ctx.timezone))
+        now = get_current_timestamp(
+            timezone=self.exec_ctx.timezone, strip_tz=STRIP_TZ_FOR_DB
+        )
         decisions: list[TriggerDecision] = []
 
         # Cache Housekeeping
@@ -138,7 +152,7 @@ class TriggerManager:
                 ctx = resolve_task_context(self.exec_ctx, record)
 
                 # SELF-HEALING: Detect "Ghost Tasks"
-                # If a Run ID exists in the DB but the config is missing on disk, 
+                # If a Run ID exists in the DB but the config is missing on disk,
                 # the workspace is corrupt.
                 if ctx is None and record.RUN_ID:
                     job_path = self.exec_ctx.get_run_path(

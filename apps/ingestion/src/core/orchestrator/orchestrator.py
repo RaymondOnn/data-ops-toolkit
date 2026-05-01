@@ -2,11 +2,11 @@ import sys
 import time
 from collections import Counter
 from copy import deepcopy
-from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import msgspec
+import pendulum
 from apps.ingestion.src.core.contexts import TaskContextBuilder
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
 from apps.ingestion.src.core.models.stages.enums import StageName
@@ -18,8 +18,13 @@ from apps.ingestion.src.core.models.task import (
 )
 from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.utils.common import make_short_hash
-from apps.ingestion.src.utils.constants import CONFIG_FILENAME, DISK_THRESHOLD_HALT
+from apps.ingestion.src.utils.constants import (
+    CONFIG_FILENAME,
+    DISK_THRESHOLD_HALT,
+    STRIP_TZ_FOR_DB,
+)
 from apscheduler.events import JobExecutionEvent
+from libs.utils.dates import get_current_timestamp
 from libs.utils.system import get_disk_usage, get_system_vitals
 from loguru import logger
 
@@ -59,7 +64,11 @@ INTERVAL_PROBE_SECS = 3600
 
 def generate_run_id() -> str:
     """Generates a unique run ID for a task."""
-    timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+    from libs.utils.dates import get_current_timestamp
+
+    timestamp = get_current_timestamp(strip_tz=STRIP_TZ_FOR_DB).strftime(
+        "%Y%m%d-%H%M%S"
+    )
     short_hash = make_short_hash(8)
     return f"{timestamp}-{short_hash}"
 
@@ -141,7 +150,8 @@ class Orchestrator:
         # self.signals.register_command(
         #     "PURGE_EXPIRED.cmd", self.janitor.purge_expired_workspaces
         # )
-        # self.signals.register_command("RELOAD_CONFIG.cmd", self._reload_internal_config)
+        # self.signals.register_command(
+        # "RELOAD_CONFIG.cmd", self._reload_internal_config)
 
     def _setup_scheduler(self):
         from apscheduler.events import EVENT_JOB_ERROR
@@ -150,8 +160,9 @@ class Orchestrator:
 
         # We limit max_workers to reduce DB contention and
         # prevent thundering herd issues
+        tz_name = self.exec_ctx.timezone or pendulum.local_timezone().name
         self.scheduler = BackgroundScheduler(
-            timezone=ZoneInfo(self.exec_ctx.timezone),
+            timezone=ZoneInfo(tz_name),
             executors={"default": ThreadPoolExecutor(max_workers=4)},
         )
         self.scheduler.add_listener(self._on_job_error, EVENT_JOB_ERROR)
@@ -383,9 +394,8 @@ class Orchestrator:
                 )
                 break
 
-            LOG.debug(
-                f"Waiting for job to finish: {datetime.now().astimezone().isoformat()}"
-            )
+            now = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
+            LOG.debug(f"Waiting for job to finish: {now}")
             time.sleep(2)
 
     def _get_run_status(

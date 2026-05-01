@@ -3,6 +3,9 @@ set shell := ["bash", "-cu"]
 # Load environment variables from .env if it exists
 import? ".env"
 
+# Resolve the path to the just executable to allow calling recipes from within recipes
+just := just_executable()
+
 # Path to the local infrastructure stack
 docker_compose_file := "apps/ingestion/infra/environments/local/local.docker-compose.yaml"
 
@@ -43,7 +46,7 @@ clean-all: clean-pyc clean-test
 
 # Remove the local execution workspace (logs, state, and active runs)
 clean-workspace:
-    rm -rf .workspace
+    @rm -rf .workspace
     @echo "🗑️  Local workspace cleared."
 
 # --- Validation & Linting ---
@@ -195,7 +198,7 @@ bootstrap: sync docker-up wait-for-ch ch-init
 # Usage: just local <job_id> <dataset_id> <partition_date> [clean=true]
 # Example: just local test_job orders 2026-04-24 clean=true
 local-run job_id dataset_id partition_date="" clean="false":
-    [ "{{clean}}" == "true" ] && just clean-workspace || true
+    if [ "{{clean}}" != "false" ]; then {{just}} clean-workspace; fi
     just docker-up
     just wait-for-ch
     @echo "🚀 Launching application..."
@@ -204,8 +207,9 @@ local-run job_id dataset_id partition_date="" clean="false":
 # Start infrastructure and run the Orchestrator in daemon (Always-On) mode
 # Usage: just serve [clean=true]
 local-serve clean="false":
-    [ "{{clean}}" == "true" ] && just clean-workspace || true
+    clear
+    if [ "{{clean}}" != "false" ]; then {{just}} clean-workspace; fi
     just docker-up
     just wait-for-ch
     @echo "🤖 Starting Orchestrator in ALWAYS-ON mode..."
-    clear && uv run python -m apps.ingestion start --debug
+    uv run python -m apps.ingestion start --debug

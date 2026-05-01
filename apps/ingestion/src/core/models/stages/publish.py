@@ -1,14 +1,13 @@
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 import msgspec
-from loguru import logger
-
 from apps.ingestion.src.core.models.task.manifest import PublishPayload
 from apps.ingestion.src.core.strategies.load.load import LoadContext, Loader
 from apps.ingestion.src.services.base import Sink
 from apps.ingestion.src.services.factory import ServiceFactory
-from apps.ingestion.src.utils.exceptions import RetryTask, RewindTask
+from apps.ingestion.src.utils.exceptions import RewindTask
+from libs.utils.dates import get_current_timestamp
+from loguru import logger
 
 from .base import ExecutionStage
 from .enums import StageName
@@ -52,7 +51,7 @@ class PublishStage(ExecutionStage):
             )
 
     def execute(self, task: "Task"):
-        start_ts = datetime.now().astimezone().isoformat()
+        start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
 
         try:
             task_ctx = task.context

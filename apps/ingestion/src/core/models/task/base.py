@@ -1,13 +1,10 @@
 import os
 import shutil
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Self
 
 import msgspec
-from loguru import logger
-
 from apps.ingestion.src.core.contexts import ExecutionContext, TaskContext
 from apps.ingestion.src.core.models.stages.base import ExecutionStage
 from apps.ingestion.src.core.models.stages.enums import StageName
@@ -15,6 +12,7 @@ from apps.ingestion.src.core.models.task.manifest import TaskManifest
 from apps.ingestion.src.core.models.task.status import ExecutionStatus
 from apps.ingestion.src.utils.common import recursive_merge
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
+from loguru import logger
 
 from .enums import TaskSignal
 
@@ -145,7 +143,7 @@ class Task:
             LOG.info("Initializing run manifest", run_id=self.run_id)
             self.update_manifest(
                 {
-                    "job_id": self.job_id,  # Initial manifest status should be PROVISIONED
+                    "job_id": self.job_id,
                     "run_id": self.run_id,
                     "dataset_id": self.dataset_id,
                     "status": ExecutionStatus.RUNNING,
@@ -310,7 +308,7 @@ class Task:
                 "current_stage": stage_name,  # Use the actual stage being checked in
                 "bitmask": 0,
                 # "start": {
-                #     "start_timestamp_utc": datetime.now().astimezone().isoformat()
+                #     "start_timestamp_utc": get_current_timestamp(strip_tz=True).isoformat(sep=" ")
                 # },  # Initialize start payload
             }
             self.update_manifest(initial_manifest_data)
@@ -319,7 +317,6 @@ class Task:
             {
                 "current_stage": stage_name,
                 "status": ExecutionStatus.RUNNING,
-                "last_active": datetime.now().astimezone().isoformat(),
             }
         )
         LOG.debug("Task checked in to stage", run_id=self.run_id, stage=stage_name)
@@ -380,6 +377,13 @@ class Task:
 
     def purge(self) -> None:
         """Physically deletes the task metadata and associated data vaults."""
+        # Defensive: Prevent catastrophic deletion if IDs are malformed
+        if not self.job_id or len(self.job_id) < 3:
+            LOG.error(
+                "Refusing to purge: job_id is too short or empty", job_id=self.job_id
+            )
+            return
+
         # 1. Clean Metadata Folder
         if self._folder.exists():
             LOG.debug("Purging task workspace", path=str(self._folder))

@@ -3,6 +3,13 @@ CREATE MATERIALIZED VIEW META.EXECUTION_HISTORY_MV
 REFRESH EVERY 1 DAY OFFSET 16 HOUR -- refresh at 12:00 AM UTC+0 every day, adjust offset as needed for different timezones
 TO META.EXECUTION_HISTORY 
 AS
+WITH dates AS (
+    SELECT
+        8 AS OFFSET_HOURS
+        , now64(3) + INTERVAL OFFSET_HOURS HOUR AS NOW_TS_LC
+        , toDate(NOW_TS_LC) AS TODAY_LC
+        , toStartOfDay(NOW_TS_LC) AS TODAY_START_LC
+) 
 SELECT
     RUN_ID
     , JOB_ID
@@ -17,4 +24,4 @@ SELECT
     , REMARKS
 FROM META.EXECUTION_LOG
 WHERE JOB_STATUS IN ('SUCCESS', 'FAILED', 'EXPIRED')
-  AND toDate(LAST_UPDATED_AT_TS_LC) = toDate(now('Asia/Singapore'));
+  AND toDate(LAST_UPDATED_AT_TS_LC) = (SELECT TODAY_LC FROM dates);

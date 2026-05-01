@@ -2,7 +2,6 @@ from collections import ChainMap
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import msgspec
 from apps.ingestion.src.core.contexts.execution import ExecutionContext, ExecutionMode
@@ -14,6 +13,7 @@ from apps.ingestion.src.utils.constants import (
 )
 from dateutil.relativedelta import relativedelta
 from dynaconf import Dynaconf
+from libs.utils.dates import get_current_timestamp
 from loguru import logger
 
 LOG = logger
@@ -116,7 +116,7 @@ class TaskContextBuilder:
         elif spec:
             # Use app-level timezone or default to Asia/Singapore
             tz_name = self.app_settings.get("timezone", "Asia/Singapore")
-            base_date = datetime.now(ZoneInfo(tz_name))
+            base_date = get_current_timestamp(timezone=tz_name, strip_tz=True)
 
             # Support multi-unit offsets (years, months, days)
             offset = spec.get("offset", {})
@@ -294,12 +294,15 @@ class TaskContextBuilder:
 
         # 2. Establish partition_date
         # Priority: partition_date_str > CLI --set partition_date > today
+        tz_name = self.app_settings.get("timezone", "Asia/Singapore")
         partition_date = (
             self._resolve_partition_date(
                 settings.get("partition_date_spec", {}), partition_date_str
             )
             or settings.get("partition_date")
-            or datetime.now().astimezone().strftime("%Y-%m-%d")
+            or get_current_timestamp(timezone=tz_name, strip_tz=True).strftime(
+                "%Y-%m-%d"
+            )
         )
 
         # 4. Get the Task-level defaults and the Dataset-level specifics

@@ -1,10 +1,11 @@
 import os
 import socket
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 import msgspec
 from apps.ingestion.src.core.models.task.manifest import BasePayload
+from apps.ingestion.src.utils.constants import STRIP_TZ_FOR_DB
+from libs.utils.dates import get_current_timestamp
 from loguru import logger
 
 from .base import ExecutionStage
@@ -23,7 +24,9 @@ class StartStage(ExecutionStage):
 
     def execute(self, task: "Task") -> str:
         # persist job-start metadata using engine helper
-        start_timestamp = datetime.now().astimezone().isoformat()
+        start_timestamp = get_current_timestamp(strip_tz=STRIP_TZ_FOR_DB).isoformat(
+            sep=" "
+        )
         try:
             # 3. Gather System Metadata
             commit_hash = self._get_commit_hash()  # Use the helper above

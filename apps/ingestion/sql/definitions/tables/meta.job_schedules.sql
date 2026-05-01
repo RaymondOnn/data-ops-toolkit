@@ -19,8 +19,8 @@ CREATE TABLE IF NOT EXISTS META.JOB_SCHEDULES (
     -- , PARTITION_DATE        Date -- Added to support partitioning/ordering
     -- , NEXT_RUN_TS_LC           DateTime64(3)
     -- , PREV_RUN_TS_LC           DateTime64(3)
-    , LAST_UPDATED_AT_TS_LC    DateTime64(3) DEFAULT now64(3, 'Asia/Singapore')
-    , CREATED_AT_TS_LC         DateTime64(3) DEFAULT now64(3, 'Asia/Singapore')
+    , LAST_UPDATED_AT_TS_LC    DateTime64(3) DEFAULT now64(3)
+    , CREATED_AT_TS_LC         DateTime64(3) DEFAULT now64(3)
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(CREATED_AT_TS_LC)

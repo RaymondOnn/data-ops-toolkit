@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any
 
 import msgspec
+from apps.ingestion.src.utils.constants import APP_TIMEZONE_LC
 from loguru import logger
 
 LOG = logger
@@ -34,11 +35,11 @@ class ExecutionContext(msgspec.Struct):
     """
 
     workspace_dir: Path
+    timezone: str = APP_TIMEZONE_LC
     execution_mode: ExecutionMode = ExecutionMode.NORMAL
     ray_mode: RayMode = RayMode.CLUSTER
     env: str = "local"
     always_on: bool = False
-    timezone: str = "Asia/Singapore"
     code_pex_path: Path | None = None
     deps_pex_path: Path | None = None
     cache_config: dict[str, Any] = {}

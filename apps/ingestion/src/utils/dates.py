@@ -1,6 +1,6 @@
-import time
 from datetime import datetime
 from datetime import time as dt_time
+from zoneinfo import ZoneInfo
 
 
 def get_end_of_day_ts() -> float:
@@ -13,14 +13,6 @@ def get_end_of_day_ts() -> float:
     eod = datetime.combine(now.date(), dt_time(23, 59, 59))
     return eod.timestamp()
 
-
-def is_expired(expires_at: float | None) -> bool:
-    """
-    Helper to check if a timestamp has passed.
-    """
-    if expires_at is None:
-        return False
-    return time.time() > expires_at
 
 
 def epoch_to_iso(epoch: float | None) -> str:
@@ -41,3 +33,7 @@ def iso_to_epoch(iso_str: str) -> float:
     """
     dt = datetime.fromisoformat(iso_str)
     return dt.timestamp()
+
+
+
+

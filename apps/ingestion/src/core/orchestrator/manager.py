@@ -324,7 +324,9 @@ class TaskManager:
             )
             raise TypeError(f"ExecutionContext is not serializable: {e}") from e
         # Local tracker for active Ray tasks to avoid blocking RPC calls
-        self._active_tasks: dict[ray.ObjectRef, ray.actor.ActorHandle] = {}
+        self._active_tasks: dict[
+            ray.ObjectRef, tuple[ray.actor.ActorHandle, StageName]
+        ] = {}
         self._occupancy_cache: dict[StageName, int] = self._get_current_occupancy()
         # Trackers for stage congestion to prevent log spam
         self._blocked_stages: set[StageName] = set()
@@ -510,7 +512,7 @@ class TaskManager:
 
                         # Dispatch non-blocking and track the reference
                         ref = worker.process_stage.remote(key)
-                        self._active_tasks[ref] = worker
+                        self._active_tasks[ref] = (worker, stage_enum)
                     else:
                         # Pool is exhausted for this tick;
                         # mark it so we stop checking related stages
@@ -551,17 +553,14 @@ class TaskManager:
                 num_returns=len(self._active_tasks),
             )
             for ref in ready:
-                worker = self._active_tasks.get(ref)
+                # Correctly reclaim occupancy by unpacking the tuple
+                worker, stage_enum = self._active_tasks.pop(ref)
 
-                # If we are the primary pool check (io), update the occupancy count
-                # as tasks complete.
                 if update_cache:
-                    # Note: This is an approximation; for perfect accuracy
-                    # we'd track stage per ref, but decrementing here is sufficient
-                    # for tick-based backpressure.
-                    pass
+                    self._occupancy_cache[stage_enum] = max(
+                        0, self._occupancy_cache[stage_enum] - 1
+                    )
 
-                self._active_tasks.pop(ref, None)
                 worker_id = (
                     self.worker_map.get(worker, "unknown") if worker else "unknown"
                 )
@@ -579,7 +578,7 @@ class TaskManager:
                     )
 
         # 2. Find a worker that isn't currently assigned a task
-        busy_workers = set(self._active_tasks.values())
+        busy_workers = {w for w, _ in self._active_tasks.values()}
         for worker in pool:
             if worker not in busy_workers:
                 # LOG.debug("Found idle worker", worker=worker)

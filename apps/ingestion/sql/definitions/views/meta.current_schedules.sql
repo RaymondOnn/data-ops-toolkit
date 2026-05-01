@@ -1,6 +1,13 @@
 DROP VIEW IF EXISTS META.CURRENT_SCHEDULES;
 CREATE VIEW META.CURRENT_SCHEDULES AS
-WITH latest_schedules AS (
+WITH dates AS (
+    SELECT
+        8 AS OFFSET_HOURS
+        , now64(3) + INTERVAL OFFSET_HOURS HOUR AS NOW_TS_LC
+        , toDate(NOW_TS_LC) AS TODAY_LC
+        , toStartOfDay(NOW_TS_LC) AS TODAY_START_LC
+) 
+, latest_schedules AS (
     -- Deduplicate base schedules without using FINAL
     SELECT *
     FROM (
@@ -14,7 +21,7 @@ WITH latest_schedules AS (
     -- OPTIMIZATION: Generate a window covering the last 24 hours to ensure all daily jobs appear.
     -- 1441 minutes total (24 hours + 1 min overlap).
     SELECT 
-        toDateTime64(toStartOfDay(now64(3, 'Asia/Singapore')) + INTERVAL number MINUTE, 3) as tick
+        toDateTime64((SELECT TODAY_START_LC FROM dates) + INTERVAL number MINUTE, 3) as tick
     FROM numbers(1441)
 )
 , expanded_occurrences AS (
@@ -34,7 +41,7 @@ WITH latest_schedules AS (
                 T.tick - INTERVAL 1 SECOND
             ))) = toString(toDateTime(T.tick)))
     )
-    WHERE toDate(PLANNED_TS_LC) = toDate(now('Asia/Singapore'))
+    WHERE toDate(PLANNED_TS_LC) = (SELECT TODAY_LC FROM dates)
 )
 , latest_runs AS (
     -- Get the last start time for every unique dataset
@@ -83,7 +90,7 @@ SELECT
     , L.PREV_RUN_TS_LC AS PREV_RUN_TS_LC
     , S.LAST_UPDATED_AT_TS_LC AS LAST_UPDATED_AT_TS_LC
     , LOG.RUN_ID AS LOG_RUN_ID
-    , now64(3, 'Asia/Singapore') as NOW_TS_LC
+    , (SELECT NOW_TS_LC FROM dates) as NOW_TS_LC
 FROM latest_schedules S
 JOIN expanded_occurrences E ON S.JOB_ID = E.JOB_ID AND S.DATASET_ID = E.DATASET_ID
 LEFT JOIN latest_runs L ON S.JOB_ID = L.JOB_ID AND S.DATASET_ID = L.DATASET_ID

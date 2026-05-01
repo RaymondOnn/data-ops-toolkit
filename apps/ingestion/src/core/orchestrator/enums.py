@@ -4,7 +4,30 @@ from typing import Any, Self
 
 import msgspec
 from apps.ingestion.src.core.models.task.status import ExecutionStatus
-from apps.ingestion.src.utils.constants import APP_TIMEZONE_LC, MISFIRE_GRACE_PERIOD_SECS
+from apps.ingestion.src.utils.constants import (
+    MISFIRE_GRACE_PERIOD_SECS,
+    STRIP_TZ_FOR_DB,
+)
+from libs.utils.dates import diff_seconds, get_current_timestamp, standardize_timestamp
+
+
+def to_ch_datetime(ts: Any) -> str | None:
+    """
+    Forces input into 'YYYY-MM-DD HH:MM:SS.SSS' format.
+    Explicitly removes 'T' and timezone offsets (+08:00, Z)
+    to satisfy ClickHouse DateTime64(3) requirements.
+    """
+    if ts is None or ts == "":
+        return None
+
+    try:
+        # Leverage standardize_timestamp to handle parsing and naive conversion
+        dt = standardize_timestamp(ts, force_naive=STRIP_TZ_FOR_DB)
+        return dt.format("YYYY-MM-DD HH:mm:ss.SSS")
+    except Exception as e:
+        print(f"FAILED_TO_PARSE_TS: {ts} | Error: {e}")
+        # Last ditch effort: regex-style strip
+        return str(ts).replace("T", " ").split("+")[0].split("Z")[0]
 
 
 class TaskMetadata(msgspec.Struct):
@@ -28,7 +51,7 @@ class JobRecord(msgspec.Struct, kw_only=True):
 
     JOB_ID: str
     DATASET_ID: str
-    SCHEDULED_TIMESTAMP_LC: datetime
+    SCHEDULED_TIMESTAMP_LC: str
     JOB_STATUS: str
     PARTITION_DATE: str | None = None
     CURRENT_STEP: str | None = None
@@ -36,8 +59,8 @@ class JobRecord(msgspec.Struct, kw_only=True):
     IS_SCHEDULED: int = 0
     RETRY_ATTEMPTS: int = 0
     RUN_ID: str
-    START_TIMESTAMP_LC: datetime | None = None
-    END_TIMESTAMP_LC: datetime | None = None
+    START_TIMESTAMP_LC: str | None = None
+    END_TIMESTAMP_LC: str | None = None
     WATCH_FILE_PATH: str | None = None
     RUNTIME_OVERRIDES: dict[str, Any] | None = None
     TRIGGER_TYPE: str = "CRON"
@@ -46,7 +69,7 @@ class JobRecord(msgspec.Struct, kw_only=True):
     FINAL_ROW_COUNT: int | None = None
     FINAL_MANIFEST: str | None = None
     IS_SNAPSHOT: bool = False
-    EXPIRATION_THRESHOLD: datetime | None = None
+    EXPIRATION_THRESHOLD: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
@@ -58,17 +81,37 @@ class JobRecord(msgspec.Struct, kw_only=True):
         if not self.JOB_ID or not self.DATASET_ID:
             raise ValueError(f"Invalid JobRecord: Missing ID for {self}")
 
+        # Sanitize all fields that are intended to be timestamps
+        for name, typ in self.__annotations__.items():
+            if (
+                "TIMESTAMP" in name
+                or name.endswith("_LC")
+                or name == "EXPIRATION_THRESHOLD"
+            ):
+                val = getattr(self, name, None)
+                if val is not None:
+                    super().__setattr__(name, to_ch_datetime(val))
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Intercepts assignments to ensure timestamp fields are naive strings."""
+        if (
+            "TIMESTAMP" in name
+            or name.endswith("_LC")
+            or name == "EXPIRATION_THRESHOLD"
+        ):
+            value = to_ch_datetime(value)
+        super().__setattr__(name, value)
+
     @property
     def is_expired(self) -> bool:
         """Internal signal derived from DB-calculated threshold."""
         if not self.IS_SNAPSHOT or not self.EXPIRATION_THRESHOLD:
             return False
 
-        threshold = self.EXPIRATION_THRESHOLD
-        if threshold.tzinfo is None:
-            threshold = threshold.replace(tzinfo=APP_TIMEZONE_LC)
-
-        now = datetime.now(threshold.tzinfo)
+        threshold = standardize_timestamp(
+            self.EXPIRATION_THRESHOLD, force_naive=STRIP_TZ_FOR_DB
+        )
+        now = get_current_timestamp(strip_tz=STRIP_TZ_FOR_DB)
         return now > threshold
 
     @property
@@ -97,10 +140,9 @@ class JobRecord(msgspec.Struct, kw_only=True):
         if self.MISFIRE_GRACE_SECS == -1:
             return False
 
-        sched = self.SCHEDULED_TIMESTAMP_LC
-        if sched.tzinfo is None:
-            # Assumption: DB timestamps are localized or UTC relative to system
-            sched = sched.replace(tzinfo=now.tzinfo)
+        # Safely calculate delay regardless of input types or timezone awareness
+        # For ClickHouse-centric apps, we keep it naive.
+        # For Aware apps, we would pass timezone=self.exec_ctx.timezone
+        delay = diff_seconds(now, self.SCHEDULED_TIMESTAMP_LC, timezone=None)
 
-        delay = (now - sched).total_seconds()
         return delay > self.MISFIRE_GRACE_SECS

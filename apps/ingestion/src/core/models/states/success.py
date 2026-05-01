@@ -41,17 +41,14 @@ class SuccessState(LifecycleState):
         Physical cleanup is deferred to the CompleteStage.
         """
 
-        stage_name: str = data["stage"]
         bitmask_inc = data.get("bitmask_increment", 0)
-        results = data.get("results", {})
 
         try:
             # 1. Update Manifest & Bitmask
             self.task.update_manifest(
                 {
                     "status": ExecutionStatus.SUCCESS.value,
-                    stage_name: results,
-                    "bitmask": self.task.manifest.bitmask | bitmask_inc,
+                    # "bitmask": self.task.manifest.bitmask | bitmask_inc,
                 }
             )
 

@@ -1,14 +1,13 @@
 import re
 from collections.abc import Sequence
-from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-from loguru import logger
 
 from apps.ingestion.src.services.database.base import DatabaseSink, DatabaseSource
 from apps.ingestion.src.services.factory import ServiceFactory
 from libs.database.clients.clickhouse import ClickhouseClient
+from libs.utils.dates import get_current_timestamp
+from loguru import logger
 
 LOG = logger
 
@@ -41,13 +40,14 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         expected_count: int,
         file_ext: str = "parquet",
         audit_values: dict[str, Any] | None = None,
-    ) -> tuple[str, int] | None:
+    ) -> tuple[str, int]:
+        
         # Extract database and table names to fully qualify the staging table
         parts = target_table.split(".", 1)
         db_name = parts[0] if len(parts) > 1 else None
         table_name = parts[-1]
 
-        timestamp = datetime.now().astimezone().strftime("%Y%m%d%H%M%S")
+        timestamp = get_current_timestamp(strip_tz=True).strftime("%Y%m%d%H%M%S")
         staging_table_name = f"stg_{table_name}_{timestamp}"
         staging_table = (
             f"{db_name}.stg_{table_name}_{timestamp}" if db_name else staging_table_name
@@ -56,7 +56,8 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         audit_values = audit_values or {}
         success = False
         try:
-            # Different stages use separate sessions. Hence, TEMP Table approach not feasible.
+            # Different stages use separate sessions. 
+            # Hence, TEMP Table approach not feasible.
             tmp_sql = f"""CREATE OR REPLACE TABLE {staging_table} 
                     ENGINE = MergeTree() 
                     ORDER BY tuple()

@@ -1,4 +1,3 @@
-from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -7,6 +6,7 @@ from apps.ingestion.src.core.models.task.status import ExecutionStatus
 from apps.ingestion.src.utils.exceptions import RetryTask
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreakerTripped
+from libs.utils.dates import get_current_timestamp
 from libs.utils.exceptions import HostUnreachable, TransientError
 from loguru import logger
 
@@ -29,7 +29,7 @@ class RetryState(LifecycleState):
             return False
 
         # Policy: Fails after 3 attempts or at midnight
-        now = datetime.now().astimezone()
+        now = get_current_timestamp(strip_tz=True)
         midnight = now.replace(hour=23, minute=59, second=59, microsecond=0)
         if task.manifest.retry_count >= 3 or now >= midnight:
             LOG.error(
@@ -79,7 +79,7 @@ class RetryState(LifecycleState):
             # Marker for normal transient retries (Engine waits for timer)
             wait = min(600, (2**retry_count) * 30)
 
-            now = datetime.now().astimezone()
+            now = get_current_timestamp(strip_tz=True)
             retry_info = {
                 "retry_at": now.isoformat(),
                 "reason": data.get("message"),
