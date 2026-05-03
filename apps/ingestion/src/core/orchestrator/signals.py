@@ -2,12 +2,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from apps.ingestion.src.core.models.task import Task
 from apps.ingestion.src.core.models.task.status import ExecutionStatus
 from apps.ingestion.src.utils.common import find_path
 from loguru import logger
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.contexts import ExecutionContext
+    from apps.ingestion.src.core.orchestrator.janitor import Janitor
     from apps.ingestion.src.core.orchestrator.state import StateStore
 
 
@@ -24,9 +26,11 @@ class SignalProcessor:
         self,
         state_store: "StateStore",
         exec_ctx: "ExecutionContext",
+        janitor: "Janitor | None" = None,
     ):
         self.state_store = state_store
         self.exec_ctx = exec_ctx
+        self.janitor = janitor
         self._commands: dict[str, Callable] = {}
         self._signal_handlers: dict[str, Callable[[str, Path | None], None]] = {
             ".fail": self._handle_fail_signal,
@@ -56,7 +60,14 @@ class SignalProcessor:
         """Handles a .done signal, performing a deep sync for completion."""
         LOG.success("Syncing task completion to StateStore", run_id=run_id)
         if folder_path:
-            self.state_store.sync_from_folder(folder_path)
+            # 1. Final Deep Sync to DB
+            self.state_store.sync_from_folder(folder_path, deep_sync=True)
+
+            # 2. Trigger Janitor Purge
+            if self.janitor:
+                # Rehydrate task to perform identity-aware cleanup
+                task = Task.from_folder(folder_path, self.exec_ctx)
+                self.janitor.cleanup_task(task)
         else:
             LOG.warning(
                 "Done signal for non-existent folder, emitting synthetic expiry",

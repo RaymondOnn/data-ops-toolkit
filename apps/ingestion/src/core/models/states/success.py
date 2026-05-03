@@ -29,6 +29,21 @@ class SuccessState(LifecycleState):
             )
             return False
 
+        # Gather variables for debugging
+        bitmask_val = task.manifest.bitmask
+        is_fully_complete = StageBitmask(bitmask_val).is_fully_complete()
+        current_stage = task.stage.name
+        target_stage = task.context.to_stage
+
+        LOG.debug(
+            "SuccessState applicability check",
+            run_id=task.run_id,
+            bitmask_raw=bitmask_val,
+            is_fully_complete=is_fully_complete,
+            current_stage=current_stage,
+            target_stage=target_stage,
+        )
+
         # Check manifest directly as finalize() has already updated the mask
         # Condition 1: All stages completed (bitmask is full)
         if StageBitmask(task.manifest.bitmask).is_fully_complete():
@@ -41,7 +56,10 @@ class SuccessState(LifecycleState):
             return True
 
         # Condition 2: Task reached the user-defined 'to_stage'
-        if task.context.to_stage and task.context.to_stage == task.stage.name:
+        if (
+            task.context.to_stage
+            and task.context.to_stage == task.manifest.current_stage
+        ):
             LOG.info(
                 "SuccessState applicable: Task reached user-defined 'to_stage'",
                 job_id=task.job_id,
@@ -64,7 +82,7 @@ class SuccessState(LifecycleState):
     def on_enter(self, data: dict[str, Any] | None = None) -> None:
         """
         Finalizes the manifest status.
-        Physical cleanup is deferred to the CompleteStage.
+        Physical cleanup is deferred to the ArchiveStage.
         """
 
         data = data or {}

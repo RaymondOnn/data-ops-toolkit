@@ -1,10 +1,8 @@
-import shutil
-import time
 from datetime import datetime, timedelta
 
 import msgspec
 from apps.ingestion.src.core.models.task import Task, TaskSignal
-from apps.ingestion.src.core.models.task.manifest import CompletePayload
+from apps.ingestion.src.core.models.task.manifest import ArchivePayload
 from apps.ingestion.src.services.base import Archive
 from apps.ingestion.src.services.factory import ServiceFactory
 from libs.utils.dates import get_current_timestamp
@@ -16,9 +14,9 @@ from .enums import StageName
 LOG = logger
 
 
-class CompleteStage(ExecutionStage):
-    name = StageName.COMPLETE.label
-    manifest: CompletePayload
+class ArchiveStage(ExecutionStage):
+    name = StageName.ARCHIVE.label
+    manifest: ArchivePayload
     service: Archive
 
     def pre_flight(self, task: "Task") -> None:
@@ -38,6 +36,12 @@ class CompleteStage(ExecutionStage):
         """
 
         task_ctx = task.context
+        LOG.info(
+            "ArchiveStage started: Beginning finalization and cleanup",
+            job_id=task.job_id,
+            run_id=task.run_id,
+        )
+
         start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
 
         try:
@@ -50,35 +54,24 @@ class CompleteStage(ExecutionStage):
                 # This includes both the Extract (Sanitized) and Transform results.
                 self._archive_parquet_data(self.service, task)
 
-            # 2. Garbage Collection Delay
-            # Allows Ray workers and Polars memory maps to release file handles
-            # before we attempt a physical wipe of the data vaults.
-            time.sleep(2)
-
-            # 3. PURGE DATA VAULTS
-            # We identify physical data via symlinks in the task folder.
-            # This ensures we only delete data belonging to this specific run.
-            LOG.info("Purging physical data vaults", job_id=task.job_id)
-            for item in task.folder.iterdir():
-                if item.is_symlink():
-                    real_data_path = item.resolve()
-                    if real_data_path.exists():
-                        LOG.debug("Deleting vault directory", path=str(real_data_path))
-                        shutil.rmtree(real_data_path, ignore_errors=True)
-                    item.unlink()  # Remove the symlink
-
-            # 4. Calculate Timestamps and Duration
+            # 2. Finalize Timing
             end_ts = get_current_timestamp(strip_tz=True)
 
-            # 5. FINALIZE CANONICAL PAYLOAD
-            payload = CompletePayload(
+            # 3. FINALIZE CANONICAL PAYLOAD
+            payload = ArchivePayload(
                 start_timestamp_utc=str(start_ts),
                 end_timestamp_utc=end_ts.isoformat(),
-                cleanup_verified=True,
+                cleanup_verified=False,  # Physical cleanup deferred to Janitor
                 archival_path=str(final_archive_path) if final_archive_path else None,
                 retention_expiry=self._calculate_expiry(task, end_ts),
             )
             results = msgspec.to_builtins(payload)
+
+            LOG.debug(
+                "Finalizing manifest with ArchivePayload",
+                job_id=task.job_id,
+                payload=results,
+            )
             self.finalize(task, results=results)
 
             # 2. Store Manifest in Database (Current Execution Table)
@@ -96,7 +89,7 @@ class CompleteStage(ExecutionStage):
             return "FINISH"
 
         except Exception as e:
-            LOG.exception("CompleteStage failed during cleanup")
+            LOG.exception("ArchiveStage failed during cleanup")
             self.finalize(task, exception=e)
             raise
 

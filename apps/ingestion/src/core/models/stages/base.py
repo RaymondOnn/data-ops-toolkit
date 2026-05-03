@@ -2,11 +2,14 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from loguru import logger
-
-from apps.ingestion.src.core.models.stages.enums import EXEC_STAGES, StageName
+from apps.ingestion.src.core.models.stages.enums import (
+    EXEC_STAGES,
+    STAGE_TERMINAL_SENTINEL,
+    StageName,
+)
 from apps.ingestion.src.utils.constants import DISK_THRESHOLD_HALT
 from libs.utils.system import get_disk_usage
+from loguru import logger
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.task import Task
@@ -56,11 +59,11 @@ class ExecutionStage(ABC):
         """Transit the Task instance to the next stage."""
         from apps.ingestion.src.core.models.stages.utils import get_stage_class_by_name
 
-        next_stage = StageName.next(self.name)
-        if next_stage:
-            task.set_stage(get_stage_class_by_name(next_stage.label))
-            return next_stage.label
-        return "FINISH"
+        next_label = StageName.next(self.name)
+        if next_label != STAGE_TERMINAL_SENTINEL:
+            task.set_stage(get_stage_class_by_name(next_label))
+
+        return next_label
 
     def move_to_folder(self, task: "Task", category: str) -> None:
         """

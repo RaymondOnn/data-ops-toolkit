@@ -95,7 +95,7 @@ class PublishPayload(msgspec.Struct, kw_only=True):
     )
 
 
-class CompletePayload(msgspec.Struct, kw_only=True):
+class ArchivePayload(msgspec.Struct, kw_only=True):
     # Governance & Privacy
     cleanup_verified: bool  # Confirmation that staging/temp data is purged
     archival_path: str | None  # Path to backup, or None if privacy-restricted
@@ -124,7 +124,7 @@ class TaskManifest(msgspec.Struct, kw_only=True):
     write: WritePayload | None = None
     audit: AuditPayload | None = None
     publish: PublishPayload | None = None
-    complete: CompletePayload | None = None
+    archive: ArchivePayload | None = None
 
     # The "Black Box" Recorder
     error: ErrorPayload | None = None
@@ -140,8 +140,8 @@ class TaskManifest(msgspec.Struct, kw_only=True):
 
 
 __all__ = [
+    "ArchivePayload",
     "AuditPayload",
-    "CompletePayload",
     "ErrorPayload",
     "ExtractPayload",
     # BasePayload,

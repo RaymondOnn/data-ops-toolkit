@@ -44,7 +44,7 @@ DEFAULT_SYNC_TIMEOUT_SECS = 1800  # 1 Hour default
 INTERVAL_HEARTBEAT_SECS = 30
 INTERVAL_DB_POLL_SECS = 60
 INTERVAL_STATE_SYNC_SECS = 30
-INTERVAL_ENGINE_SCAN_SECS = 5
+INTERVAL_ENGINE_SCAN_SECS = 1
 INTERVAL_RECOVERY_SWEEP_SECS = 300
 INTERVAL_PROBE_SECS = 3600
 
@@ -139,8 +139,8 @@ class Orchestrator:
         self.tasks = TaskManager(exec_ctx)
         self.triggers = TriggerManager(exec_ctx)
         self.state_store = StateStore(self.db_service, exec_ctx)
-        self.signals = SignalProcessor(self.state_store, exec_ctx)
         self.janitor = Janitor(self.state_store, self.tasks, exec_ctx)
+        self.signals = SignalProcessor(self.state_store, exec_ctx, self.janitor)
 
         # 2. Wire the Signals to the Handlers (The Refactor Fix)
         self.signals.register_command(
@@ -425,7 +425,7 @@ class Orchestrator:
                 return ExecutionStatus.RUNNING
 
         # 2. Check StateStore Registry (Database Mirror)
-        # If it's gone from the task cache, it has been popped. 
+        # If it's gone from the task cache, it has been popped.
         # We check the registry to see if it was popped because of failure.
         record = self.state_store.active_registry.get(run_id)
         if record:
@@ -548,7 +548,7 @@ class Orchestrator:
 
         # 3. Cleanup logic (Optional: move to failed or delete)
         if status == ExecutionStatus.EXPIRED:
-            self.janitor._cleanup_workspace(task.job_id, task.run_id, task.id)
+            self.janitor.cleanup_task(task)
 
 
 def create_orchestrator(app_cfg_path: str | None = None) -> Orchestrator:

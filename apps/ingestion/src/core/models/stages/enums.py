@@ -1,6 +1,9 @@
 from enum import IntFlag, StrEnum, auto
 from typing import Self
 
+# Sentinel value indicating the pipeline has reached its terminal conclusion
+STAGE_TERMINAL_SENTINEL = "FINISH"
+
 
 class StageBitmask(IntFlag):
     """
@@ -14,7 +17,7 @@ class StageBitmask(IntFlag):
     WRITE = auto()
     # AUDIT = auto()
     PUBLISH = auto()
-    COMPLETE = auto()
+    ARCHIVE = auto()
 
     @classmethod
     def ALL_DONE(cls) -> "StageBitmask":
@@ -39,7 +42,7 @@ class StageName(StrEnum):
     WRITE = "write"
     # AUDIT = "audit"
     PUBLISH = "publish"
-    COMPLETE = "complete"
+    ARCHIVE = "archive"
 
     @classmethod
     def from_label(cls, label: str) -> "StageName":
@@ -67,20 +70,24 @@ class StageName(StrEnum):
             StageName.WRITE: StageBitmask.WRITE,
             # StageName.AUDIT: StageBitmask.AUDIT,
             StageName.PUBLISH: StageBitmask.PUBLISH,
-            StageName.COMPLETE: StageBitmask.COMPLETE,
+            StageName.ARCHIVE: StageBitmask.ARCHIVE,
         }
         return mapping[self]
 
     @classmethod
-    def next(cls, current_stage: str) -> Self | None:
-        """Finds the next stage in the sequence based on a string label."""
+    def next(cls, current_stage: str) -> str:
+        """Finds the next stage label or returns the terminal sentinel."""
         members = list(cls)
         try:
             current_member = cls(current_stage)
             idx = members.index(current_member)
-            return members[idx + 1] if idx + 1 < len(members) else None
+            return (
+                members[idx + 1]
+                if idx + 1 < len(members)
+                else STAGE_TERMINAL_SENTINEL
+            )
         except ValueError:
-            return None
+            return STAGE_TERMINAL_SENTINEL
 
     @classmethod
     def prev(cls, current_stage: str) -> Self | None:

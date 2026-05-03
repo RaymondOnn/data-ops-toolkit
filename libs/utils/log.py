@@ -1,6 +1,8 @@
 import logging
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -16,43 +18,53 @@ def _mask_sensitive_data(record):
     record["message"] = msg
 
 
-def _console_formatter(record):
+def create_console_formatter(highlight_keys: set[str]) -> Callable[[Any], str]:
     """
-    Dynamic formatter that appends extra context to the end of the line
-    only if extra data exists.
+    Creates a Loguru formatter that highlights specific keys in the prefix
+    and appends others as context extras.
     """
-    fmt = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
 
-    # Check for extra context (excluding internal loguru keys if any)
-    extras = {k: v for k, v in record["extra"].items() if k not in ["run_id"]}
+    def formatter(record: Any) -> str:
+        # Escape name and function to prevent loguru parsing errors (e.g. <module>)
+        name = record["name"].replace("<", "\\<").replace(">", "\\>")
+        function = record["function"].replace("<", "\\<").replace(">", "\\>")
 
-    # We handle run_id separately to highlight it
-    run_id = record["extra"].get("run_id")
-    prefix = f" <magenta>[{run_id}]</magenta>" if run_id else ""
+        fmt = f"<green>{{time:YYYY-MM-DD HH:mm:ss}}</green> | <level>{{level: <8}}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{{line}}</cyan> - <level>{{message}}</level>"
 
-    # Format extras for console display without using braces
-    # (which would trigger Loguru's internal format_map KeyError)
-    if extras:
-        display_parts = []
-        for k, v in extras.items():
-            val = str(v)
-            # Truncate long SQL queries for cleaner console output
-            if k == "query" and len(val) > 100:
-                val = val[:97] + "..."
+        prefixes = []
+        extras_list = []
 
-            # Escape curly braces to prevent Loguru from interpreting them as placeholders
-            val = val.replace("{", "{{").replace("}", "}}")
-            display_parts.append(f"{k}={val}")
+        for k, v in record["extra"].items():
+            val = (
+                str(v)
+                .replace("<", "\\<")
+                .replace(">", "\\>")
+                .replace("{", "{{")
+                .replace("}", "}}")
+            )
 
-        extras_str = ", ".join(display_parts)
-        line = f"{fmt}{prefix} <light-magenta>({extras_str})</light-magenta>\n"
-    else:
-        line = f"{fmt}{prefix}\n"
+            if k in highlight_keys:
+                prefixes.append(f" <magenta>[{val}]</magenta>")
+            else:
+                # Truncate long SQL queries for cleaner console output
+                if k == "query" and len(val) > 100:
+                    val = val[:97] + "..."
+                extras_list.append(f"{k}={val}")
 
-    # Ensure exception traceback is appended if present
-    if record["exception"] is not None:
-        line += "{exception}\n"
-    return line
+        prefix_str = "".join(prefixes)
+        extras_str = (
+            f" <light-magenta>({', '.join(extras_list)})</light-magenta>"
+            if extras_list
+            else ""
+        )
+
+        line = f"{fmt}{prefix_str}{extras_str}\n"
+
+        if record["exception"] is not None:
+            line += "{exception}\n"
+        return line
+
+    return formatter
 
 
 class InterceptHandler(logging.Handler):
@@ -70,7 +82,7 @@ class InterceptHandler(logging.Handler):
 
         # Find caller from where originated the logged message
         frame, depth = logging.currentframe(), 2
-        while frame.f_code.co_filename == logging.__file__:
+        while frame and frame.f_code.co_filename == logging.__file__:
             frame = frame.f_back
             depth += 1
 
@@ -92,6 +104,8 @@ def setup_logging(
     is_prod: bool = False,
     is_debug: bool = False,
     filename: str = "platform.jsonl",
+    enqueue: bool = False,
+    highlight_keys: set[str] | None = None,
 ):
     # Ensure the log directory exists before initializing handlers
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -108,16 +122,17 @@ def setup_logging(
     logger.configure(patcher=_mask_sensitive_data)
 
     # 2. Add Console Handler
+    highlight_keys = highlight_keys or set()
     logger.add(
         # sys.stdout,
         sys.stderr,
         level="DEBUG" if is_debug else "INFO",
-        format=_console_formatter,
+        format=create_console_formatter(highlight_keys),
         colorize=True,
         serialize=is_prod,
         backtrace=True,
         diagnose=is_debug,
-        enqueue=True,
+        enqueue=enqueue,
     )
 
     # 3. Add JSON File Handler with Rotation
@@ -128,7 +143,7 @@ def setup_logging(
         rotation="00:00",
         retention="7 days",
         compression="zip",
-        enqueue=True,
+        enqueue=enqueue,
     )
 
     # 4. Intercept standard logging calls

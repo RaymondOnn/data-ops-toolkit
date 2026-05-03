@@ -10,7 +10,7 @@ from apps.ingestion.src.core.contexts import ExecutionMode, parse_set_options
 from apps.ingestion.src.core.contexts.execution import RayMode
 from apps.ingestion.src.core.models.task import Task
 from apps.ingestion.src.core.orchestrator import create_orchestrator
-from libs.utils.log import setup_logging
+from apps.ingestion.src.utils.common import setup_logger
 
 app = typer.Typer(help="50M Row Ingest Pipeline")
 # app.add_typer(test_app, name="test")
@@ -87,11 +87,12 @@ def run(
     # 2. Initialize Unified Logging as early as possible
     # Note: We hardcode a temporary log path or resolve it from env if orchestrator isn't ready
     # For now, let's keep the logic but move it before orchestrator init to catch builder logs.
-    setup_logging(
+    setup_logger(
         log_dir=Path("./.workspace/logs"),
         is_prod=not state["debug"],
         is_debug=state["debug"],
         filename=f"{job_id}.jsonl",
+        enqueue=True,
     )
 
     # 3. Resolve Execution Mode
@@ -153,11 +154,12 @@ def start(
     orchestrator.exec_ctx.always_on = True
 
     # 2. Setup Local-Friendly Logging
-    setup_logging(
+    setup_logger(
         log_dir=Path("./.workspace/logs"),
         is_prod=orchestrator.exec_ctx.is_prod,
         is_debug=debug,
         filename="orchestrator_daemon.jsonl",
+        # enqueue=True,
     )
 
     typer.secho(

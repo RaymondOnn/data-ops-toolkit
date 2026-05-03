@@ -1,4 +1,9 @@
+from functools import partial
 from pathlib import Path
+
+from libs.utils.log import setup_logging
+
+from .constants import LOG_HIGHLIGHT_KEYS
 
 
 def find_path(search_dir: Path, file_pattern: str) -> Path | None:
@@ -21,3 +26,5 @@ def recursive_merge(base: dict, upd: dict) -> None:
             recursive_merge(base[k], v)
         else:
             base[k] = v
+
+setup_logger = partial(setup_logging, highlight_keys=LOG_HIGHLIGHT_KEYS)

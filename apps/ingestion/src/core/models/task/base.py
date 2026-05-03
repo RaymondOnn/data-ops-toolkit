@@ -138,20 +138,6 @@ class Task:
             LOG.info("Creating job run directory", path=str(self._folder))
             self._folder.mkdir(parents=True, exist_ok=True)
 
-        # 2. Initialize the manifest directly in the run folder if missing
-        if not self._manifest_path.exists():
-            LOG.info("Initializing run manifest", run_id=self.run_id)
-            self.update_manifest(
-                {
-                    "job_id": self.job_id,
-                    "run_id": self.run_id,
-                    "dataset_id": self.dataset_id,
-                    "status": ExecutionStatus.RUNNING,
-                    "current_stage": self.target_stage,
-                    "bitmask": 0,
-                }
-            )
-
         return self._folder
 
     @property
@@ -292,33 +278,24 @@ class Task:
         # Ensure workspace is provisioned (relocates config if needed
         _ = self.folder
 
-        # Ensure the manifest is initialized if it doesn't exist,
-        # or update it with the current stage.
-        if not self._manifest_path.exists() or self._manifest_path.stat().st_size == 0:
-            LOG.info(
-                "Manifest not found or empty, initializing with current stage",
-                run_id=self.run_id,
-                stage=stage_name,
-            )
-            initial_manifest_data = {
-                "job_id": self.job_id,
-                "run_id": self.run_id,  # Initial manifest status should be RUNNING
-                "dataset_id": self.dataset_id,
-                "status": ExecutionStatus.RUNNING,
-                "current_stage": stage_name,  # Use the actual stage being checked in
-                "bitmask": 0,
-                # "start": {
-                #     "start_timestamp_utc": get_current_timestamp(strip_tz=True).isoformat(sep=" ")
-                # },  # Initialize start payload
-            }
-            self.update_manifest(initial_manifest_data)
+        updates = {
+            "current_stage": stage_name,
+            "status": ExecutionStatus.RUNNING,
+        }
 
-        self.update_manifest(
-            {
-                "current_stage": stage_name,
-                "status": ExecutionStatus.RUNNING,
-            }
-        )
+        # If the manifest doesn't exist yet, we perform a "Fat Initial Update"
+        # that includes all the required header fields in one go.
+        if not self._manifest_path.exists() or self._manifest_path.stat().st_size == 0:
+            updates.update(
+                {
+                    "job_id": self.job_id,
+                    "run_id": self.run_id,
+                    "dataset_id": self.dataset_id,
+                    "bitmask": 0,
+                }
+            )
+
+        self.update_manifest(updates)
         LOG.debug("Task checked in to stage", run_id=self.run_id, stage=stage_name)
 
     def move_to_folder(self, stage: str) -> None:
@@ -375,26 +352,40 @@ class Task:
         if signal == TaskSignal.RETRY:
             (self.folder / ".retrying").touch()
 
-    def purge(self) -> None:
-        """Physically deletes the task metadata and associated data vaults."""
+    def purge_metadata(self) -> None:
+        """Deletes the task metadata folder (active, FAILED, HOLD, etc)."""
         # Defensive: Prevent catastrophic deletion if IDs are malformed
         if not self.job_id or len(self.job_id) < 3:
             LOG.error(
-                "Refusing to purge: job_id is too short or empty", job_id=self.job_id
+                "Refusing to purge metadata: job_id is too short", job_id=self.job_id
             )
             return
 
-        # 1. Clean Metadata Folder
         if self._folder.exists():
             LOG.debug("Purging task workspace", path=str(self._folder))
             shutil.rmtree(self._folder)
 
-        # 2. Clean physical data artifacts in data vaults
+    def purge_data_vaults(self, stages: list[str] | None = None) -> None:
+        """
+        Physically deletes data artifacts in the data vaults.
+        Optional 'stages' list allows targeting e.g., only 'transform' data.
+        """
+        if not self.job_id or len(self.job_id) < 3:
+            LOG.error(
+                "Refusing to purge vaults: job_id is too short", job_id=self.job_id
+            )
+            return
+
         data_root = self.exec_ctx.data_path
         if data_root.exists():
             for stage_dir in data_root.iterdir():
                 if not stage_dir.is_dir():
                     continue
+
+                # If specific stages requested, skip others
+                if stages and stage_dir.name not in stages:
+                    continue
+
                 # Clean up all data folders belonging to this job ID
                 # Pattern: {job_id}_*
                 for physical_folder in stage_dir.glob(f"{self.job_id}_*"):
@@ -407,3 +398,8 @@ class Task:
                             folder=physical_folder.name,
                             error=str(e),
                         )
+
+    def purge(self) -> None:
+        """Full purge of metadata and all data vaults."""
+        self.purge_metadata()
+        self.purge_data_vaults()

@@ -1,11 +1,10 @@
-import shutil
 from pathlib import Path
 
 import msgspec
 from apps.ingestion.src.core.contexts import ExecutionContext, TaskContext
 from apps.ingestion.src.core.contexts.task import load_task_context
 from apps.ingestion.src.core.models.task import ExecutionStatus, Task, TaskSignal
-from apps.ingestion.src.utils.common import find_path
+from apps.ingestion.src.core.strategies.cleanup.cleanup import CleanupCoordinator
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
 from loguru import logger
 
@@ -51,7 +50,7 @@ class Janitor:
                         "Unexpected error recovering job", path=str(manifest_path)
                     )
 
-        LOG.info("Recovery sweep complete.")
+        LOG.info("Recovery sweep done.")
 
     def recover_task_by_path(self, folder_path: Path) -> None:
         """
@@ -112,8 +111,6 @@ class Janitor:
         job_path = self.exec_ctx.get_run_path(
             run.JOB_ID, run.DATASET_ID, str(run.PARTITION_DATE) or "", run.RUN_ID
         )
-        prefix = f"{identifier}:{run_id}"
-        pending_config = self.exec_ctx.active_path / f"{prefix}_{CONFIG_FILENAME}"
         reason = "TTL_EXPIRED" if run.has_been_triggered else "UNTRIGGERED_STALE"
         full_reason = f"{reason} | Scheduled: {run.SCHEDULED_TIMESTAMP_LC}"
         LOG.warning(f"Evicting run {run_id} ({full_reason})")
@@ -127,12 +124,10 @@ class Janitor:
                 worker_id="janitor",
                 exec_ctx=self.exec_ctx,
             )
-            task.purge()
+            self.cleanup_task(task)
 
         # Defensive: Always check for the orphaned config in the root
-        if pending_config.exists():
-            pending_config.unlink()
-            LOG.debug("Purged orphaned config file", file=pending_config.name)
+        self._purge_orphaned_config(identifier, run_id)
 
         # 5. Atomic State Transition & Eviction
         # We emit the terminal state (Queuing for flush) and pop from registry
@@ -149,38 +144,25 @@ class Janitor:
         LOG.debug("TaskContext not found for expiry check", run_id=job_path.name)
         raise FileNotFoundError("Unable to locate config file")
 
-    def _cleanup_workspace(self, job_id: str, run_id: str, identifier: str) -> None:
+    def cleanup_task(self, task: Task) -> None:
         """
-        The 'Janitor' method. Deletes active links and physical data.
+        Standardizes terminal cleanup of a task using the CleanupCoordinator.
         """
-        # 1. Remove Workspace Folders (active, FAILED, etc)
-        meta_path = find_path(self.exec_ctx.workspace_dir, run_id)
-        if meta_path and meta_path.exists():
-            shutil.rmtree(meta_path)
-            LOG.debug("Purged metadata folder", run_id=run_id)
+        LOG.info("Janitor: Purging task artifacts", run_id=task.run_id)
 
-        # 2. Remove Un-dispatched Config File in active root
-        prefix = f"{identifier}:{run_id}"
+        # 1. Coordinate data and metadata cleanup via policies (respects regression_mode)
+        CleanupCoordinator().apply(task)
+
+        # 2. Remove legacy orphaned config file in active root
+        self._purge_orphaned_config(task.id, task.run_id)
+
+    def _purge_orphaned_config(self, task_id: str, run_id: str) -> None:
+        """Removes the legacy orphaned config file in the active root if it exists."""
+        prefix = f"{task_id}:{run_id}"
         orphaned_config = self.exec_ctx.active_path / f"{prefix}_{CONFIG_FILENAME}"
         if orphaned_config.exists():
             orphaned_config.unlink()
-            LOG.debug("Purged orphaned config", file=orphaned_config.name)
-
-        # 3. Remove physical data vaults (extract, transform, etc)
-        data_root = self.exec_ctx.data_path
-        if data_root.exists():
-            for stage_dir in data_root.iterdir():
-                if stage_dir.is_dir():
-                    for physical_folder in stage_dir.glob(f"{job_id}_*"):
-                        try:
-                            shutil.rmtree(physical_folder)
-                            LOG.debug("Purged data vault", folder=physical_folder.name)
-                        except Exception as e:
-                            LOG.error(
-                                "Vault purge failed",
-                                folder=physical_folder.name,
-                                error=str(e),
-                            )
+            LOG.debug("Purged orphaned config file", file=orphaned_config.name)
 
 
 # TODO: Can we add a 'dry_run' flag to the Janitor class to allow simulating expiry sweeps without deleting files?

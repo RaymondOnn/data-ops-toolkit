@@ -140,31 +140,21 @@ class StateStore:
 
             raw_records = self.db.fetch(sql)
             for r in raw_records:
-                # Convert tuple results to dictionary for named access if necessary
-                data = (
-                    dict(zip(self._column_cache, r, strict=False))
-                    if isinstance(r, (tuple, list))
-                    else r
-                )
+                # 1. Map raw tuple to dict using cached columns
+                raw_dict = dict(zip(self._column_cache, r, strict=False))
 
-                # Sanitize raw data: decode bytes and ensure naive datetimes
-                # This prevents aware datetimes from entering the Registry via DB refresh
-                raw_dict = {}
-                for k, v in data.items():
+                # 2. Type Coercion for msgspec
+                # ClickHouse returns bytes for fixed strings and datetime objects for timestamps.
+                # We must convert these to strings to satisfy the JobRecord schema.
+                for k, v in raw_dict.items():
                     if isinstance(v, bytes):
-                        v = v.decode("utf-8").rstrip("\x00")
-                    if (
-                        isinstance(v, datetime)
-                        or "TIMESTAMP" in k
-                        or k.endswith("_TS")
-                        or k.endswith("_LC")
-                        or k == "EXPIRATION_THRESHOLD"
-                    ):
-                        v = to_ch_datetime(v)
-                    raw_dict[k] = v
+                        raw_dict[k] = v.decode("utf-8").rstrip("\x00")
+                    elif isinstance(v, datetime):
+                        raw_dict[k] = to_ch_datetime(v)
 
-                # Instantiate the structured model (Validation happens here)
                 try:
+                    # msgspec is highly optimized. JobRecord.__post_init__ handles
+                    # the timestamp sanitization automatically.
                     record = msgspec.convert(raw_dict, JobRecord)
                 except msgspec.ValidationError as e:
                     LOG.error(
@@ -255,23 +245,23 @@ class StateStore:
                 for record in self._update_buffer:
                     # 1. Targeted check on the problematic fields
                     timestamp_fields = [
-                        "SCHEDULED_TIMESTAMP_LC", 
-                        "START_TIMESTAMP_LC", 
-                        "END_TIMESTAMP_LC", 
-                        "LAST_UPDATED_AT_TS_LC"
+                        "SCHEDULED_TIMESTAMP_LC",
+                        "START_TIMESTAMP_LC",
+                        "END_TIMESTAMP_LC",
+                        "LAST_UPDATED_AT_TS_LC",
                     ]
-                    
+
                     for field in timestamp_fields:
                         val = getattr(record, field, None)
                         # Specifically look for 'T' or '+' only in these strings
                         if val and isinstance(val, str) and ("T" in val or "+" in val):
-                                LOG.error(
-                                    "TS_FORMAT_LEAK", 
-                                    run_id=record.RUN_ID, 
-                                    field=field, 
-                                    value=val
-                                )
-                                
+                            LOG.error(
+                                "TS_FORMAT_LEAK",
+                                run_id=record.RUN_ID,
+                                field=field,
+                                value=val,
+                            )
+
                     # msgspec will use the strings we sanitized in JobRecord.__setattr__
                     line = msgspec.json.encode(record) + b"\n"
                     f.write(line)
@@ -416,19 +406,23 @@ class StateStore:
         target_parquet = temp_jsonl.with_suffix(".parquet")
 
         try:
-            # 1. Rotate & Convert
+            # 1. Rotate & Convert using eager collection for smaller metadata batches
+            # This allows us to get the row count without a second disk read.
             self.stream_path.rename(temp_jsonl)
-            pl.scan_ndjson(temp_jsonl).sink_parquet(target_parquet)
-            rows_flushed = (
-                pl.scan_parquet(target_parquet).select(pl.len()).collect().item()
-            )
-            temp_jsonl.unlink()  # JSONL is no longer needed once Parquet is cut
+
+            df = pl.read_ndjson(temp_jsonl)
+            rows_flushed = len(df)
+            df.write_parquet(target_parquet)
+
+            temp_jsonl.unlink()
 
             # 2. Synchronously process the stage folder
             self._process_stage()
 
             self.last_flush = time.time()
-            LOG.success("StateStore flush successful", batch=batch_id, rows=rows_flushed)
+            LOG.success(
+                "StateStore flush successful", batch=batch_id, rows=rows_flushed
+            )
 
         except Exception as e:
             LOG.error("StateStore flush failed", error=str(e))
@@ -500,12 +494,14 @@ class StateStore:
                 getattr(manifest.start, "start_timestamp_utc", None)
             ),
             "END_TIMESTAMP_LC": to_ch_datetime(
-                getattr(manifest.complete, "end_timestamp_utc", None)
+                getattr(manifest.archive, "end_timestamp_utc", None)
             ),
             "SOURCE_ROW_COUNT": getattr(manifest.extract, "source_row_count", None),
             "FINAL_ROW_COUNT": getattr(manifest.publish, "final_count", None),
             "RUNTIME_OVERRIDES": context.custom_overrides or None,
-            "FINAL_MANIFEST": msgspec.to_builtins(manifest) if deep_sync else None,
+            "FINAL_MANIFEST": (
+                msgspec.json.encode(manifest).decode("utf-8") if deep_sync else None
+            ),
             # Sanitize fallback records
             "SCHEDULED_TIMESTAMP_LC": to_ch_datetime(
                 getattr(
