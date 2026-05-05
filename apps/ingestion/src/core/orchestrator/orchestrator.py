@@ -1,4 +1,5 @@
 import sys
+import threading
 import time
 from collections import Counter
 from copy import deepcopy
@@ -7,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import msgspec
 import pendulum
+import ray
 from apps.ingestion.src.core.contexts import TaskContextBuilder
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
 from apps.ingestion.src.core.models.task import (
@@ -85,6 +87,8 @@ class Orchestrator:
         self._setup_components(exec_ctx=self.exec_ctx)
         self._check_system_health()
 
+        self._new_work_event = threading.Event()
+
         LOG.info("Orchestrator initialized")
 
     def _perform_platform_preflight(self) -> None:
@@ -136,9 +140,18 @@ class Orchestrator:
             raise e
 
     def _setup_components(self, exec_ctx: ExecutionContext) -> None:
-        self.tasks = TaskManager(exec_ctx)
-        self.triggers = TriggerManager(exec_ctx)
         self.state_store = StateStore(self.db_service, exec_ctx)
+        self.tasks = TaskManager(exec_ctx, self.state_store)
+
+        # 1. Initialize the Signal
+        # self._on_task_queued = threading.Event()
+        # 2. Start the dedicated Engine Thread
+        self._engine_thread = threading.Thread(
+            target=self._start_task_event_loop, name="EngineReactiveLoop", daemon=True
+        )
+        self._engine_thread.start()
+
+        self.triggers = TriggerManager(exec_ctx)
         self.janitor = Janitor(self.state_store, self.tasks, exec_ctx)
         self.signals = SignalProcessor(self.state_store, exec_ctx, self.janitor)
 
@@ -151,6 +164,48 @@ class Orchestrator:
         # )
         # self.signals.register_command(
         # "RELOAD_CONFIG.cmd", self._reload_internal_config)
+
+    def _start_task_event_loop(self) -> None:
+        """
+        The main engine loop. It only wakes up when:
+        1. A worker finishes (ray.wait)
+        2. A new job is queued (self._on_task_queued)
+        3. A safety timeout occurs (60s)
+        """
+        while True:
+            try:
+                # 1. Identify currently running Ray workers
+                active_refs = list(self.tasks._active_tasks.keys())
+
+                # 2. WAIT PHASE: Block until something happens
+                if not active_refs:
+                    # SCENARIO A: Engine is idle.
+                    # Block indefinitely until signals.notify() is called (new job or .cmd)
+                    LOG.debug("TaskManager idle: awaiting signal or 60s heartbeat")
+                    self.signals.wait_for_change(timeout=60.0)
+                else:
+                    # SCENARIO B: Workers are busy.
+                    # Block until EITHER a worker finishes OR a signal/new job arrives.
+                    # ray.wait returns if any task in 'active_refs' completes.
+                    ready, _ = ray.wait(active_refs, num_returns=1, timeout=0.5)
+
+                    # If workers are still busy, check the Bus for new jobs/files.
+                    # We use a short timeout here to keep the loop tight.
+                    if not ready and not self.signals.wait_for_change(timeout=0.1):
+                        continue
+
+                # 3. ACTION PHASE: Drive the state machine
+                # We reset the bus signal before processing to catch new events during execution
+                # wait_for_change(timeout=0) clears the event and returns immediately.
+                self.signals.wait_for_change(timeout=0)
+
+                # This method now performs the actual work
+                self.signals._process_worker_signals()
+                self._drive_engine()
+
+            except Exception:
+                LOG.exception("Critical error in Reactive Engine Loop")
+                time.sleep(1)  # Prevent rapid-fire logging on persistent errors
 
     def _setup_scheduler(self):
         from apscheduler.events import EVENT_JOB_ERROR
@@ -176,14 +231,9 @@ class Orchestrator:
         self.scheduler.add_job(
             self.state_store.flush, "interval", seconds=INTERVAL_STATE_SYNC_SECS
         )
-        self.scheduler.add_job(
-            self.state_store._flush_buffer_to_stream,
-            "interval",
-            seconds=5,  # Flush buffer every 5 seconds
-        )
-        self.scheduler.add_job(
-            self._drive_engine, "interval", seconds=INTERVAL_ENGINE_SCAN_SECS
-        )
+        # self.scheduler.add_job(
+        #     self._drive_engine, "interval", seconds=INTERVAL_ENGINE_SCAN_SECS
+        # )
         self.scheduler.add_job(
             self._perform_maintenance, "interval", seconds=INTERVAL_RECOVERY_SWEEP_SECS
         )
@@ -237,7 +287,7 @@ class Orchestrator:
 
         try:
             while True:
-                self.signals._process_worker_signals()
+                # self.signals._process_worker_signals()
                 # self._drive_engine()
                 # Small sleep to prevent 100% CPU usage
                 time.sleep(1)
@@ -260,41 +310,43 @@ class Orchestrator:
 
     # Scheduler Job
     def _poll_and_evaluate(self) -> None:
-        """Polls the DB view and evaluates triggers."""
-        if self.exec_ctx.always_on:
-            # Clear builder cache to pick up any manual config changes during this poll
-            self.builder._settings_cache.clear()
+        """Polls the DB view and evaluates triggers with batched notification."""
+        self.builder._settings_cache.clear()
 
-            # Refresh from database
-            active_definitions = self.state_store.get_latest_state(force_refresh=True)
+        # 1. Sync local and global state
+        self.state_store.flush()
+        active_definitions = self.state_store.get_latest_state(force_refresh=True)
 
-            # 3. Decision Hub: Structured Decisions via TriggerRules
-            decisions = self.triggers.evaluate(list(active_definitions.values()))
+        # 2. Decision Hub
+        decisions = self.triggers.evaluate(list(active_definitions.values()))
 
-            # 4. Action Coordination (Respecting dry_run)
-            for decision in decisions:
-                log = LOG.bind(
-                    run_id=decision.record.RUN_ID,
-                    rule=decision.rule_name,
-                    dry_run=self.exec_ctx.is_dry_run,
-                )
+        # Track if we need to wake up the engine
+        needs_notification = False
 
-                if decision.action == "purge":
-                    log.warning("Intent: Purge record")
-                    if not self.exec_ctx.is_dry_run:
-                        self.janitor.process_expired_run(
-                            decision.record, decision.context
-                        )
+        # 3. Action Coordination
+        for decision in decisions:
+            if decision.action == "purge":
+                if not self.exec_ctx.is_dry_run:
+                    self.janitor.process_expired_run(decision.record, decision.context)
+                    needs_notification = True  # State changed via purge
 
-                elif decision.action == "trigger":
-                    log.debug("Intent: Trigger record")
-                    if not self.exec_ctx.is_dry_run:
-                        self._trigger_job(
-                            decision.record.JOB_ID,
-                            decision.record.DATASET_ID,
-                            partition_date_str=decision.record.PARTITION_DATE,
-                            run_id=decision.record.RUN_ID,
-                        )
+            elif decision.action == "trigger":
+                if not self.exec_ctx.is_dry_run:
+                    # _trigger_job already calls notify() internally
+                    self._trigger_job(
+                        decision.record.JOB_ID,
+                        decision.record.DATASET_ID,
+                        partition_date_str=decision.record.PARTITION_DATE,
+                        run_id=decision.record.RUN_ID,
+                    )
+                    # No need to set needs_notification here as _trigger_job handled it
+
+        # 4. Final Safety Wake-up
+        # If we purged anything but didn't trigger a new job,
+        # we still notify to let the engine re-check concurrency slots.
+        if needs_notification:
+            LOG.debug("Notifying engine of state changes from purge actions")
+            self.signals.notify()
 
     # Scheduler Job
     def _drive_engine(self) -> None:
@@ -314,6 +366,7 @@ class Orchestrator:
             if not self.state_store.active_registry:
                 return
 
+            self.state_store._flush_buffer_to_stream(force=True)
             self.tasks.recover_zombie_tasks()
             self.janitor.recover_failed_tasks()
         except Exception:
@@ -365,6 +418,7 @@ class Orchestrator:
             # Run the engine cycle to drive the job forward
             self.tasks._process_tasks()
             self.signals._process_worker_signals(run_ids)
+            self.state_store.flush()
 
             # Check for global timeout
             if time.time() - start_time > timeout:
@@ -395,9 +449,9 @@ class Orchestrator:
                 )
                 break
 
-            now = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
+            now = get_current_timestamp(strip_tz=True)
             LOG.debug(f"Waiting for job to finish: {now}")
-            time.sleep(2)
+            time.sleep(0.5)  # Reduced from 2s to 0.5s for faster local execution
 
     def _get_run_status(
         self,
@@ -418,11 +472,12 @@ class Orchestrator:
 
         # 1. Check TaskManager Cache (Hot State)
         # Format: task:{status}:{stage}:{identifier}:{run_id}
-        pattern = f"{CACHE_TASK_NAMESPACE}:*:*:{identifier}:{run_id}"
-        for key in self.tasks.cache.iterkeys(pattern=pattern):
-            # If it's in the cache, it's still being managed (Active)
-            if run_id in key:
-                return ExecutionStatus.RUNNING
+        with self.tasks.lock:
+            pattern = f"{CACHE_TASK_NAMESPACE}:*:*:{identifier}:{run_id}"
+            for key in self.tasks.cache.iterkeys(pattern=pattern):
+                # If it's in the cache, it's still being managed (Active)
+                if run_id in key:
+                    return ExecutionStatus.RUNNING
 
         # 2. Check StateStore Registry (Database Mirror)
         # If it's gone from the task cache, it has been popped.
@@ -512,6 +567,7 @@ class Orchestrator:
             # 5. Optional: Update DB so it doesn't trigger again immediately
             # self.state_store.update_status(job_id, ExecutionStatus.QUEUED)
             run_ids.add(run_id)
+            self.signals.notify()
 
         return run_ids
 

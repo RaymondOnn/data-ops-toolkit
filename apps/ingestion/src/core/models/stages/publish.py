@@ -51,7 +51,7 @@ class PublishStage(ExecutionStage):
             )
 
     def execute(self, task: "Task"):
-        start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
+        start_ts = get_current_timestamp(strip_tz=True)
 
         try:
             task_ctx = task.context
@@ -95,7 +95,7 @@ class PublishStage(ExecutionStage):
             payload = PublishPayload(
                 final_destination=task_ctx.load.sink_identifier,
                 final_count=final_count,
-                start_timestamp_utc=start_ts,
+                start_timestamp=start_ts,
             )
 
             self.finalize(task, results=msgspec.to_builtins(payload))

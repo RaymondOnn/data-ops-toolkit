@@ -29,7 +29,7 @@ class WriteStage(ExecutionStage):
         )
 
     def execute(self, task: "Task") -> str:
-        start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
+        start_ts = get_current_timestamp(strip_tz=True)
         task_ctx = task.context
         transform_meta = task.manifest.transform
         if not transform_meta:
@@ -86,7 +86,7 @@ class WriteStage(ExecutionStage):
                 rows_inserted=int(rows_loaded),
                 partition_col=task_ctx.load.partition_col or "",
                 partition_value=task_ctx.load.partition_value or "",
-                start_timestamp_utc=start_ts,
+                start_timestamp=start_ts,
             )
 
             self.finalize(task, results=msgspec.to_builtins(payload))

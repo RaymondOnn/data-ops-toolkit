@@ -24,9 +24,8 @@ class StartStage(ExecutionStage):
 
     def execute(self, task: "Task") -> str:
         # persist job-start metadata using engine helper
-        start_timestamp = get_current_timestamp(strip_tz=STRIP_TZ_FOR_DB).isoformat(
-            sep=" "
-        )
+        start_timestamp = get_current_timestamp(strip_tz=STRIP_TZ_FOR_DB)
+        
         try:
             # 3. Gather System Metadata
             commit_hash = self._get_commit_hash()  # Use the helper above
@@ -37,7 +36,7 @@ class StartStage(ExecutionStage):
                 commit_hash=commit_hash,
                 source_params={},
                 worker_id=task.worker_id,
-                start_timestamp_utc=start_timestamp,
+                start_timestamp=start_timestamp,
             )
             ctx = msgspec.structs.asdict(payload)
 

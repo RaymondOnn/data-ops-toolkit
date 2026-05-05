@@ -71,7 +71,7 @@ class TransformStage(ExecutionStage):
         always processing the latest sanitized data without needing
         to know the specific physical timestamped folder.
         """
-        start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
+        start_ts = get_current_timestamp(strip_tz=True)
         LOG.info(
             "Starting transformation",
             stage=self.name,
@@ -93,7 +93,7 @@ class TransformStage(ExecutionStage):
                     output_row_count=0,
                     schema_validation_pass=True,
                     refined_schema={},
-                    start_timestamp_utc=start_ts,
+                    start_timestamp=start_ts,
                 )
 
                 self.finalize(task, results=msgspec.to_builtins(payload))
@@ -175,7 +175,7 @@ class TransformStage(ExecutionStage):
                 output_row_count=output_rows or 0,
                 schema_validation_pass=True,
                 refined_schema={k: str(v) for k, v in final_schema_dict.items()},
-                start_timestamp_utc=start_ts,
+                start_timestamp=start_ts,
             )
 
             LOG.info(

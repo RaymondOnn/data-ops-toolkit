@@ -100,7 +100,7 @@ class Compute:
     def remote_executor(self) -> Any:
         """Lazy-loaded Ray actor class to minimize GCS overhead."""
         if self._remote_executor is None:
-            from .worker import process_stage_task
+            from .executor import process_stage_task
 
             self._remote_executor = ray.remote(process_stage_task)
         return self._remote_executor

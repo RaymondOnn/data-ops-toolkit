@@ -10,11 +10,11 @@ CREATE TABLE META.EXECUTION_LOG (
     , LAST_UPDATED_AT_TS_LC    DateTime64(3, 'UTC') DEFAULT now64(3)
     , JOB_STATUS            LowCardinality(String)
     , CURRENT_STEP          LowCardinality(Nullable(String))
-    , JOB_BITMASK           UInt16 DEFAULT 0
-    , IS_SCHEDULED          UInt8 DEFAULT 0 -- 1 = Scheduled, 0 = Manual/Ad-hoc
+    , JOB_BITMASK           UInt16
+    , IS_SCHEDULED          UInt8 -- 1 = Scheduled, 0 = Manual/Ad-hoc
     , WATCH_FILE_PATH       Nullable(String)
     , RUNTIME_OVERRIDES     Nullable(String) -- JSON representation
-    , RETRY_ATTEMPTS        UInt8 DEFAULT 0
+    , RETRY_ATTEMPTS        UInt8
     , SOURCE_ROW_COUNT      Nullable(UInt64) 
     , FINAL_ROW_COUNT       Nullable(UInt64) 
     , FINAL_MANIFEST        Nullable(String) -- JSON representation

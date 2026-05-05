@@ -45,7 +45,7 @@ During each stage execution:
 
 ```mermaid
 sequenceDiagram
-    participant O as Orchestrator / Worker
+    participant O as Orchestrator / Executor
     participant AR as Active Root (active/)
     participant AJ as Task Folder (active/{job_id...}/)
     participant S as Signals (signals/)
@@ -140,8 +140,8 @@ graph TD
     Trigger((Task Triggered)) --> Queue[Diskcache: PENDING]
     
     subgraph "Execution (active/)"
-        Queue --> Worker[Worker Picks Up: PROVISIONING]
-        Worker --> Init[Task.from_folder: Rehydrate]
+        Queue --> Executor[Executor Picks Up: PROVISIONING]
+        Executor --> Init[Task.from_folder: Rehydrate]
         Init --> Process[Task.execute: RUNNING]
         Process --> Mark[Marker + Update Manifest: SUCCESS]
     end

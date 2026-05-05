@@ -67,14 +67,14 @@ class TypeResolver:
     }
 
     @classmethod
-    def resolve_to_group(cls, provider: str, raw_type: str) -> TypeGroup:
+    def resolve_to_group(cls, db_type: str, raw_type: str) -> TypeGroup:
         """
         Factory method to convert a DB-specific string to a TypeGroup.
         """
         # Clean the input (e.g., 'varchar(255)' -> 'varchar')
         base_type = raw_type.split("(", maxsplit=1)[0].lower().strip()
 
-        provider_map = cls._MAPS.get(provider.lower())
+        provider_map = cls._MAPS.get(db_type.casefold())
         if not provider_map:
             return TypeGroup.TEXT  # Default fallback
 
@@ -86,3 +86,8 @@ class TypeResolver:
         Maps a LogicalGroup to the canonical Polars type for normalization.
         """
         return POLARS_OUT_MAP.get(group, pl.Utf8)
+    
+    @classmethod
+    def resolve_to_polars(cls, db_type: str, raw_type: str) -> pl.DataType:
+        return cls.group_to_polars(cls.resolve_to_group(db_type, raw_type))
+    

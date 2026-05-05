@@ -1,6 +1,5 @@
 from datetime import datetime
 from datetime import time as dt_time
-from zoneinfo import ZoneInfo
 
 
 def get_end_of_day_ts() -> float:

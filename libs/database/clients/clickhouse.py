@@ -198,11 +198,11 @@ class ClickhouseClient(DBClient):
             FROM system.columns
             WHERE database = '{database}' 
             AND table = '{table_name}'
-            ORDER BY position;
+            ORDER BY position
         """
         return pl.concat(self.fetch_df(query), how="vertical")
 
-    def exists(self, fq_table: str) -> bool:
+    def exists(self, fq: str) -> bool:
         """Uses ClickHouse EXISTS TABLE command."""
         database, table = (
             fq_table.split(".") if "." in fq_table else ("default", fq_table)

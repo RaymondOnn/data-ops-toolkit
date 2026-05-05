@@ -43,7 +43,7 @@ class ExtractStage(ExecutionStage):
     def execute(self, task: "Task") -> str:
 
         task_ctx = task.context
-        start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
+        start_ts = get_current_timestamp(strip_tz=True)
         try:
             # 1. Prepare Reader Context
             # This object is serialized and sent to Ray workers.
@@ -167,7 +167,7 @@ class ExtractStage(ExecutionStage):
                 source_row_count=total_rows,
                 # Grab schema from the last file processed
                 schema_signature={k: str(v) for k, v in final_schema_dict.items()},
-                start_timestamp_utc=start_ts,
+                start_timestamp=start_ts,
             )
 
             self.finalize(

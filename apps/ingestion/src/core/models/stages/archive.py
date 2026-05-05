@@ -24,8 +24,7 @@ class ArchiveStage(ExecutionStage):
         task_ctx = task.context
         if task_ctx.archive.enabled:
             self.service = ServiceFactory.get_service(
-                service_type=str(task_ctx.archive.type), 
-                **task_ctx.archive.config
+                service_type=str(task_ctx.archive.type), **task_ctx.archive.config
             )
 
     def execute(self, task: Task) -> str:
@@ -42,7 +41,7 @@ class ArchiveStage(ExecutionStage):
             run_id=task.run_id,
         )
 
-        start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
+        start_ts = get_current_timestamp(strip_tz=True)
 
         try:
             # 1. OPTIONAL ARCHIVAL
@@ -59,8 +58,8 @@ class ArchiveStage(ExecutionStage):
 
             # 3. FINALIZE CANONICAL PAYLOAD
             payload = ArchivePayload(
-                start_timestamp_utc=str(start_ts),
-                end_timestamp_utc=end_ts.isoformat(),
+                start_timestamp=str(start_ts),
+                end_timestamp=end_ts,
                 cleanup_verified=False,  # Physical cleanup deferred to Janitor
                 archival_path=str(final_archive_path) if final_archive_path else None,
                 retention_expiry=self._calculate_expiry(task, end_ts),

@@ -59,6 +59,7 @@ class JobRecord(msgspec.Struct, kw_only=True):
     IS_SCHEDULED: int = 0
     RETRY_ATTEMPTS: int = 0
     RUN_ID: str
+    LAST_UPDATED_AT_TS_LC: str | None = None
     START_TIMESTAMP_LC: str | None = None
     END_TIMESTAMP_LC: str | None = None
     WATCH_FILE_PATH: str | None = None
@@ -80,27 +81,6 @@ class JobRecord(msgspec.Struct, kw_only=True):
         """Validation logic can be added here."""
         if not self.JOB_ID or not self.DATASET_ID:
             raise ValueError(f"Invalid JobRecord: Missing ID for {self}")
-
-        # Sanitize all fields that are intended to be timestamps
-        for name, typ in self.__annotations__.items():
-            if (
-                "TIMESTAMP" in name
-                or name.endswith("_LC")
-                or name == "EXPIRATION_THRESHOLD"
-            ):
-                val = getattr(self, name, None)
-                if val is not None:
-                    super().__setattr__(name, to_ch_datetime(val))
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        """Intercepts assignments to ensure timestamp fields are naive strings."""
-        if (
-            "TIMESTAMP" in name
-            or name.endswith("_LC")
-            or name == "EXPIRATION_THRESHOLD"
-        ):
-            value = to_ch_datetime(value)
-        super().__setattr__(name, value)
 
     @property
     def is_expired(self) -> bool:
@@ -146,3 +126,38 @@ class JobRecord(msgspec.Struct, kw_only=True):
         delay = diff_seconds(now, self.SCHEDULED_TIMESTAMP_LC, timezone=None)
 
         return delay > self.MISFIRE_GRACE_SECS
+
+
+class JobUpdate(msgspec.Struct, kw_only=True):
+    """
+    Typed subset of columns used for partial state transitions and heartbeats.
+    Immutable (frozen) to ensure state integrity during the update lifecycle.
+    """
+
+    JOB_STATUS: str
+    LAST_UPDATED_AT_TS_LC: str
+    RETRY_ATTEMPTS: int = 0
+    CURRENT_STEP: str | None = None
+    JOB_BITMASK: int | None = None
+    SOURCE_ROW_COUNT: int | None = None
+    FINAL_ROW_COUNT: int | None = None
+    REMARKS: str | None = None
+    FINAL_MANIFEST: str | None = None
+    START_TIMESTAMP_LC: str | None = None
+    END_TIMESTAMP_LC: str | None = None
+    RUNTIME_OVERRIDES: dict[str, Any] | None = None
+    REMARKS: str | None = None
+
+    def __post_init__(self) -> None:
+        """Sanitize all fields that are intended to be timestamps."""
+        for name, _ in self.__annotations__.items():
+            if "TIMESTAMP" in name or name.endswith("_LC"):
+                val = getattr(self, name, None)
+                if val is not None:
+                    super().__setattr__(name, to_ch_datetime(val))
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Intercepts assignments to ensure timestamp fields are naive strings."""
+        if "TIMESTAMP" in name or name.endswith("_LC"):
+            value = to_ch_datetime(value)
+        super().__setattr__(name, value)

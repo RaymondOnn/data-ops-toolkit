@@ -44,6 +44,7 @@ class ExecutionContext(msgspec.Struct):
     deps_pex_path: Path | None = None
     cache_config: dict[str, Any] = {}
     provider_config: dict[str, str] = {}  # Config for secret provider
+    disable_self_healing: bool = False
 
     @property
     def active_path(self) -> Path:

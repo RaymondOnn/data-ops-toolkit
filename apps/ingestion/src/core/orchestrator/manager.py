@@ -7,17 +7,23 @@ from apps.ingestion.src.core.models.stages.enums import (
     STAGE_TERMINAL_SENTINEL,
     StageName,
 )
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task
+from apps.ingestion.src.core.models.task import ExecutionStatus, Task, TaskSignal
 from apps.ingestion.src.core.orchestrator.compute import Compute
 from apps.ingestion.src.services.registry import ServiceRegistry
 from apps.ingestion.src.utils.common import find_path
-from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE, MANIFEST_FILENAME
+from apps.ingestion.src.utils.constants import (
+    CACHE_TASK_NAMESPACE,
+    MANIFEST_FILENAME,
+    STRIP_TZ_FOR_DB,
+)
 from apps.ingestion.src.utils.dates import epoch_to_iso, get_end_of_day_ts
 from filelock import FileLock
 from libs.cache.utils import get_cache
+from libs.utils.dates import get_current_timestamp
 from loguru import logger
 
-from .enums import TaskMetadata
+from .enums import JobUpdate, TaskMetadata
+from .state import StateStore
 
 LOG = logger
 STAGES_PRIORITY: dict[StageName, int] = {
@@ -31,8 +37,14 @@ STAGES_PRIORITY: dict[StageName, int] = {
 
 
 class TaskManager:
-    def __init__(self, exec_ctx: ExecutionContext, cache_dir: str = ".cache/ingestion"):
+    def __init__(
+        self,
+        exec_ctx: ExecutionContext,
+        state_store: StateStore,
+        cache_dir: str = ".cache/ingestion",
+    ):
         self.exec_ctx = exec_ctx
+        self.state_store = state_store
         # 2. Initialize the Global Registry (Diskcache)
         # This ensures the shared cache path exists for all Ray workers
         ServiceRegistry.configure(
@@ -72,14 +84,6 @@ class TaskManager:
         # Local tracker for active Ray tasks (ObjectRef -> task_key)
         self._active_tasks: dict[ray.ObjectRef, str] = {}
 
-    def run(self) -> None:
-        """Main loop managing multiple tasks."""
-        LOG.info("Starting Orchestrator...")
-        while True:
-            self.recover_zombie_tasks()
-            self._process_tasks()
-            time.sleep(10)  # Frequency of polling
-
     def queue_tasks(
         self,
         identifier: str,
@@ -104,15 +108,30 @@ class TaskManager:
         # Log the dispatch with human-readable timestamps
         expiry_str = epoch_to_iso(expires_at) if expires_at else "NEVER"
 
-        # Check if task exists in cache
-        if queue_key not in self.cache:
+        # GUARD: Prevent duplicate runs for the same partition using pattern matching
+        # This replaces the need for the 'active_run' index key.
+        pattern = f"{CACHE_TASK_NAMESPACE}:*:*:{identifier}:*"
+        existing_key = next(iter(self.cache.iterkeys(pattern=pattern)), None)
+
+        if existing_key:
+            # Key Format: task:STATUS:STAGE:IDENTIFIER:RUN_ID
+            existing_run_id = existing_key.split(":")[-1]
+            LOG.warning(
+                "Partition already has an active run. Skipping queue.",
+                identifier=identifier,
+                active_run_id=existing_run_id,
+            )
+            return
+
+        # Brand new entry
+        if True:  # Replaces the 'if queue_key not in self.cache' check
             # Brand new entry
             meta = TaskMetadata(
                 job_id=job_id,
                 run_id=run_id,
                 dataset_id=dataset_id,
                 partition_date=partition_date,
-                status=ExecutionStatus.PENDING.value,
+                status=ExecutionStatus.QUEUED.value,
                 config_file=config_file_path,
                 current_stage=current_stage,
                 last_hb=time.time(),
@@ -120,8 +139,18 @@ class TaskManager:
             )
             with self.lock:
                 self.cache[queue_key] = meta
-                # Set the lookup key so Orchestrator can find the run_id for this date
-                self.cache[f"active_run:{identifier}"] = run_id
+
+            # Emit PENDING state to database
+            if self.state_store:
+                self.state_store.update_run(
+                    run_id,
+                    JobUpdate(
+                        JOB_STATUS=meta.status,
+                        LAST_UPDATED_AT_TS_LC=get_current_timestamp(
+                            strip_tz=STRIP_TZ_FOR_DB
+                        ).isoformat(sep=" "),
+                    ),
+                )
 
             LOG.info(
                 "Queued Task",
@@ -137,24 +166,24 @@ class TaskManager:
         self.compute.refresh_resources()
 
         # Scan for tasks that are ready for processing (PENDING, RETRY, or BLOCKED)
-        candidate_patterns = [
-            f"{CACHE_TASK_NAMESPACE}:PENDING:*",
-            f"{CACHE_TASK_NAMESPACE}:RETRY:*",
-            f"{CACHE_TASK_NAMESPACE}:BLOCKED:*",
-        ]
-        candidate_keys = []
-        for pattern in candidate_patterns:
-            candidate_keys.extend(self.cache.iterkeys(pattern=pattern))
+        valid_statuses = {
+            ExecutionStatus.QUEUED.value,
+            ExecutionStatus.RETRY.value,
+            ExecutionStatus.BLOCKED.value,
+        }
 
         # Priority Sorting: Terminal stages jump to the front of the queue
         scored_keys = []
-        for k in candidate_keys:
-            try:
-                stage_enum = StageName.from_label(k.split(":")[2])
-                priority = STAGES_PRIORITY.get(stage_enum, 0)
-            except ValueError:
-                priority = 0
-            scored_keys.append((priority, k))
+        # Optimization: Scan only for actionable statuses to avoid O(N) cache pressure
+        for status in valid_statuses:
+            for k in self.cache.iterkeys(pattern=f"{CACHE_TASK_NAMESPACE}:{status}:*"):
+                try:
+                    parts = k.split(":")
+                    stage_enum = StageName.from_label(parts[2])
+                    priority = STAGES_PRIORITY.get(stage_enum, 0)
+                    scored_keys.append((priority, k))
+                except (ValueError, IndexError):
+                    continue
 
         # Sort descending by priority score
         candidate_keys = [k for _, k in sorted(scored_keys, reverse=True)]
@@ -175,7 +204,7 @@ class TaskManager:
             if not task_meta:
                 continue
 
-            is_pending = status == ExecutionStatus.PENDING.value
+            is_queued = status == ExecutionStatus.QUEUED.value
             # Case 1: Normal Retry (Timer based)
             is_retry_ready = (
                 status == ExecutionStatus.RETRY.value
@@ -188,13 +217,26 @@ class TaskManager:
                 and time.time() >= task_meta.last_hb
             )
 
-            if not (is_pending or is_retry_ready or is_blocked_ready):
+            if not (is_queued or is_retry_ready or is_blocked_ready):
                 continue
 
-            if is_pending or is_retry_ready or is_blocked_ready:
+            if is_queued or is_retry_ready or is_blocked_ready:
                 # Prepare metadata for dispatch
-                task_meta.status = ExecutionStatus.QUEUED.value
+                # task_meta.status = ExecutionStatus.QUEUED.value
                 task_meta.last_hb = time.time()
+
+                # Emit QUEUED state (Assigned to Ray but not yet RUNNING)
+                if self.state_store:
+                    self.state_store.update_run(
+                        run_id,
+                        JobUpdate(
+                            JOB_STATUS=task_meta.status,
+                            LAST_UPDATED_AT_TS_LC=get_current_timestamp(
+                                strip_tz=STRIP_TZ_FOR_DB
+                            ).isoformat(sep=" ")
+                        ),
+                    )
+
                 new_key = (
                     f"{CACHE_TASK_NAMESPACE}:{task_meta.status}:{stage_label}:"
                     f"{identifier}:{run_id}"
@@ -247,9 +289,7 @@ class TaskManager:
         # 2. Self-healing: Reconcile Ray actor counts with logical tracking
         self.compute.reconcile_counts()
 
-        dispatched_statuses = {
-            s.value for s in ExecutionStatus.dispatched_statuses()
-        }
+        dispatched_statuses = {s.value for s in ExecutionStatus.dispatched_statuses()}
         for key in self.cache.iterkeys(pattern=f"{CACHE_TASK_NAMESPACE}:*:*"):
             parts = key.split(":")
             status = parts[1]
@@ -269,10 +309,32 @@ class TaskManager:
             if time.time() - meta.last_hb > 300:
                 # Check the 'Physical Heartbeat' (Manifest timestamp)
                 # before declaring it a zombie.
+
+                # 1. Respect Self-Healing Disable
+                if self.exec_ctx.disable_self_healing:
+                    LOG.error(
+                        "Zombie detected | Self-healing disabled. Failing task.",
+                        key=key,
+                    )
+                    task = Task(
+                        composite_key=f"{meta.job_id}:{meta.dataset_id}",
+                        run_id=meta.run_id,
+                        partition_date=meta.partition_date,
+                        worker_id="engine-recovery",
+                        exec_ctx=self.exec_ctx,
+                        target_stage=stage_label,
+                    )
+                    task.update_manifest(
+                        {"status": ExecutionStatus.FAILED, "remarks": "Zombie detected"}
+                    )
+                    task.request_status_sync(TaskSignal.FAIL)
+                    task.move_to_folder("FAILED")
+                    with self.lock:
+                        self.cache.pop(key, None)
+                    continue
+
                 active_path = find_path(self.exec_ctx.active_path, meta.run_id)
-                manifest_file = (
-                    active_path / MANIFEST_FILENAME if active_path else None
-                )
+                manifest_file = active_path / MANIFEST_FILENAME if active_path else None
 
                 if manifest_file and manifest_file.exists():
                     mtime = manifest_file.stat().st_mtime
@@ -323,10 +385,11 @@ class TaskManager:
                 self.cache.pop(key, None)
                 if next_stage != STAGE_TERMINAL_SENTINEL:
                     task_meta.status = ExecutionStatus.PENDING.value
-                    new_key = f"{CACHE_TASK_NAMESPACE}:{task_meta.status}:{next_stage}:{identifier}:{run_id}"
+                    new_key = (
+                        f"{CACHE_TASK_NAMESPACE}:{task_meta.status}:{next_stage}:"
+                        f"{identifier}:{run_id}"
+                    )
                     self.cache[new_key] = task_meta
-                else:
-                    self.cache.pop(f"active_run:{identifier}", None)
         else:
             # If no symlink exists, the worker died mid-stream or before finalize.
             # Reset to PENDING in the SAME queue to allow a retry.
@@ -404,8 +467,8 @@ class TaskManager:
         ready_refs, _ = ray.wait(list(self._active_tasks.keys()), timeout=0)
 
         for ref in ready_refs:
-            # Pop from Manager's local tracking[cite: 4]
+            # Pop from Manager's local tracking
             self._active_tasks.pop(ref)
 
-            # Tell Compute to free up the budget[cite: 2]
+            # Tell Compute to free up the budget
             self.compute.reclaim_resources(ref)

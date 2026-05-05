@@ -2,7 +2,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
-from apps.ingestion.src.extras.flags import feature_flag
 from apps.ingestion.src.utils.exceptions import RetryTask
 from libs.auth.factory import AuthFactory
 from libs.auth.models import Secret
@@ -65,7 +64,8 @@ class ServiceFactory:
         # for an experimental one
         effective_type = service_type
         effective_type = service_type
-        if (flags 
+        if (
+            flags
             and getattr(flags, "benchmark_mode", False)
             and (experimental := getattr(flags, "experimental_sink_type", None))
         ):
@@ -173,4 +173,10 @@ class ServiceFactory:
 
         # Default to lean mode (Diskcache)
         cache_filepath = cache_cfg.get("filepath", ".cache")
-        return DiskCache(cache_path=(workspace_dir / cache_filepath).resolve())
+        # Tuning: Use 8 shards to reduce SQLite write contention.
+        # timeout=0.01 reduces the 'Database is locked' retry delay.
+        return DiskCache(
+            cache_path=(workspace_dir / cache_filepath).resolve(),
+            shards=8,
+            timeout=0.01,
+        )

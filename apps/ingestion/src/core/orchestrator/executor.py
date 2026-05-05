@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 
 # @ray.remote(max_restarts=3, max_task_retries=1)
-class Worker:
+class Executor:
     def __init__(self, worker_id: str, exec_ctx: ExecutionContext):
         self.worker_id = worker_id
         self.exec_ctx = exec_ctx
@@ -106,7 +106,7 @@ class Worker:
 
                     self.is_busy = True
                     log.info(
-                        "Worker started processing {current_stage} stage",
+                        "Executor started processing {current_stage} stage",
                         run_id=meta.run_id,
                         job_id=meta.job_id,
                         current_stage=current_stage,
@@ -175,7 +175,6 @@ class Worker:
             SuccessState(task).on_enter(data={"stage": current_stage})
             with self.lock:
                 self.cache.pop(key, None)
-                self.cache.pop(f"active_run:{identifier}", None)
             log.info("Task fully completed.")
         else:
             # Determine next stage label
@@ -268,11 +267,12 @@ class Worker:
             with self.lock:
                 self.cache.pop(key, None)
 
+
 def process_stage_task(worker_id: str, exec_ctx: ExecutionContext, key: str):
     """
     This function spawns, executes, and dies automatically.
     """
-    worker = Worker(worker_id, exec_ctx)  # Initialize services locally
+    worker = Executor(worker_id, exec_ctx)  # Initialize services locally
     try:
         worker.process_stage(key)
     finally:

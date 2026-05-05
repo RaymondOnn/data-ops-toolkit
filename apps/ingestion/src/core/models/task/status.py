@@ -11,7 +11,7 @@ class ExecutionStatus(StrEnum):
     # Initial State
     PENDING = "PENDING"  # Created, waiting for schedule
     PROVISIONED = "PROVISIONED"  # Instructions and folder created on disk
-    QUEUED = "QUEUED"  # Accepted by the TaskManager, waiting for a Ray Worker
+    QUEUED = "QUEUED"  # Accepted by the TaskManager, waiting for a Ray Executor
 
     # Active States
     RUNNING = "RUNNING"  # Actively processing a stage

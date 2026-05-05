@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any
 
 import msgspec
@@ -22,8 +23,8 @@ class ErrorPayload(msgspec.Struct):
     error_type: str
     message: str
     traceback: str | None = None
-    timestamp_utc: str = field(
-        default_factory=lambda: get_current_timestamp(strip_tz=True).isoformat(sep=" ")
+    timestamp: datetime = field(
+        default_factory=lambda: get_current_timestamp(strip_tz=True)
     )
 
 
@@ -31,8 +32,8 @@ class BasePayload(msgspec.Struct, kw_only=True):
     commit_hash: str = ""
     source_params: dict[str, Any] = {}
     worker_id: str = ""
-    start_timestamp_utc: str = field(
-        default_factory=lambda: get_current_timestamp(strip_tz=True).isoformat(sep=" ")
+    start_timestamp: datetime = field(
+        default_factory=lambda: get_current_timestamp(strip_tz=True)
     )
 
 
@@ -42,9 +43,9 @@ class ExtractPayload(msgspec.Struct, kw_only=True):
     artifact_folder: str = ""
     source_row_count: int = 0  # Number of rows detected
     schema_signature: dict[str, str] = {}  # Column names and types
-    start_timestamp_utc: str = ""
-    end_timestamp_utc: str = field(
-        default_factory=lambda: get_current_timestamp(strip_tz=True).isoformat(sep=" ")
+    start_timestamp: datetime | None = None 
+    end_timestamp: datetime = field(
+        default_factory=lambda: get_current_timestamp(strip_tz=True)
     )
 
 
@@ -55,9 +56,9 @@ class TransformPayload(msgspec.Struct, kw_only=True):
     schema_validation_pass: bool = False  # True if schema matches the expected schema
     refined_schema: dict[str, str] = {}  # Column names and types
     artifact_folder: str
-    start_timestamp_utc: str
-    end_timestamp_utc: str = field(
-        default_factory=lambda: get_current_timestamp(strip_tz=True).isoformat(sep=" ")
+    start_timestamp: datetime
+    end_timestamp: datetime = field(
+        default_factory=lambda: get_current_timestamp(strip_tz=True)
     )
 
 
@@ -68,9 +69,9 @@ class WritePayload(msgspec.Struct, kw_only=True):
     partition_col: str
     partition_value: str
     sink_identifier: str
-    start_timestamp_utc: str
-    end_timestamp_utc: str = field(
-        default_factory=lambda: get_current_timestamp(strip_tz=True).isoformat(sep=" ")
+    start_timestamp: datetime
+    end_timestamp: datetime = field(
+        default_factory=lambda: get_current_timestamp(strip_tz=True)
     )
 
 
@@ -79,9 +80,9 @@ class AuditPayload(msgspec.Struct, kw_only=True):
     total_checks_run: int
     failed_checks: dict[str, Any] = {}
     external_app_status: str
-    start_timestamp_utc: str
-    end_timestamp_utc: str = field(
-        default_factory=lambda: get_current_timestamp(strip_tz=True).isoformat(sep=" ")
+    start_timestamp: datetime
+    end_timestamp: datetime = field(
+        default_factory=lambda: get_current_timestamp(strip_tz=True)
     )
 
 
@@ -89,9 +90,9 @@ class PublishPayload(msgspec.Struct, kw_only=True):
     final_destination: str
     final_count: int
     is_idempotent_cleanup_run: bool = False
-    start_timestamp_utc: str
-    end_timestamp_utc: str = field(
-        default_factory=lambda: get_current_timestamp(strip_tz=True).isoformat(sep=" ")
+    start_timestamp: datetime
+    end_timestamp: datetime = field(
+        default_factory=lambda: get_current_timestamp(strip_tz=True)
     )
 
 
@@ -100,9 +101,9 @@ class ArchivePayload(msgspec.Struct, kw_only=True):
     cleanup_verified: bool  # Confirmation that staging/temp data is purged
     archival_path: str | None  # Path to backup, or None if privacy-restricted
     retention_expiry: str | None  # Date when this log/archive can be deleted
-    start_timestamp_utc: str
-    end_timestamp_utc: str = field(
-        default_factory=lambda: get_current_timestamp(strip_tz=True).isoformat(sep=" ")
+    start_timestamp: datetime
+    end_timestamp: datetime = field(
+        default_factory=lambda: get_current_timestamp(strip_tz=True)
     )
 
 
