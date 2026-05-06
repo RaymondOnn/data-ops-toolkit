@@ -278,7 +278,7 @@ class Task:
         # Ensure workspace is provisioned (relocates config if needed
         _ = self.folder
 
-        updates = {
+        updates: dict[str, Any] = {
             "current_stage": stage_name,
             "status": ExecutionStatus.RUNNING,
         }
@@ -346,7 +346,11 @@ class Task:
         )
         signal_path = signal_dir / signal_filename
 
-        LOG.debug("Dropping state sync signal", name=signal_path)
+        LOG.debug(
+            "Dropping state sync signal: {signal}",
+            name=signal_path,
+            signal=signal.value,
+        )
         signal_path.touch()  # Create hidden/temp
 
         if signal == TaskSignal.RETRY:

@@ -7,6 +7,7 @@ from apps.ingestion.src.core.models.stages.enums import (
     STAGE_TERMINAL_SENTINEL,
     StageName,
 )
+from apps.ingestion.src.core.models.states import ZombieState
 from apps.ingestion.src.core.models.task import ExecutionStatus, Task, TaskSignal
 from apps.ingestion.src.core.orchestrator.compute import Compute
 from apps.ingestion.src.services.registry import ServiceRegistry
@@ -95,7 +96,7 @@ class TaskManager:
         # Always start in the 'start' queue
         current_stage = current_stage or "start"
         queue_key = (
-            f"{CACHE_TASK_NAMESPACE}:{ExecutionStatus.PENDING.value}:{current_stage}:"
+            f"{CACHE_TASK_NAMESPACE}:{ExecutionStatus.WAITING.value}:{current_stage}:"
             f"{identifier}:{run_id}"
         )
         job_id, dataset_id, partition_date = identifier.split(":")
@@ -131,7 +132,7 @@ class TaskManager:
                 run_id=run_id,
                 dataset_id=dataset_id,
                 partition_date=partition_date,
-                status=ExecutionStatus.QUEUED.value,
+                status=ExecutionStatus.WAITING.value,
                 config_file=config_file_path,
                 current_stage=current_stage,
                 last_hb=time.time(),
@@ -140,12 +141,16 @@ class TaskManager:
             with self.lock:
                 self.cache[queue_key] = meta
 
-            # Emit PENDING state to database
+            # Emit WAITING state to database
             if self.state_store:
                 self.state_store.update_run(
                     run_id,
                     JobUpdate(
+                        JOB_ID=job_id,
+                        DATASET_ID=dataset_id,
+                        PARTITION_DATE=partition_date,
                         JOB_STATUS=meta.status,
+                        CURRENT_STEP=current_stage,
                         LAST_UPDATED_AT_TS_LC=get_current_timestamp(
                             strip_tz=STRIP_TZ_FOR_DB
                         ).isoformat(sep=" "),
@@ -165,9 +170,9 @@ class TaskManager:
         self._cleanup_finished_tasks()
         self.compute.refresh_resources()
 
-        # Scan for tasks that are ready for processing (PENDING, RETRY, or BLOCKED)
+        # Scan for tasks that are ready for processing (WAITING, RETRY, or BLOCKED)
         valid_statuses = {
-            ExecutionStatus.QUEUED.value,
+            ExecutionStatus.WAITING.value,
             ExecutionStatus.RETRY.value,
             ExecutionStatus.BLOCKED.value,
         }
@@ -204,7 +209,7 @@ class TaskManager:
             if not task_meta:
                 continue
 
-            is_queued = status == ExecutionStatus.QUEUED.value
+            is_waiting = status == ExecutionStatus.WAITING.value
             # Case 1: Normal Retry (Timer based)
             is_retry_ready = (
                 status == ExecutionStatus.RETRY.value
@@ -217,35 +222,35 @@ class TaskManager:
                 and time.time() >= task_meta.last_hb
             )
 
-            if not (is_queued or is_retry_ready or is_blocked_ready):
+            if not (is_waiting or is_retry_ready or is_blocked_ready):
                 continue
 
-            if is_queued or is_retry_ready or is_blocked_ready:
-                # Prepare metadata for dispatch
-                # task_meta.status = ExecutionStatus.QUEUED.value
+            # Pass the 'key' from the loop into the spawn_worker method
+            ref = self.compute.spawn_worker(stage=stage_enum, key=key)
+
+            if ref:
+                # SUCCESS: Task has been dispatched to the Ray cluster
+                task_meta.status = ExecutionStatus.DISPATCHED.value
                 task_meta.last_hb = time.time()
 
-                # Emit QUEUED state (Assigned to Ray but not yet RUNNING)
-                if self.state_store:
-                    self.state_store.update_run(
-                        run_id,
-                        JobUpdate(
-                            JOB_STATUS=task_meta.status,
-                            LAST_UPDATED_AT_TS_LC=get_current_timestamp(
-                                strip_tz=STRIP_TZ_FOR_DB
-                            ).isoformat(sep=" ")
-                        ),
-                    )
+                self.state_store.update_run(
+                    run_id,
+                    JobUpdate(
+                        JOB_ID=task_meta.job_id,
+                        DATASET_ID=task_meta.dataset_id,
+                        PARTITION_DATE=task_meta.partition_date,
+                        JOB_STATUS=task_meta.status,
+                        CURRENT_STEP=stage_label,
+                        LAST_UPDATED_AT_TS_LC=get_current_timestamp(
+                            strip_tz=STRIP_TZ_FOR_DB
+                        ).isoformat(sep=" "),
+                    ),
+                )
 
                 new_key = (
                     f"{CACHE_TASK_NAMESPACE}:{task_meta.status}:{stage_label}:"
                     f"{identifier}:{run_id}"
                 )
-
-                # Pass the 'key' from the loop into the spawn_worker method
-                ref = self.compute.spawn_worker(stage=stage_enum, key=new_key)
-
-            if ref:
                 with self.lock:
                     # Commit the state transition to cache only if spawn was successful
                     self.cache.pop(key, None)
@@ -260,6 +265,11 @@ class TaskManager:
                     run_id=task_meta.run_id,
                     stage=stage_label,
                 )
+
+                # Heartbeat to stay alive in the registry
+                task_meta.last_hb = time.time()
+                with self.lock:
+                    self.cache[key] = task_meta
 
         # STATEFUL LOGGING: Only log if pending count or capacity status changed
         has_pending = len(candidate_keys) > 0
@@ -306,10 +316,15 @@ class TaskManager:
             except ValueError:
                 continue
 
-            if time.time() - meta.last_hb > 300:
-                # Check the 'Physical Heartbeat' (Manifest timestamp)
-                # before declaring it a zombie.
+            # --- Delegate to Inferred Expert ---
+            is_zombie = ZombieState.is_applicable(
+                cache_key=key,
+                meta=meta,
+                active_ray_tasks=self._active_tasks,
+                exec_ctx=self.exec_ctx,
+            )
 
+            if is_zombie:
                 # 1. Respect Self-Healing Disable
                 if self.exec_ctx.disable_self_healing:
                     LOG.error(
@@ -384,7 +399,7 @@ class TaskManager:
             with self.lock:
                 self.cache.pop(key, None)
                 if next_stage != STAGE_TERMINAL_SENTINEL:
-                    task_meta.status = ExecutionStatus.PENDING.value
+                    task_meta.status = ExecutionStatus.WAITING.value
                     new_key = (
                         f"{CACHE_TASK_NAMESPACE}:{task_meta.status}:{next_stage}:"
                         f"{identifier}:{run_id}"
@@ -392,7 +407,7 @@ class TaskManager:
                     self.cache[new_key] = task_meta
         else:
             # If no symlink exists, the worker died mid-stream or before finalize.
-            # Reset to PENDING in the SAME queue to allow a retry.
+            # Reset to WAITING in the SAME queue to allow a retry.
             LOG.info(
                 "Recovery: No physical proof of success. Resetting for retry.",
                 run_id=run_id,
@@ -411,18 +426,18 @@ class TaskManager:
 
             task.update_manifest(
                 {
-                    "status": ExecutionStatus.PENDING.value,
+                    "status": ExecutionStatus.WAITING.value,
                     "current_stage": None,
                 }
             )
 
             # Sync the engine cache with the new manifest state
-            # Clear indicators and set to PENDING
+            # Clear indicators and set to WAITING
             (task.folder / ".retrying").unlink(missing_ok=True)
             (task.folder / ".blocked").unlink(missing_ok=True)
             with self.lock:
                 self.cache.pop(key, None)
-                task_meta.status = ExecutionStatus.PENDING.value
+                task_meta.status = ExecutionStatus.WAITING.value
                 task_meta.last_hb = time.time()
 
                 # Reclaim resources if there was an active Ray worker for this key

@@ -8,7 +8,7 @@ from apps.ingestion.src.utils.constants import (
     MISFIRE_GRACE_PERIOD_SECS,
     STRIP_TZ_FOR_DB,
 )
-from libs.utils.dates import diff_seconds, get_current_timestamp, standardize_timestamp
+from libs.utils.dates import diff_seconds, standardize_timestamp
 
 
 def to_ch_datetime(ts: Any) -> str | None:
@@ -39,7 +39,7 @@ class TaskMetadata(msgspec.Struct):
     partition_date: str
     config_file: str
     current_stage: str
-    status: str = "PENDING"
+    status: str = "WAITING"
     last_hb: float = msgspec.field(default_factory=time.time)
     retry_count: int = 0
     expires_at: float | None = None
@@ -51,7 +51,7 @@ class JobRecord(msgspec.Struct, kw_only=True):
 
     JOB_ID: str
     DATASET_ID: str
-    SCHEDULED_TIMESTAMP_LC: str
+    SCHEDULED_TIMESTAMP_LC: datetime
     JOB_STATUS: str
     PARTITION_DATE: str | None = None
     CURRENT_STEP: str | None = None
@@ -59,9 +59,9 @@ class JobRecord(msgspec.Struct, kw_only=True):
     IS_SCHEDULED: int = 0
     RETRY_ATTEMPTS: int = 0
     RUN_ID: str
-    LAST_UPDATED_AT_TS_LC: str | None = None
-    START_TIMESTAMP_LC: str | None = None
-    END_TIMESTAMP_LC: str | None = None
+    LAST_UPDATED_AT_TS_LC: datetime | None = None
+    START_TIMESTAMP_LC: datetime | None = None
+    END_TIMESTAMP_LC: datetime | None = None
     WATCH_FILE_PATH: str | None = None
     RUNTIME_OVERRIDES: dict[str, Any] | None = None
     TRIGGER_TYPE: str = "CRON"
@@ -70,7 +70,7 @@ class JobRecord(msgspec.Struct, kw_only=True):
     FINAL_ROW_COUNT: int | None = None
     FINAL_MANIFEST: str | None = None
     IS_SNAPSHOT: bool = False
-    EXPIRATION_THRESHOLD: str | None = None
+    EXPIRATION_THRESHOLD: datetime | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
@@ -81,18 +81,6 @@ class JobRecord(msgspec.Struct, kw_only=True):
         """Validation logic can be added here."""
         if not self.JOB_ID or not self.DATASET_ID:
             raise ValueError(f"Invalid JobRecord: Missing ID for {self}")
-
-    @property
-    def is_expired(self) -> bool:
-        """Internal signal derived from DB-calculated threshold."""
-        if not self.IS_SNAPSHOT or not self.EXPIRATION_THRESHOLD:
-            return False
-
-        threshold = standardize_timestamp(
-            self.EXPIRATION_THRESHOLD, force_naive=STRIP_TZ_FOR_DB
-        )
-        now = get_current_timestamp(strip_tz=STRIP_TZ_FOR_DB)
-        return now > threshold
 
     @property
     def has_been_triggered(self) -> bool:
@@ -131,9 +119,11 @@ class JobRecord(msgspec.Struct, kw_only=True):
 class JobUpdate(msgspec.Struct, kw_only=True):
     """
     Typed subset of columns used for partial state transitions and heartbeats.
-    Immutable (frozen) to ensure state integrity during the update lifecycle.
     """
 
+    JOB_ID: str
+    DATASET_ID: str
+    PARTITION_DATE: str
     JOB_STATUS: str
     LAST_UPDATED_AT_TS_LC: str
     RETRY_ATTEMPTS: int = 0
@@ -146,10 +136,12 @@ class JobUpdate(msgspec.Struct, kw_only=True):
     START_TIMESTAMP_LC: str | None = None
     END_TIMESTAMP_LC: str | None = None
     RUNTIME_OVERRIDES: dict[str, Any] | None = None
-    REMARKS: str | None = None
 
     def __post_init__(self) -> None:
-        """Sanitize all fields that are intended to be timestamps."""
+        """Sanitize all fields for normalization (timestamps and stages)."""
+        if isinstance(self.CURRENT_STEP, str):
+            super().__setattr__("CURRENT_STEP", self.CURRENT_STEP.upper())
+
         for name, _ in self.__annotations__.items():
             if "TIMESTAMP" in name or name.endswith("_LC"):
                 val = getattr(self, name, None)
@@ -157,7 +149,11 @@ class JobUpdate(msgspec.Struct, kw_only=True):
                     super().__setattr__(name, to_ch_datetime(val))
 
     def __setattr__(self, name: str, value: Any) -> None:
-        """Intercepts assignments to ensure timestamp fields are naive strings."""
+        """Intercepts assignments to ensure data normalization."""
+        if name == "CURRENT_STEP" and isinstance(value, str):
+            value = value.upper()
+
         if "TIMESTAMP" in name or name.endswith("_LC"):
             value = to_ch_datetime(value)
+
         super().__setattr__(name, value)

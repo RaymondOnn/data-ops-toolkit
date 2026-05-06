@@ -24,7 +24,7 @@ class StartStage(ExecutionStage):
 
     def execute(self, task: "Task") -> str:
         # persist job-start metadata using engine helper
-        start_timestamp = get_current_timestamp(strip_tz=STRIP_TZ_FOR_DB)
+        start_timestamp = get_current_timestamp(strip_tz=STRIP_TZ_FOR_DB).isoformat(sep=" ")
         
         try:
             # 3. Gather System Metadata

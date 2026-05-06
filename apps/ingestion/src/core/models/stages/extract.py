@@ -43,7 +43,8 @@ class ExtractStage(ExecutionStage):
     def execute(self, task: "Task") -> str:
 
         task_ctx = task.context
-        start_ts = get_current_timestamp(strip_tz=True)
+        start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
+        
         try:
             # 1. Prepare Reader Context
             # This object is serialized and sent to Ray workers.

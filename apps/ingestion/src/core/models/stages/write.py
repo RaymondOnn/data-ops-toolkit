@@ -29,7 +29,7 @@ class WriteStage(ExecutionStage):
         )
 
     def execute(self, task: "Task") -> str:
-        start_ts = get_current_timestamp(strip_tz=True)
+        start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
         task_ctx = task.context
         transform_meta = task.manifest.transform
         if not transform_meta:

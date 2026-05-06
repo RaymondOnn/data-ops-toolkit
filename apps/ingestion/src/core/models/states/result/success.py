@@ -5,7 +5,7 @@ from apps.ingestion.src.core.models.task.enums import TaskSignal
 from apps.ingestion.src.core.models.task.status import ExecutionStatus
 from loguru import logger
 
-from .base import LifecycleState
+from ..base import ResultState
 from .fail import FailedState
 
 if TYPE_CHECKING:
@@ -14,11 +14,15 @@ if TYPE_CHECKING:
 LOG = logger
 
 
-class SuccessState(LifecycleState):
+class SuccessState(ResultState):
     folder_name = "DONE"
 
     @classmethod
-    def is_applicable(cls, task: "Task", exception: Exception | None = None) -> bool:
+    def is_applicable(
+        cls,
+        task: "Task",
+        exception: Exception | None = None,
+    ) -> bool:
         """Terminal success: Bitmask of 15 or reached the user's to_stage."""
         if exception:
             LOG.debug(
@@ -79,7 +83,7 @@ class SuccessState(LifecycleState):
         )
         return False
 
-    def on_enter(self, data: dict[str, Any] | None = None) -> None:
+    def on_enter(self, task: "Task", data: dict[str, Any] | None = None) -> None:
         """
         Finalizes the manifest status.
         Physical cleanup is deferred to the ArchiveStage.
@@ -88,18 +92,18 @@ class SuccessState(LifecycleState):
         data = data or {}
         try:
             # 1. Update Manifest to terminal state
-            self.task.update_manifest(
+            task.update_manifest(
                 {
                     "status": ExecutionStatus.SUCCESS.value,
                 }
             )
 
             # 2. Signal DONE so StateStore performs a deep sync of the success status
-            self.task.request_status_sync(TaskSignal.DONE)
+            task.request_status_sync(TaskSignal.DONE)
 
         except Exception:
             LOG.exception("Failed to update success status")
-            FailedState(self.task).on_enter(data={"error": "Success handoff crashed"})
+            FailedState().on_enter(task=task, data={"error": "Success handoff crashed"})
 
-    def can_recover(self) -> bool:
+    def can_recover(self, task: "Task", **kwargs: Any) -> bool:
         return False

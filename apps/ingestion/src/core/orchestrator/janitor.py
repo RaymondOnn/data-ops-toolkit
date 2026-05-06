@@ -3,6 +3,7 @@ from pathlib import Path
 import msgspec
 from apps.ingestion.src.core.contexts import ExecutionContext, TaskContext
 from apps.ingestion.src.core.contexts.task import load_task_context
+from apps.ingestion.src.core.models.states import ExpiredState
 from apps.ingestion.src.core.models.task import ExecutionStatus, Task, TaskSignal
 from apps.ingestion.src.core.strategies.cleanup.cleanup import CleanupCoordinator
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
@@ -115,23 +116,25 @@ class Janitor:
         full_reason = f"{reason} | Scheduled: {run.SCHEDULED_TIMESTAMP_LC}"
         LOG.warning(f"Evicting run {run_id} ({full_reason})")
 
-        # 2. Physical Cleanup
+        # 2. Identity Resolution
         if run.has_been_triggered:
             task = Task(
                 run_id=run_id,
                 composite_key=f"{run.JOB_ID}:{run.DATASET_ID}",
                 partition_date=str(run.PARTITION_DATE or ""),
-                worker_id="janitor",
+                worker_id="janitor-expiry",
                 exec_ctx=self.exec_ctx,
             )
+            # 3. Transition State first (Updates manifest & drops signal)
+            ExpiredState().on_enter(task, data={"reason": full_reason})
+
+            # 4. Perform Physical Purge
             self.cleanup_task(task)
 
         # Defensive: Always check for the orphaned config in the root
         self._purge_orphaned_config(identifier, run_id)
 
-        # 5. Atomic State Transition & Eviction
-        # We emit the terminal state (Queuing for flush) and pop from registry
-        self.state_store.emit_expiry(run, task_ctx, full_reason)
+        # The SignalProcessor will pick up the .expired signal and call emit_expiry
         self.state_store.remove_record(run.RUN_ID)
 
     def _get_expiry_context(self, job_path: Path, pending_config: Path) -> TaskContext:

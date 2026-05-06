@@ -71,7 +71,7 @@ class TransformStage(ExecutionStage):
         always processing the latest sanitized data without needing
         to know the specific physical timestamped folder.
         """
-        start_ts = get_current_timestamp(strip_tz=True)
+        start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
         LOG.info(
             "Starting transformation",
             stage=self.name,

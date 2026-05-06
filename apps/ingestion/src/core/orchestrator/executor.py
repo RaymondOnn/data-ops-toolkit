@@ -24,7 +24,6 @@ from apps.ingestion.src.utils.exceptions import RetryTask, RewindTask
 from filelock import FileLock
 from libs.cache.utils import get_cache
 from loguru import logger
-from tenacity import Retrying, stop_after_attempt, wait_exponential
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.orchestrator.enums import TaskMetadata
@@ -61,100 +60,84 @@ class Executor:
 
         log = logger.bind(worker_id=self.worker_id, stage=current_stage, run_id=run_id)
 
+        # 1. Atomic Check-in: Move from WAITING/DISPATCHED to RUNNING in cache
+        with self.lock:
+            meta: TaskMetadata = self.cache.get(key)
+            if not meta:
+                log.error("Executor failed to rehydrate task: key missing", key=key)
+                return
+
+            self.cache.pop(key, None)
+            meta.status = ExecutionStatus.RUNNING.value
+            meta.last_hb = time.time()
+
+            working_key = (
+                f"{CACHE_TASK_NAMESPACE}:{meta.status}:{current_stage}:"
+                f"{identifier}:{run_id}"
+            )
+            self.cache[working_key] = meta
+
         try:
-            for attempt in Retrying(
-                stop=stop_after_attempt(3),
-                wait=wait_exponential(multiplier=1, min=4, max=10),
-                reraise=True,
-            ):
-                with attempt, logger.contextualize(run_id=run_id):
-                    # 1. Rehydrate Task
-                    with self.lock:
-                        meta: TaskMetadata = self.cache.get(key)
-                        self.cache.pop(key, None)
-                        meta.status = ExecutionStatus.RUNNING.value
-                        meta.last_hb = time.time()
+            with logger.contextualize(run_id=run_id):
+                # 2. Initialize and Sync Physical State (Disk)
+                task: Task = Task(
+                    composite_key=f"{meta.job_id}:{meta.dataset_id}",
+                    run_id=meta.run_id,
+                    partition_date=meta.partition_date,
+                    worker_id=self.worker_id,
+                    exec_ctx=self.exec_ctx,
+                    target_stage=current_stage,
+                )
 
-                        # Transition key to RUNNING
-                        new_key = (
-                            f"{CACHE_TASK_NAMESPACE}:{meta.status}:{current_stage}:"
-                            f"{identifier}:{run_id}"
-                        )
-                        self.cache[new_key] = meta
+                # CRITICAL: Mark work as physically started on disk
+                task.check_in(current_stage)
 
-                    task: Task = Task(
-                        composite_key=f"{meta.job_id}:{meta.dataset_id}",
-                        run_id=meta.run_id,
-                        partition_date=meta.partition_date,
-                        worker_id=self.worker_id,
-                        exec_ctx=self.exec_ctx,
-                        target_stage=current_stage,
-                    )
+                setup_logger(
+                    log_dir=self.exec_ctx.workspace_dir / "logs",
+                    is_prod=self.exec_ctx.is_prod,
+                    is_debug=self.exec_ctx.is_debug,
+                    filename=f"{task.id}_{task.run_id}.jsonl".replace(":", "_"),
+                    enqueue=True,
+                )
 
-                    setup_logger(
-                        log_dir=self.exec_ctx.workspace_dir / "logs",
-                        is_prod=self.exec_ctx.is_prod,
-                        is_debug=self.exec_ctx.is_debug,
-                        # Name the log by stage for easy multi-stage debugging
-                        filename=f"{task.id}_{task.run_id}.jsonl".replace(":", "_"),
-                        enqueue=True,
-                    )
+                (task.folder / ".retrying").unlink(missing_ok=True)
+                (task.folder / ".blocked").unlink(missing_ok=True)
 
-                    # Cleanup indicators when starting execution
-                    (task.folder / ".retrying").unlink(missing_ok=True)
-                    (task.folder / ".blocked").unlink(missing_ok=True)
+                self.is_busy = True
+                log.info("Executor started processing stage", stage=current_stage)
 
-                    self.is_busy = True
-                    log.info(
-                        "Executor started processing {current_stage} stage",
-                        run_id=meta.run_id,
-                        job_id=meta.job_id,
-                        current_stage=current_stage,
-                    )
+                if self.exec_ctx.code_pex_path and self.exec_ctx.code_pex_path.exists():
+                    env = os.environ.copy()
+                    if self.exec_ctx.deps_pex_path:
+                        env["PEX_PATH"] = str(self.exec_ctx.deps_pex_path)
 
-                    # 1. OPTION A: Isolated Execution via PEX (Production Mode)
-                    if (
-                        self.exec_ctx.code_pex_path
-                        and self.exec_ctx.code_pex_path.exists()
-                    ):
-                        log.info(
-                            "Launching isolated PEX process",
-                            pex=str(self.exec_ctx.code_pex_path),
-                        )
-                        env = os.environ.copy()
-                        if self.exec_ctx.deps_pex_path:
-                            env["PEX_PATH"] = str(self.exec_ctx.deps_pex_path)
+                    cmd = [
+                        "python3",
+                        str(self.exec_ctx.code_pex_path),
+                        "run",
+                        meta.partition_date,
+                        "--job-id",
+                        meta.job_id,
+                        "--dataset",
+                        meta.dataset_id,
+                        "--stage",
+                        current_stage,
+                    ]
+                    subprocess.run(cmd, env=env, check=True, capture_output=False)
+                else:
+                    task.stage.pre_flight(task)
+                    task.execute()
 
-                        cmd = [
-                            "python3",
-                            str(self.exec_ctx.code_pex_path),
-                            "run",
-                            meta.partition_date,
-                            "--job-id",
-                            meta.job_id,
-                            "--dataset",
-                            meta.dataset_id,
-                            "--stage",
-                            current_stage,
-                        ]
-                        subprocess.run(cmd, env=env, check=True, capture_output=False)
-                    else:
-                        # 2. OPTION B: Direct Import Execution (Dev/Fallback Mode)
-                        task.check_in(current_stage)
-                        task.stage.pre_flight(task)
-                        task.execute()
-
-                    # Outcome Selection (Success Rail)
-                    self._handle_success(
-                        task, new_key, identifier, current_stage, meta, log
-                    )
+                self._handle_success(
+                    task, working_key, identifier, current_stage, meta, log
+                )
 
         except RetryTask as r:
-            self._handle_retry_task(task, new_key, meta, r, log)
+            self._handle_retry_task(task, working_key, meta, r, log)
         except RewindTask as rw:
-            self._handle_rewind_task(task, new_key, identifier, meta, rw, log)
+            self._handle_rewind_task(task, working_key, identifier, meta, rw, log)
         except Exception as e:
-            self._handle_failure(task, new_key, current_stage, e, log)
+            self._handle_failure(task, working_key, current_stage, e, log)
             raise
         finally:
             self.is_busy = False
@@ -172,7 +155,7 @@ class Executor:
             stage=current_stage,
         )
         if is_success:
-            SuccessState(task).on_enter(data={"stage": current_stage})
+            SuccessState().on_enter(task, data={"stage": current_stage})
             with self.lock:
                 self.cache.pop(key, None)
             log.info("Task fully completed.")
@@ -180,12 +163,19 @@ class Executor:
             # Determine next stage label
             next_label = StageName.next(current_stage)
 
-            ProgressState(task).on_enter(data={"next_stage": next_label})
+            ProgressState().on_enter(task, data={"next_stage": next_label})
             if next_label != STAGE_TERMINAL_SENTINEL:
                 with self.lock:
-                    meta_to_move = self.cache.pop(key)
+                    meta_to_move = self.cache.pop(key, None)
+                    if not meta_to_move:
+                        log.error(
+                            "Cache key missing during transition. Was it recovered as a zombie?",
+                            key=key,
+                        )
+                        return
+
                     meta_to_move.current_stage = next_label
-                    meta_to_move.status = ExecutionStatus.PENDING.value
+                    meta_to_move.status = ExecutionStatus.WAITING.value
                     new_key = (
                         f"{CACHE_TASK_NAMESPACE}:{meta_to_move.status}:{next_label}:"
                         f"{identifier}:{meta_to_move.run_id}"
@@ -200,12 +190,13 @@ class Executor:
 
     def _handle_retry_task(self, task: Task, key, meta, r, log: "Logger"):
         log.warning("Task signaled RETRY", reason=r.reason, wait=r.wait_seconds)
-        RetryState(task).on_enter(
+        RetryState().on_enter(
+            task=task,
             data={
                 "message": r.reason,
                 "service_name": r.service_name,
                 "wait_seconds": r.wait_seconds,
-            }
+            },
         )
         with self.lock:
             if meta_to_update := self.cache.pop(key, None):
@@ -229,7 +220,7 @@ class Executor:
         log.warning("Task signaled REWIND", to_stage=rw.target_stage)
         task.update_manifest(
             {
-                "status": ExecutionStatus.PENDING.value,
+                "status": ExecutionStatus.WAITING.value,
                 rw.target_stage: None,
                 "current_stage": rw.target_stage,
             }
@@ -238,7 +229,7 @@ class Executor:
             meta_to_move = self.cache.pop(key, None)
             if meta_to_move:
                 meta_to_move.current_stage = rw.target_stage
-                meta_to_move.status = ExecutionStatus.PENDING.value
+                meta_to_move.status = ExecutionStatus.WAITING.value
                 new_key = (
                     f"{CACHE_TASK_NAMESPACE}:{meta_to_move.status}:{rw.target_stage}:"
                     f"{identifier}:{meta_to_move.run_id}"
@@ -248,21 +239,22 @@ class Executor:
     def _handle_failure(
         self, task: Task, key, current_stage: str, e: Exception, log: "Logger"
     ):
-        if RetryState.is_applicable(task, e):
+        if RetryState.is_applicable(task, exception=e):
             # For unhandled but retryable exceptions, we don't have an explicit wait_seconds.
             # We pass the error message as the reason and let RetryState calculate the backoff.
             log.warning("Handling unhandled retryable exception", error=str(e))
-            RetryState(task).on_enter(
-                data={"message": str(e), "error_type": type(e).__name__}
+            RetryState().on_enter(
+                task=task, data={"message": str(e), "error_type": type(e).__name__}
             )
         else:
-            FailedState(task).on_enter(
+            FailedState().on_enter(
+                task=task,
                 data={
                     "stage": current_stage,
                     "error_type": type(e).__name__,
                     "message": str(e),
                     "traceback": traceback.format_exc(),
-                }
+                },
             )
             with self.lock:
                 self.cache.pop(key, None)

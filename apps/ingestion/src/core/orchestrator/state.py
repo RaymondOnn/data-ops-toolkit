@@ -367,19 +367,36 @@ class StateStore:
             LOG.warning("No manifest found. Sync skipped.", path=str(manifest_file))
             return
 
-        if not config_file.exists():
-            LOG.warning("No config found. Sync skipped.", path=str(config_file))
-            return
-
         try:
             # 1. Fast decode using msgspec
             with manifest_file.open("rb") as f:
                 manifest = msgspec.json.decode(f.read(), type=TaskManifest)
 
-            with config_file.open("rb") as f:
-                ctx = msgspec.yaml.decode(f.read(), type=TaskContext)
+            # 2. Resolve Context: Try disk config -> Registry fallback -> Placeholder
+            ctx = None
+            if config_file.exists():
+                try:
+                    with config_file.open("rb") as f:
+                        # Use msgspec.json to match Orchestrator._trigger_job format
+                        ctx = msgspec.json.decode(f.read(), type=TaskContext)
+                except Exception as e:
+                    LOG.warning(
+                        "Failed to decode TaskContext during sync", error=str(e)
+                    )
 
-            # 2. Emit to the local stream immediately
+            if ctx is None:
+                # If config is missing or corrupt, try to rehydrate from Active Registry
+                record = self._active_records.get(manifest.run_id)
+                if record:
+                    ctx = TaskContext.create_placeholder(record)
+                else:
+                    LOG.error(
+                        "Sync aborted: config.json missing and run not in registry",
+                        run_id=manifest.run_id,
+                    )
+                    return
+
+            # 3. Emit to the local stream immediately
             # We flag this as a 'SYNC' event in metadata if needed
             self.emit_state(
                 manifest=manifest,
@@ -436,26 +453,36 @@ class StateStore:
             # 2. Dynamic Schema Alignment
             schema_df = self._get_target_schema()
 
+            # Map normalized (uppercase) ClickHouse columns to their actual names
+            # and create a lookup for Polars columns found in the JSONL.
+            lf_cols = {c.upper(): c for c in lf.columns}
             expressions = []
+
             for row in schema_df.to_dicts():
                 col, raw_dtype = row["column_name"], row["data_type"]
-
-                if col not in lf.columns:
-                    continue
-
+                db_col_upper = col.upper()
                 target_ptype = TypeResolver.resolve_to_polars("clickhouse", raw_dtype)
 
-                # Optimization: Build casting expressions once
-                if "date" in raw_dtype.casefold():
+                if db_col_upper in lf_cols:
+                    source_col = lf_cols[db_col_upper]
+                    # Treat all incoming JSONL data as String first to prevent pl.Null inference crashes.
+                    # This provides a stable foundation for the .str namespace and final type casting.
+                    source_expr = pl.col(source_col).cast(pl.String)
 
-                    expr = (
-                        pl.col(col).str.to_date(strict=False)
-                        if raw_dtype.casefold() == "date"
-                        else pl.col(col).str.to_datetime(strict=False)
-                    )
-                    expressions.append(expr.cast(target_ptype))
+                    if "date" in raw_dtype.casefold():
+                        expr = (
+                            source_expr.str.to_date(strict=False)
+                            if raw_dtype.casefold() == "date"
+                            else source_expr.str.to_datetime(strict=False)
+                        )
+                        expressions.append(expr.cast(target_ptype).alias(col))
+                    else:
+                        expressions.append(
+                            source_expr.cast(target_ptype, strict=False).alias(col)
+                        )
                 else:
-                    expressions.append(pl.col(col).cast(target_ptype, strict=False))
+                    # Column missing from stream: explicitly add as Null to maintain schema parity
+                    expressions.append(pl.lit(None).cast(target_ptype).alias(col))
 
             # 3. Collect and Write
             # select(expressions) applies all casts in a single parallel pass
@@ -531,13 +558,16 @@ class StateStore:
         # Construct the typed update object. The JobUpdate class now handles
         # the to_ch_datetime sanitization internally.
         update_obj = JobUpdate(
+            JOB_ID=manifest.job_id,
+            DATASET_ID=manifest.dataset_id,
+            PARTITION_DATE=context.partition_date,
             JOB_STATUS=status,
             CURRENT_STEP=manifest.current_stage.upper(),
             JOB_BITMASK=manifest.bitmask,
             RETRY_ATTEMPTS=manifest.retry_count,
             LAST_UPDATED_AT_TS_LC=get_current_timestamp(
                 timezone=self.exec_ctx.timezone, strip_tz=STRIP_TZ_FOR_DB
-            ),
+            ).isoformat(sep=" "),
             START_TIMESTAMP_LC=getattr(manifest.start, "start_timestamp", None),
             END_TIMESTAMP_LC=getattr(manifest.archive, "end_timestamp", None),
             SOURCE_ROW_COUNT=getattr(manifest.extract, "source_row_count", None),
@@ -577,9 +607,9 @@ class StateStore:
             new_record = self._create_updated_record(current, update_dict)
 
             # Print the record as a formatted DataFrame row for debugging
-            with pl.Config(tbl_cols=-1, fmt_str_lengths=50, tbl_width_chars=200):
-                debug_df = pl.DataFrame([msgspec.to_builtins(new_record)])
-                print(f"\n[STATE_UPDATE] {run_id}\n{debug_df}")
+            # with pl.Config(tbl_cols=-1, fmt_str_lengths=50, tbl_width_chars=200):
+            #     debug_df = pl.DataFrame([msgspec.to_builtins(new_record)])
+            #     print(f"\n[STATE_UPDATE] {run_id}\n{debug_df}")
             if (
                 msgspec.to_builtins(new_record).items()
                 <= msgspec.to_builtins(current).items()
@@ -597,6 +627,9 @@ class StateStore:
 
             if curr_dict == new_dict:
                 # No real change (just a heartbeat), don't clutter the log
+                LOG.trace(
+                    "State update skipped: No functional data change", run_id=run_id
+                )
                 return
 
             # If we got here, something changed (Status, Bitmask, etc.)

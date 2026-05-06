@@ -30,12 +30,6 @@ from libs.utils.dates import get_current_timestamp
 from libs.utils.system import get_disk_usage, get_system_vitals
 from loguru import logger
 
-from .janitor import Janitor
-from .manager import TaskManager
-from .signals import SignalProcessor
-from .state import StateStore
-from .trigger import TriggerManager
-
 if TYPE_CHECKING:
     from apps.ingestion.src.core.contexts.task import TaskContext
 
@@ -140,8 +134,23 @@ class Orchestrator:
             raise e
 
     def _setup_components(self, exec_ctx: ExecutionContext) -> None:
+        from .commands import CommandProcessor
+        from .janitor import Janitor
+        from .manager import TaskManager
+        from .signals import SignalProcessor
+        from .state import StateStore
+        from .trigger import TriggerManager
+
+        self.triggers = TriggerManager(exec_ctx)
+        self.signals = SignalProcessor(exec_ctx)
+
         self.state_store = StateStore(self.db_service, exec_ctx)
         self.tasks = TaskManager(exec_ctx, self.state_store)
+
+        self.janitor = Janitor(self.state_store, self.tasks, exec_ctx)
+        self.commands = CommandProcessor(
+            exec_ctx, self.janitor, self.tasks, self.state_store
+        )
 
         # 1. Initialize the Signal
         # self._on_task_queued = threading.Event()
@@ -151,19 +160,57 @@ class Orchestrator:
         )
         self._engine_thread.start()
 
-        self.triggers = TriggerManager(exec_ctx)
-        self.janitor = Janitor(self.state_store, self.tasks, exec_ctx)
-        self.signals = SignalProcessor(self.state_store, exec_ctx, self.janitor)
+    def _handle_system_signals(self, run_filter: set[str] | None = None) -> None:
+        """AUTHORITATIVE HANDLER: Orchestrates actions based on detected signals."""
+        # 1. Process commands first (e.g., RECOVER_ALL.cmd)
+        commands_processed = self.commands.process_commands()
+        if commands_processed:
+            # If commands were processed, they might have changed state, so notify.
+            # This ensures the engine loop re-evaluates immediately.
+            self.signals.notify()
 
-        # 2. Wire the Signals to the Handlers (The Refactor Fix)
-        self.signals.register_command(
-            "RECOVER_ALL.cmd", self.janitor.recover_failed_tasks
-        )
-        # self.signals.register_command(
-        #     "PURGE_EXPIRED.cmd", self.janitor.purge_expired_workspaces
-        # )
-        # self.signals.register_command(
-        # "RELOAD_CONFIG.cmd", self._reload_internal_config)
+        # 2. Process task-specific signals
+        events = self.signals.collect_events(filter_run_ids=run_filter)
+        if not events:
+            return
+
+        for event in events:
+            if event.signal_type == ".done":
+                LOG.success("Task Completion detected", run_id=event.run_id)
+                if event.folder_path:
+                    self.state_store.sync_from_folder(event.folder_path, deep_sync=True)
+                    task = Task.from_folder(event.folder_path, self.exec_ctx)
+                    self.janitor.cleanup_task(task)
+
+            elif event.signal_type == ".fail":
+                LOG.error("Task Failure detected", run_id=event.run_id)
+                if event.folder_path:
+                    # 1. Authoritative Sync: Pull the error details into the log buffer.
+                    # We use deep_sync=True to ensure the FINAL_MANIFEST JSON is captured.
+                    self.state_store.sync_from_folder(event.folder_path, deep_sync=True)
+
+                    # 2. Quarantining: Physically move the folder for analysis
+                    from apps.ingestion.src.core.models.states import FailedState
+
+                    task = Task.from_folder(event.folder_path, self.exec_ctx)
+                    task.move_to_folder(FailedState.folder_name)
+
+            elif event.signal_type == ".sync":
+                if event.folder_path:
+                    self.state_store.sync_from_folder(
+                        event.folder_path, deep_sync=False
+                    )
+                else:
+                    self.state_store.update_run(event.run_id, {})
+
+            elif event.signal_type == ".expired":
+                if run_record := self.state_store.active_registry.get(event.run_id):
+                    self.state_store.emit_expiry(
+                        run=run_record, context=None, reason="TTL Expired"
+                    )
+
+        # Wake up the dispatch loop
+        self.signals.notify()
 
     def _start_task_event_loop(self) -> None:
         """
@@ -200,7 +247,7 @@ class Orchestrator:
                 self.signals.wait_for_change(timeout=0)
 
                 # This method now performs the actual work
-                self.signals._process_worker_signals()
+                self._handle_system_signals()
                 self._drive_engine()
 
             except Exception:
@@ -417,7 +464,7 @@ class Orchestrator:
         while True:
             # Run the engine cycle to drive the job forward
             self.tasks._process_tasks()
-            self.signals._process_worker_signals(run_ids)
+            self._handle_system_signals(run_ids)
             self.state_store.flush()
 
             # Check for global timeout

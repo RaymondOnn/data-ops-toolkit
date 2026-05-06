@@ -6,3 +6,4 @@ class TaskSignal(StrEnum):
     DONE = "done"
     FAIL = "fail"
     RETRY = "retry"
+    EXPIRED = "expired"

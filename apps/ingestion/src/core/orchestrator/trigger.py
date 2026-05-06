@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import msgspec
 from apps.ingestion.src.core.contexts.task import TaskContext, load_task_context
+from apps.ingestion.src.core.models.states import ExpiredState
 from apps.ingestion.src.core.models.task import ExecutionStatus
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, STRIP_TZ_FOR_DB
 from libs.utils.dates import get_current_timestamp, standardize_timestamp
@@ -67,8 +68,9 @@ class MisfireRule(TriggerRule):
 
 class ExpiryRule(TriggerRule):
     def apply(self, record: "JobRecord", **kwargs: Any) -> bool:
-        # High-performance check using DB-provided threshold
-        return record.is_expired
+        # Delegate expiry check directly to the ExpiredState class
+
+        return ExpiredState.is_applicable(task=None, record=record, **kwargs)
 
 
 class CronScheduleRule(TriggerRule):

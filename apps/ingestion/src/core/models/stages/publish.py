@@ -51,7 +51,7 @@ class PublishStage(ExecutionStage):
             )
 
     def execute(self, task: "Task"):
-        start_ts = get_current_timestamp(strip_tz=True)
+        start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
 
         try:
             task_ctx = task.context

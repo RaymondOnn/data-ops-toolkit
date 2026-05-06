@@ -41,7 +41,8 @@ class ArchiveStage(ExecutionStage):
             run_id=task.run_id,
         )
 
-        start_ts = get_current_timestamp(strip_tz=True)
+        start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
+
 
         try:
             # 1. OPTIONAL ARCHIVAL
@@ -59,7 +60,7 @@ class ArchiveStage(ExecutionStage):
             # 3. FINALIZE CANONICAL PAYLOAD
             payload = ArchivePayload(
                 start_timestamp=str(start_ts),
-                end_timestamp=end_ts,
+                end_timestamp=end_ts.isoformat(sep=" "),
                 cleanup_verified=False,  # Physical cleanup deferred to Janitor
                 archival_path=str(final_archive_path) if final_archive_path else None,
                 retention_expiry=self._calculate_expiry(task, end_ts),
