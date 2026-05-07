@@ -1,5 +1,6 @@
 import time
 from collections import ChainMap
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
@@ -9,10 +10,12 @@ import msgspec
 import polars as pl
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
 from apps.ingestion.src.core.contexts.task import TaskContext
+from apps.ingestion.src.core.models.stages.enums import EXEC_STAGES, StageName
 from apps.ingestion.src.core.models.task import ExecutionStatus, TaskManifest
 from apps.ingestion.src.core.orchestrator.enums import (
     JobRecord,
     JobUpdate,
+    TaskRef,
     to_ch_datetime,
 )
 from apps.ingestion.src.services.database import DatabaseSink
@@ -81,24 +84,12 @@ class StateStore:
         )
         merged["LAST_UPDATED_AT_TS_LC"] = to_ch_datetime(current_ts)
 
-        # 4. Data Sanitization & Normalization
-        # Ensure columns that might be missing in a partial update have safe defaults
-        # for ClickHouse/Polars schema inference.
-        merged.setdefault("JOB_BITMASK", 0)
-        merged.setdefault("RETRY_ATTEMPTS", 0)
-        merged.setdefault("IS_SCHEDULED", 0)
-
-        # Ensure types are consistent (e.g., Bitmask should be int or str consistently)
-        if merged.get("JOB_BITMASK") is not None:
-            merged["JOB_BITMASK"] = int(merged["JOB_BITMASK"])
-
-        # 5. Handle potential nested structures (like FINAL_MANIFEST)
+        # 4. Handle potential nested structures (like FINAL_MANIFEST)
         # If the update didn't provide a manifest, keep the old one
         if "FINAL_MANIFEST" not in updates and base_dict.get("FINAL_MANIFEST"):
             merged["FINAL_MANIFEST"] = base_dict["FINAL_MANIFEST"]
 
         # 6. Final conversion back to the JobRecord struct.
-        # msgspec.convert validates that the merged dict matches your JobRecord definition.
         try:
             return msgspec.convert(merged, type=JobRecord)
         except Exception as e:
@@ -227,15 +218,9 @@ class StateStore:
         path = find_path(self.exec_ctx.workspace_dir, identifier)
         return path if path and path.exists() else None
 
-    def create_record(
-        self,
-        job_id: str,
-        dataset_id: str,
-        partition_date: str,
-        run_id: str,
-        status: str = "PENDING",
-    ) -> None:
+    def create_record(self, task_ref: TaskRef) -> None:
         """Manually seeds the Active Registry for ad-hoc or dumb-mode runs."""
+        run_id = task_ref.run_id
         if run_id in self._active_records:
             LOG.debug(
                 "Run ID already exists in Active Registry; "
@@ -246,22 +231,28 @@ class StateStore:
 
         # Use the internal helper to ensure consistent formatting and validation
         updates = {
-            "JOB_ID": job_id,
-            "DATASET_ID": dataset_id,
-            "PARTITION_DATE": partition_date,
+            "JOB_ID": task_ref.job_id,
+            "DATASET_ID": task_ref.dataset_id,
+            "PARTITION_DATE": task_ref.partition_date,
             "RUN_ID": run_id,
             "IS_SCHEDULED": 0,
+            "CURRENT_STAGE": task_ref.stage,
             "SCHEDULED_TIMESTAMP_LC": to_ch_datetime(
                 get_current_timestamp(
                     timezone=self.exec_ctx.timezone, strip_tz=STRIP_TZ_FOR_DB
                 )
             ),
-            "JOB_STATUS": status,  # This will be handled by to_ch_datetime
+            "JOB_STATUS": task_ref.status,
         }
         new_record = self._create_updated_record(None, updates)
 
         with self._registry_lock:
             self._active_records[run_id] = new_record
+
+        # Print the record as a formatted DataFrame row for debugging
+        with pl.Config(tbl_cols=-1, fmt_str_lengths=50, tbl_width_chars=200):
+            debug_df = pl.DataFrame([msgspec.to_builtins(new_record)])
+            print(f"\n[STATE_CREATE] {run_id}\n{debug_df}")
 
         # Ensure the initial 'PROVISIONED' or 'PENDING' state hits the log stream
         with self._buffer_lock:
@@ -334,7 +325,7 @@ class StateStore:
                 bitmask=0,
             )
 
-        self.emit_state(
+        self._emit_state(
             manifest=manifest,
             context=ctx,
             metadata={"status": ExecutionStatus.EXPIRED, "remarks": reason},
@@ -398,7 +389,7 @@ class StateStore:
 
             # 3. Emit to the local stream immediately
             # We flag this as a 'SYNC' event in metadata if needed
-            self.emit_state(
+            self._emit_state(
                 manifest=manifest,
                 context=ctx,
                 deep_sync=deep_sync,
@@ -432,6 +423,38 @@ class StateStore:
             mask |= 8
         return mask
 
+    @staticmethod
+    def generate_progress_log(
+        bitmask: int,
+        status: str,
+        planned_stages: Sequence[StageName] | None = None,
+    ) -> str:
+        """
+        Converts a bitmask and stage list into a timeline string.
+        Example: 7, [EXT, AUD, TRN, WRI] -> "EXT+ | AUD+ | TRN+ | WRI_"
+        """
+        planned_stages = planned_stages or EXEC_STAGES
+        tokens = []
+        failure_detected = status.upper() == ExecutionStatus.FAILED.value
+        found_failure_point = False
+
+        for stage in planned_stages:
+            # Check if the bit for this stage is set in the bitmask
+            # We use stage.bitmask from your enums logic
+            is_complete = bool(bitmask & stage.bitmask)
+
+            if is_complete:
+                tokens.append(f"{stage.token}+")
+            elif failure_detected and not found_failure_point:
+                # The first stage that isn't complete in a FAILED job is the culprit
+                tokens.append(f"{stage.token}-")
+                found_failure_point = True
+            else:
+                # Stage not yet reached or skipped due to previous failure
+                tokens.append(f"{stage.token}_")
+
+        return " | ".join(tokens)
+
     def flush(self) -> None:
         """Rotates JSONL to Parquet using optimized Lazy execution."""
         self._flush_buffer_to_stream(force=True)
@@ -447,11 +470,19 @@ class StateStore:
             # Rotate file immediately to free up the stream
             self.stream_path.rename(temp_jsonl)
 
-            # 1. Start Lazy Scan (Much faster for large JSONL)
-            lf = pl.scan_ndjson(temp_jsonl)
-
-            # 2. Dynamic Schema Alignment
+            # 1. Dynamic Schema Alignment: Retrieve target structure from DB first
             schema_df = self._get_target_schema()
+
+            # CRITICAL: We provide an explicit schema to scan_ndjson to prevent Polars
+            # from inferring a 'Null' type for columns that only contain nulls in the
+            # first chunk of rows. This fixes "got non-null value for NULL-typed column".
+            # We map all expected DB columns to pl.String for a stable foundation.
+            scan_schema = {
+                row["column_name"]: pl.String for row in schema_df.to_dicts()
+            }
+
+            # 2. Start Lazy Scan (Using explicit schema to bypass inference)
+            lf = pl.scan_ndjson(temp_jsonl, schema=scan_schema)
 
             # Map normalized (uppercase) ClickHouse columns to their actual names
             # and create a lookup for Polars columns found in the JSONL.
@@ -527,7 +558,7 @@ class StateStore:
             LOG.exception("Failed to load state files, leaving in stage for retry")
             raise
 
-    def emit_state(
+    def _emit_state(
         self,
         manifest: TaskManifest | None = None,
         context: TaskContext | None = None,
@@ -552,9 +583,10 @@ class StateStore:
                 run_id=manifest.run_id,
             )
 
-        # 1. Define the incoming updates based on manifest, context, and metadata
-        status = str(metadata.get("status", manifest.status.value)).upper()
-
+        status = str(metadata.get("status", manifest.status.value))
+        progress_str = self.generate_progress_log(
+            bitmask=manifest.bitmask, planned_stages=None, status=status
+        )
         # Construct the typed update object. The JobUpdate class now handles
         # the to_ch_datetime sanitization internally.
         update_obj = JobUpdate(
@@ -562,8 +594,8 @@ class StateStore:
             DATASET_ID=manifest.dataset_id,
             PARTITION_DATE=context.partition_date,
             JOB_STATUS=status,
-            CURRENT_STEP=manifest.current_stage.upper(),
-            JOB_BITMASK=manifest.bitmask,
+            CURRENT_STAGE=manifest.current_stage,
+            JOB_BITMASK=progress_str,  # manifest.bitmask,
             RETRY_ATTEMPTS=manifest.retry_count,
             LAST_UPDATED_AT_TS_LC=get_current_timestamp(
                 timezone=self.exec_ctx.timezone, strip_tz=STRIP_TZ_FOR_DB
@@ -605,16 +637,6 @@ class StateStore:
                 return
 
             new_record = self._create_updated_record(current, update_dict)
-
-            # Print the record as a formatted DataFrame row for debugging
-            # with pl.Config(tbl_cols=-1, fmt_str_lengths=50, tbl_width_chars=200):
-            #     debug_df = pl.DataFrame([msgspec.to_builtins(new_record)])
-            #     print(f"\n[STATE_UPDATE] {run_id}\n{debug_df}")
-            if (
-                msgspec.to_builtins(new_record).items()
-                <= msgspec.to_builtins(current).items()
-            ):
-                return
 
             # --- NEW LOGIC: Only buffer if functional data changed ---
             # We compare the dicts but ignore the 'LAST_UPDATED' timestamp

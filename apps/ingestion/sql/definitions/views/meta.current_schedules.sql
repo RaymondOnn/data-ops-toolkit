@@ -101,3 +101,20 @@ LEFT ANY JOIN META.EXECUTION_LOG LOG
     AND E.PLANNED_TS_LC = LOG.SCHEDULED_TIMESTAMP_LC
 WHERE LOG.RUN_ID='' -- Logic: Only show slots that have no corresponding entry in Execution Log
 ORDER BY NEXT_RUN_TS_LC; 
+
+
+-- For check if all records are inserted exactly once
+-- SELECT
+--     JOB_ID,
+--     DATASET_ID,
+--     SCHEDULED_TIMESTAMP_LC,
+--     count() AS insert_count,
+--     uniqExact(RUN_ID) AS unique_run_ids,
+--     groupArray(LAST_UPDATED_AT_TS_LC) AS update_timestamps
+-- FROM META.EXECUTION_LOG
+-- GROUP BY 
+--     JOB_ID, 
+--     DATASET_ID, 
+--     SCHEDULED_TIMESTAMP_LC
+-- HAVING insert_count > 1
+-- ORDER BY SCHEDULED_TIMESTAMP_LC DESC;

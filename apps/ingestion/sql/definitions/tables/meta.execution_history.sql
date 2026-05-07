@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS META.EXECUTION_HISTORY (
     , PARTITION_DATE        Nullable(Date)
     , START_TIMESTAMP_LC       DateTime64(3)
     , END_TIMESTAMP_LC         DateTime64(3)
+    , LAST_UPDATED_AT_TS_LC    DateTime64(3)
     , JOB_STATUS            LowCardinality(String)
     , SOURCE_ROW_COUNT      UInt64
     , FINAL_ROW_COUNT       UInt64

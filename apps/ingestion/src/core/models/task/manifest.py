@@ -136,7 +136,9 @@ class TaskManifest(msgspec.Struct, kw_only=True):
         """
         from apps.ingestion.src.core.models.stages.enums import EXEC_STAGES
 
-        return all(getattr(self, name) for name in EXEC_STAGES)
+        # EXEC_STAGES is now a tuple of StageName objects.
+        # getattr works because StageName is a StrEnum.
+        return all(getattr(self, stage.label) for stage in EXEC_STAGES)
 
 
 __all__ = [

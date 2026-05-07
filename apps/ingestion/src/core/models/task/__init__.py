@@ -1,5 +1,5 @@
 from .base import Task, create_task_folder
-from .enums import TaskSignal
+from .enums import TaskRef, TaskSignal
 from .manifest import (
     ArchivePayload,
     AuditPayload,
@@ -16,5 +16,6 @@ __all__ = [
     "ExecutionStatus",
     "Task",
     "TaskManifest",
+    "TaskRef",
     "TaskSignal",
 ]

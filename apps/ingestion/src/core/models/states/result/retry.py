@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 from apps.ingestion.src.core.models.task.enums import TaskSignal
@@ -12,10 +12,11 @@ from loguru import logger
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.task import Task
-    
+
 from ..base import ResultState
 
 LOG = logger
+
 
 class RetryState(ResultState):
     folder_name = "RETRY"
@@ -105,6 +106,13 @@ class RetryState(ResultState):
             }
         )
 
+        LOG.info(
+            "Task transitioning to RETRY state",
+            job_id=task.job_id,
+            run_id=task.run_id,
+            attempt=task.manifest.retry_count,
+            wait_seconds=wait,
+        )
         task.request_status_sync(TaskSignal.RETRY)
         raise RetryTask(
             reason=str(message),

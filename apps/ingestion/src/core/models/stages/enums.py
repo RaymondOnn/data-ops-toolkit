@@ -74,6 +74,20 @@ class StageName(StrEnum):
         }
         return mapping[self]
 
+    @property
+    def token(self) -> str:
+        """Returns a 3-letter token for the stage."""
+        mapping = {
+            StageName.START: "INI",
+            StageName.EXTRACT: "EXT",
+            StageName.TRANSFORM: "TRN",
+            StageName.WRITE: "WRI",
+            # StageName.AUDIT: "AUD",
+            StageName.PUBLISH: "PUB",
+            StageName.ARCHIVE: "ARC",
+        }
+        return mapping.get(self, "UNK")
+
     @classmethod
     def next(cls, current_stage: str) -> str:
         """Finds the next stage label or returns the terminal sentinel."""
@@ -82,9 +96,7 @@ class StageName(StrEnum):
             current_member = cls(current_stage)
             idx = members.index(current_member)
             return (
-                members[idx + 1]
-                if idx + 1 < len(members)
-                else STAGE_TERMINAL_SENTINEL
+                members[idx + 1] if idx + 1 < len(members) else STAGE_TERMINAL_SENTINEL
             )
         except ValueError:
             return STAGE_TERMINAL_SENTINEL
@@ -115,4 +127,5 @@ class StageName(StrEnum):
         return NotImplemented
 
 
-EXEC_STAGES = [stage.label for stage in StageName]
+# Using a Tuple of StageName objects ensures type safety and immutability.
+EXEC_STAGES: tuple[StageName, ...] = tuple(StageName)

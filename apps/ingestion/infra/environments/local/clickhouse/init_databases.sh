@@ -58,7 +58,7 @@ SQL_FILES=(
     "/sql/definitions/tables/meta.job_schedules.sql"
     "/sql/definitions/tables/meta.execution_history.sql"
     "/sql/definitions/views/meta.current_schedules.sql"
-    "/sql/definitions/views/meta.work_queue_trigger.sql"
+    "/sql/definitions/views/meta.append_log_trigger.sql"
     "/sql/definitions/views/meta.current_execution.sql"
     "/sql/definitions/views/meta.execution_history.sql"
     "/sql/definitions/views/meta.error_log.sql"

@@ -17,13 +17,13 @@ from apps.ingestion.src.utils.constants import (
     MANIFEST_FILENAME,
     STRIP_TZ_FOR_DB,
 )
-from apps.ingestion.src.utils.dates import epoch_to_iso, get_end_of_day_ts
+from apps.ingestion.src.utils.dates import get_end_of_day_ts
 from filelock import FileLock
 from libs.cache.utils import get_cache
 from libs.utils.dates import get_current_timestamp
 from loguru import logger
 
-from .enums import JobUpdate, TaskMetadata
+from .enums import JobUpdate, TaskMetadata, TaskRef
 from .state import StateStore
 
 LOG = logger
@@ -87,83 +87,61 @@ class TaskManager:
 
     def queue_tasks(
         self,
-        identifier: str,
-        run_id: str,
+        task_ref: TaskRef,
         config_file_path: str,
-        current_stage: str | None = None,
-    ) -> None:
+    ) -> TaskRef | None:  # Return the TaskRef for Orchestrator to use
         """Checks config, creates tasks if not in cache, and submits them."""
-        # Always start in the 'start' queue
-        current_stage = current_stage or "start"
-        queue_key = (
-            f"{CACHE_TASK_NAMESPACE}:{ExecutionStatus.WAITING.value}:{current_stage}:"
-            f"{identifier}:{run_id}"
-        )
-        job_id, dataset_id, partition_date = identifier.split(":")
+        # 1. Transition the key to WAITING status for the queue
+        if task_ref.status != ExecutionStatus.WAITING.value:
+            task_ref = task_ref.with_updates(status=ExecutionStatus.WAITING.value)
 
-        # ?: Logic to determine if this is a snapshot (e.g., based on
-        # job naming convention)
-        is_snapshot = "snapshot" in job_id.lower()
-        expires_at = get_end_of_day_ts() if is_snapshot else None
+        queue_key = task_ref.build()
 
-        # Log the dispatch with human-readable timestamps
-        expiry_str = epoch_to_iso(expires_at) if expires_at else "NEVER"
+        # 2. GUARD: Use TaskRef for cleaner duplicate detection
+        pattern = f"{CACHE_TASK_NAMESPACE}:*:*:{task_ref.identifier}:*"
+        existing_key_str = next(iter(self.cache.iterkeys(pattern=pattern)), None)
 
-        # GUARD: Prevent duplicate runs for the same partition using pattern matching
-        # This replaces the need for the 'active_run' index key.
-        pattern = f"{CACHE_TASK_NAMESPACE}:*:*:{identifier}:*"
-        existing_key = next(iter(self.cache.iterkeys(pattern=pattern)), None)
-
-        if existing_key:
-            # Key Format: task:STATUS:STAGE:IDENTIFIER:RUN_ID
-            existing_run_id = existing_key.split(":")[-1]
+        if existing_key_str:
+            existing_ref = TaskRef.from_str(existing_key_str)
             LOG.warning(
                 "Partition already has an active run. Skipping queue.",
-                identifier=identifier,
-                active_run_id=existing_run_id,
+                identifier=task_ref.identifier,
+                active_run_id=existing_ref.run_id,
             )
-            return
+            return None
 
-        # Brand new entry
-        if True:  # Replaces the 'if queue_key not in self.cache' check
-            # Brand new entry
-            meta = TaskMetadata(
-                job_id=job_id,
-                run_id=run_id,
-                dataset_id=dataset_id,
-                partition_date=partition_date,
-                status=ExecutionStatus.WAITING.value,
-                config_file=config_file_path,
-                current_stage=current_stage,
-                last_hb=time.time(),
-                expires_at=expires_at,
-            )
-            with self.lock:
-                self.cache[queue_key] = meta
+        is_snapshot = "snapshot" in task_ref.job_id.lower()
+        expires_at = get_end_of_day_ts() if is_snapshot else None
 
-            # Emit WAITING state to database
-            if self.state_store:
-                self.state_store.update_run(
-                    run_id,
-                    JobUpdate(
-                        JOB_ID=job_id,
-                        DATASET_ID=dataset_id,
-                        PARTITION_DATE=partition_date,
-                        JOB_STATUS=meta.status,
-                        CURRENT_STEP=current_stage,
-                        LAST_UPDATED_AT_TS_LC=get_current_timestamp(
-                            strip_tz=STRIP_TZ_FOR_DB
-                        ).isoformat(sep=" "),
-                    ),
-                )
+        # 3. Use t_key properties to populate metadata and state updates
+        meta = TaskMetadata.from_ref(task_ref, config_file_path, expires_at=expires_at)
 
-            LOG.info(
-                "Queued Task",
-                job_id=job_id,
-                run_id=run_id,
-                stage=current_stage,
-                expires=expiry_str,
-            )
+        with self.lock:
+            self.cache[queue_key] = meta
+
+        # Emit WAITING state to database
+        self.state_store.update_run(
+            task_ref.run_id,
+            JobUpdate(
+                JOB_ID=task_ref.job_id,
+                DATASET_ID=task_ref.dataset_id,
+                PARTITION_DATE=task_ref.partition_date,
+                JOB_STATUS=ExecutionStatus.WAITING.value,
+                CURRENT_STAGE=task_ref.stage,
+                LAST_UPDATED_AT_TS_LC=get_current_timestamp(
+                    strip_tz=STRIP_TZ_FOR_DB
+                ).isoformat(sep=" "),
+            ),
+        )
+
+        LOG.info(
+            "Queued Task",
+            job_id=task_ref.job_id,
+            run_id=task_ref.run_id,
+            stage=task_ref.stage,
+        )
+
+        return task_ref
 
     def _process_tasks(self) -> None:
         # 1. Instruct Compute to snapshot current cluster resources for this tick
@@ -183,11 +161,11 @@ class TaskManager:
         for status in valid_statuses:
             for k in self.cache.iterkeys(pattern=f"{CACHE_TASK_NAMESPACE}:{status}:*"):
                 try:
-                    parts = k.split(":")
-                    stage_enum = StageName.from_label(parts[2])
+                    ref_candidate = TaskRef.from_str(k)
+                    stage_enum = StageName.from_label(ref_candidate.stage)
                     priority = STAGES_PRIORITY.get(stage_enum, 0)
                     scored_keys.append((priority, k))
-                except (ValueError, IndexError):
+                except ValueError:
                     continue
 
         # Sort descending by priority score
@@ -196,28 +174,23 @@ class TaskManager:
         dispatch_count = 0
 
         for key in candidate_keys:
-            parts = key.split(":")
-            status = parts[1]
-            stage_label = parts[2]
-            identifier = ":".join(parts[3:6])
-            run_id = parts[6]
-
-            stage_enum = StageName.from_label(stage_label)
+            task_ref = TaskRef.from_str(key)
+            stage_enum = StageName.from_label(task_ref.stage)
 
             # Only lock when we have a potential candidate to update
             task_meta: TaskMetadata = self.cache.get(key)
             if not task_meta:
                 continue
 
-            is_waiting = status == ExecutionStatus.WAITING.value
+            is_waiting = task_ref.status == ExecutionStatus.WAITING.value
             # Case 1: Normal Retry (Timer based)
             is_retry_ready = (
-                status == ExecutionStatus.RETRY.value
+                task_ref.status == ExecutionStatus.RETRY.value
                 and time.time() >= task_meta.last_hb
             )
             # Case 2: Service Outage (Signal based)
             is_blocked_ready = (
-                status == ExecutionStatus.BLOCKED.value
+                task_ref.status == ExecutionStatus.BLOCKED.value
                 and ServiceRegistry.is_healthy(task_meta.blocked_by or "")
                 and time.time() >= task_meta.last_hb
             )
@@ -225,32 +198,31 @@ class TaskManager:
             if not (is_waiting or is_retry_ready or is_blocked_ready):
                 continue
 
-            # Pass the 'key' from the loop into the spawn_worker method
-            ref = self.compute.spawn_worker(stage=stage_enum, key=key)
+            # 1. Update status to DISPATCHED before building the new key
+            # This ensures the cache key reflects the transition correctly.
+            task_meta.status = ExecutionStatus.DISPATCHED.value
+            task_meta.last_hb = time.time()
+
+            new_key = task_ref.build(status=task_meta.status)
+
+            # 2. Pass the NEW authoritative key to the worker
+            ref = self.compute.spawn_worker(stage=stage_enum, key=new_key)
 
             if ref:
-                # SUCCESS: Task has been dispatched to the Ray cluster
-                task_meta.status = ExecutionStatus.DISPATCHED.value
-                task_meta.last_hb = time.time()
-
                 self.state_store.update_run(
-                    run_id,
+                    task_ref.run_id,
                     JobUpdate(
                         JOB_ID=task_meta.job_id,
                         DATASET_ID=task_meta.dataset_id,
                         PARTITION_DATE=task_meta.partition_date,
                         JOB_STATUS=task_meta.status,
-                        CURRENT_STEP=stage_label,
+                        CURRENT_STAGE=task_ref.stage,
                         LAST_UPDATED_AT_TS_LC=get_current_timestamp(
                             strip_tz=STRIP_TZ_FOR_DB
                         ).isoformat(sep=" "),
                     ),
                 )
 
-                new_key = (
-                    f"{CACHE_TASK_NAMESPACE}:{task_meta.status}:{stage_label}:"
-                    f"{identifier}:{run_id}"
-                )
                 with self.lock:
                     # Commit the state transition to cache only if spawn was successful
                     self.cache.pop(key, None)
@@ -263,13 +235,8 @@ class TaskManager:
                     "Dispatching dynamic task",
                     job_id=task_meta.job_id,
                     run_id=task_meta.run_id,
-                    stage=stage_label,
+                    stage=task_ref.stage,
                 )
-
-                # Heartbeat to stay alive in the registry
-                task_meta.last_hb = time.time()
-                with self.lock:
-                    self.cache[key] = task_meta
 
         # STATEFUL LOGGING: Only log if pending count or capacity status changed
         has_pending = len(candidate_keys) > 0
@@ -301,9 +268,12 @@ class TaskManager:
 
         dispatched_statuses = {s.value for s in ExecutionStatus.dispatched_statuses()}
         for key in self.cache.iterkeys(pattern=f"{CACHE_TASK_NAMESPACE}:*:*"):
-            parts = key.split(":")
-            status = parts[1]
-            if status not in dispatched_statuses:
+            try:
+                task_ref = TaskRef.from_str(key)
+            except ValueError:
+                continue
+
+            if task_ref.status not in dispatched_statuses:
                 continue
 
             meta: TaskMetadata = self.cache.get(key)
@@ -311,8 +281,7 @@ class TaskManager:
                 continue
 
             try:
-                stage_label = parts[2]
-                stage_enum = StageName.from_label(stage_label)
+                stage_enum = StageName.from_label(task_ref.stage)
             except ValueError:
                 continue
 
@@ -332,15 +301,15 @@ class TaskManager:
                         key=key,
                     )
                     task = Task(
-                        composite_key=f"{meta.job_id}:{meta.dataset_id}",
-                        run_id=meta.run_id,
-                        partition_date=meta.partition_date,
+                        task_ref=task_ref,
                         worker_id="engine-recovery",
                         exec_ctx=self.exec_ctx,
-                        target_stage=stage_label,
                     )
                     task.update_manifest(
-                        {"status": ExecutionStatus.FAILED, "remarks": "Zombie detected"}
+                        {
+                            "status": ExecutionStatus.FAILED,
+                            "remarks": "Zombie Task detected",
+                        }
                     )
                     task.request_status_sync(TaskSignal.FAIL)
                     task.move_to_folder("FAILED")
@@ -373,55 +342,47 @@ class TaskManager:
         """
         Recovers a stalled task by checking its physical progress.
         """
-        parts = key.split(":")
-        stage_label = parts[2]
-        identifier = ":".join(parts[3:6])
-        run_id = parts[6]
+        task_ref = TaskRef.from_str(key)
 
         # .get() returns Optional[Any], so we check type and None-ness at once
         task_meta = self.cache.get(key)
         if not isinstance(task_meta, TaskMetadata):
             return
 
-        # 1. Verify if the stage actually finished on disk but failed to transit
-        # We check for the .success marker in the current stage's folder
-        if self._check_stage_completion_on_disk(run_id, stage_label):
+        # 1. Verify if the stage actually finished on disk
+        if self._check_stage_completion_on_disk(task_ref.run_id, task_ref.stage):
             # Promotion: Find the next stage label
-            next_stage = StageName.next(stage_label)
+            next_stage = StageName.next(task_ref.stage)
 
             LOG.info(
                 "Recovery: Step was successful on disk. Promoting.",
-                run_id=run_id,
-                from_stage=stage_label,
+                run_id=task_ref.run_id,
+                from_stage=task_ref.stage,
                 to_stage=next_stage,
             )
 
             with self.lock:
                 self.cache.pop(key, None)
                 if next_stage != STAGE_TERMINAL_SENTINEL:
-                    task_meta.status = ExecutionStatus.WAITING.value
-                    new_key = (
-                        f"{CACHE_TASK_NAMESPACE}:{task_meta.status}:{next_stage}:"
-                        f"{identifier}:{run_id}"
+                    new_key = task_ref.build(
+                        status=ExecutionStatus.WAITING.value, stage=next_stage
                     )
+                    task_meta.status = ExecutionStatus.WAITING.value
                     self.cache[new_key] = task_meta
         else:
             # If no symlink exists, the worker died mid-stream or before finalize.
             # Reset to WAITING in the SAME queue to allow a retry.
             LOG.info(
                 "Recovery: No physical proof of success. Resetting for retry.",
-                run_id=run_id,
-                stage=stage_label,
+                run_id=task_ref.run_id,
+                stage=task_ref.stage,
             )
 
             # Rehydrate the Task to perform a proper manifest reset
             task = Task(
-                composite_key=f"{task_meta.job_id}:{task_meta.dataset_id}",
-                run_id=task_meta.run_id,
-                partition_date=task_meta.partition_date,
+                task_ref=task_ref,
                 worker_id="engine-recovery",
                 exec_ctx=self.exec_ctx,
-                target_stage=stage_label,
             )
 
             task.update_manifest(
@@ -447,7 +408,7 @@ class TaskManager:
                         self._active_tasks.pop(ref)
                         break
 
-                new_key = f"{CACHE_TASK_NAMESPACE}:{task_meta.status}:{stage_label}:{identifier}:{run_id}"
+                new_key = task_ref.build(status=ExecutionStatus.WAITING.value)
                 self.cache[new_key] = task_meta
 
     def _check_stage_completion_on_disk(self, run_id: str, stage_name: str) -> bool:

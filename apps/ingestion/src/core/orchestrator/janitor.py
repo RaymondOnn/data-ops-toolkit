@@ -5,8 +5,13 @@ from apps.ingestion.src.core.contexts import ExecutionContext, TaskContext
 from apps.ingestion.src.core.contexts.task import load_task_context
 from apps.ingestion.src.core.models.states import ExpiredState
 from apps.ingestion.src.core.models.task import ExecutionStatus, Task, TaskSignal
+from apps.ingestion.src.core.orchestrator.enums import TaskRef
 from apps.ingestion.src.core.strategies.cleanup.cleanup import CleanupCoordinator
-from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
+from apps.ingestion.src.utils.constants import (
+    CACHE_TASK_NAMESPACE,
+    CONFIG_FILENAME,
+    MANIFEST_FILENAME,
+)
 from loguru import logger
 
 from .enums import JobRecord
@@ -87,10 +92,8 @@ class Janitor:
 
             # 3. Re-queue into the Hot Cache (TaskManager)
             self.tasks.queue_tasks(
-                identifier=task.id,
-                run_id=task.run_id,
+                task_ref=task.task_ref,
                 config_file_path=str(task.folder / CONFIG_FILENAME),
-                current_stage=current_stage,
             )
 
             # 4. Signal the state change (Sync state with DB)
@@ -116,12 +119,22 @@ class Janitor:
         full_reason = f"{reason} | Scheduled: {run.SCHEDULED_TIMESTAMP_LC}"
         LOG.warning(f"Evicting run {run_id} ({full_reason})")
 
+        # Emit expiry state immediately for all expired runs,
+        # regardless of whether they were triggered or not.
+        self.state_store.emit_expiry(run=run, context=task_ctx, reason=full_reason)
+
         # 2. Identity Resolution
         if run.has_been_triggered:
             task = Task(
-                run_id=run_id,
-                composite_key=f"{run.JOB_ID}:{run.DATASET_ID}",
-                partition_date=str(run.PARTITION_DATE or ""),
+                task_ref=TaskRef(
+                    namespace=CACHE_TASK_NAMESPACE,
+                    status=run.JOB_STATUS,
+                    stage=run.CURRENT_STAGE or "UNKNOWN",
+                    job_id=run.JOB_ID,
+                    dataset_id=run.DATASET_ID,
+                    partition_date=str(run.PARTITION_DATE or ""),
+                    run_id=run_id,
+                ),
                 worker_id="janitor-expiry",
                 exec_ctx=self.exec_ctx,
             )

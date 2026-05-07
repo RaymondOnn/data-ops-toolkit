@@ -3,8 +3,10 @@ from datetime import datetime
 from typing import Any, Self
 
 import msgspec
+from apps.ingestion.src.core.models.task.enums import TaskRef
 from apps.ingestion.src.core.models.task.status import ExecutionStatus
 from apps.ingestion.src.utils.constants import (
+    CACHE_TASK_NAMESPACE,
     MISFIRE_GRACE_PERIOD_SECS,
     STRIP_TZ_FOR_DB,
 )
@@ -45,6 +47,35 @@ class TaskMetadata(msgspec.Struct):
     expires_at: float | None = None
     blocked_by: str | None = None
 
+    @classmethod
+    def from_ref(
+        cls, ref: "TaskRef", config_file: str, expires_at: float | None = None
+    ) -> "TaskMetadata":
+        """Standardized factory to create metadata from a reference."""
+        return cls(
+            job_id=ref.job_id,
+            run_id=ref.run_id,
+            dataset_id=ref.dataset_id,
+            partition_date=ref.partition_date,
+            status=ref.status,
+            config_file=config_file,
+            current_stage=ref.stage,
+            last_hb=time.time(),
+            expires_at=expires_at,
+        )
+
+    def to_ref(self) -> TaskRef:
+        """Converts metadata back into a TaskRef identity handle."""
+        return TaskRef(
+            namespace=CACHE_TASK_NAMESPACE,
+            status=self.status,
+            stage=self.current_stage,
+            job_id=self.job_id,
+            dataset_id=self.dataset_id,
+            partition_date=self.partition_date,
+            run_id=self.run_id,
+        )
+
 
 class JobRecord(msgspec.Struct, kw_only=True):
     """Typed record representing a job definition from the database."""
@@ -54,8 +85,8 @@ class JobRecord(msgspec.Struct, kw_only=True):
     SCHEDULED_TIMESTAMP_LC: datetime
     JOB_STATUS: str
     PARTITION_DATE: str | None = None
-    CURRENT_STEP: str | None = None
-    JOB_BITMASK: int = 0
+    CURRENT_STAGE: str | None = None
+    JOB_BITMASK: str | None = None
     IS_SCHEDULED: int = 0
     RETRY_ATTEMPTS: int = 0
     RUN_ID: str
@@ -78,9 +109,14 @@ class JobRecord(msgspec.Struct, kw_only=True):
         return msgspec.convert(data, cls)
 
     def __post_init__(self) -> None:
-        """Validation logic can be added here."""
+        """Normalize state fields and validate identity."""
         if not self.JOB_ID or not self.DATASET_ID:
             raise ValueError(f"Invalid JobRecord: Missing ID for {self}")
+
+        for field in ["CURRENT_STAGE", "JOB_STATUS"]:
+            val = getattr(self, field, None)
+            if isinstance(val, str):
+                super().__setattr__(field, val.upper())
 
     @property
     def has_been_triggered(self) -> bool:
@@ -127,8 +163,8 @@ class JobUpdate(msgspec.Struct, kw_only=True):
     JOB_STATUS: str
     LAST_UPDATED_AT_TS_LC: str
     RETRY_ATTEMPTS: int = 0
-    CURRENT_STEP: str | None = None
-    JOB_BITMASK: int | None = None
+    CURRENT_STAGE: str | None = None
+    JOB_BITMASK: str | None = None
     SOURCE_ROW_COUNT: int | None = None
     FINAL_ROW_COUNT: int | None = None
     REMARKS: str | None = None
@@ -139,8 +175,8 @@ class JobUpdate(msgspec.Struct, kw_only=True):
 
     def __post_init__(self) -> None:
         """Sanitize all fields for normalization (timestamps and stages)."""
-        if isinstance(self.CURRENT_STEP, str):
-            super().__setattr__("CURRENT_STEP", self.CURRENT_STEP.upper())
+        if isinstance(self.CURRENT_STAGE, str):
+            super().__setattr__("CURRENT_STAGE", self.CURRENT_STAGE.upper())
 
         for name, _ in self.__annotations__.items():
             if "TIMESTAMP" in name or name.endswith("_LC"):
@@ -150,7 +186,7 @@ class JobUpdate(msgspec.Struct, kw_only=True):
 
     def __setattr__(self, name: str, value: Any) -> None:
         """Intercepts assignments to ensure data normalization."""
-        if name == "CURRENT_STEP" and isinstance(value, str):
+        if name == "CURRENT_STAGE" and isinstance(value, str):
             value = value.upper()
 
         if "TIMESTAMP" in name or name.endswith("_LC"):

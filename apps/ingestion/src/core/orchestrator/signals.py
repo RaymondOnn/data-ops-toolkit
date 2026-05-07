@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, NamedTuple
 from apps.ingestion.src.utils.common import find_path
 from loguru import logger
 
+from .enums import TaskRef
+
 if TYPE_CHECKING:
     from apps.ingestion.src.core.contexts import ExecutionContext
 
@@ -31,7 +33,7 @@ class InternalEventBus:
 class SignalEvent(NamedTuple):
     """Immutable data representing a detected system event."""
 
-    run_id: str
+    task_ref: TaskRef
     signal_type: str  # .done, .fail, .sync, etc.
     folder_path: Path | None
 
@@ -66,15 +68,17 @@ class SignalProcessor(InternalEventBus):
                 continue
 
             try:
-                _, _, _, run_id = self.exec_ctx.parse_identifier(file.stem)
-                if filter_run_ids and run_id not in filter_run_ids:
+                task_ref = TaskRef.from_signal_stem(file.stem)
+                if filter_run_ids and task_ref.run_id not in filter_run_ids:
                     continue
 
                 events.append(
                     SignalEvent(
-                        run_id=run_id,
+                        task_ref=task_ref,
                         signal_type=file.suffix,
-                        folder_path=find_path(self.exec_ctx.workspace_dir, run_id),
+                        folder_path=find_path(
+                            self.exec_ctx.workspace_dir, task_ref.run_id
+                        ),
                     )
                 )
 

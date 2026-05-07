@@ -9,8 +9,8 @@ CREATE TABLE META.EXECUTION_LOG (
     , END_TIMESTAMP_LC         Nullable(DateTime64(3, 'UTC'))
     , LAST_UPDATED_AT_TS_LC    DateTime64(3, 'UTC') DEFAULT now64(3)
     , JOB_STATUS            LowCardinality(String)
-    , CURRENT_STEP          LowCardinality(Nullable(String))
-    , JOB_BITMASK           UInt16
+    , CURRENT_STAGE          LowCardinality(Nullable(String))
+    , JOB_BITMASK           String --UInt16
     , IS_SCHEDULED          UInt8 -- 1 = Scheduled, 0 = Manual/Ad-hoc
     , WATCH_FILE_PATH       Nullable(String)
     , RUNTIME_OVERRIDES     Nullable(String) -- JSON representation
@@ -21,6 +21,6 @@ CREATE TABLE META.EXECUTION_LOG (
     , REMARKS               Nullable(String)
 )
 ENGINE = MergeTree
-PARTITION BY toYYYYMM(LAST_UPDATED_AT_TS_LC)
+PARTITION BY toYYYYMM(SCHEDULED_TIMESTAMP_LC)
 ORDER BY (JOB_ID, DATASET_ID, RUN_ID, LAST_UPDATED_AT_TS_LC)
 TTL LAST_UPDATED_AT_TS_LC + INTERVAL 12 MONTH;

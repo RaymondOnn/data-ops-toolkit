@@ -1,9 +1,10 @@
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from apps.ingestion.src.core.models.stages.enums import (
     StageName,
 )
 from apps.ingestion.src.core.models.task.enums import TaskSignal
+from apps.ingestion.src.core.models.task.status import ExecutionStatus
 from loguru import logger
 
 from ..base import ResultState
@@ -11,7 +12,6 @@ from .success import SuccessState
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.task.base import Task
-
 
 
 LOG = logger
@@ -35,13 +35,19 @@ class ProgressState(ResultState):
         """
         data = data or {}
 
-        # Use provided next_stage (supports dynamic ordering) or 
+        # Use provided next_stage (supports dynamic ordering) or
         # fallback to static sequence
         next_label = data.get("next_stage")
 
         if not next_label:
             next_label = StageName.next(task.stage.name)
 
+        task.update_manifest(
+            {
+                "current_stage": next_label,
+                "status": ExecutionStatus.WAITING.value,
+            }
+        )
         LOG.info(
             "Task stage successful. Progressing...",
             job_id=task.job_id,

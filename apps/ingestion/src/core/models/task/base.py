@@ -14,7 +14,7 @@ from apps.ingestion.src.utils.common import recursive_merge
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
 from loguru import logger
 
-from .enums import TaskSignal
+from .enums import TaskRef, TaskSignal
 
 LOG = logger
 
@@ -55,20 +55,20 @@ class Task:
 
     def __init__(
         self,
-        run_id: str,
-        composite_key: str,
-        partition_date: str,
+        task_ref: TaskRef,
         worker_id: str,
         exec_ctx: ExecutionContext,
-        target_stage: str = StageName.START.label,
         folder_path: Path | None = None,
     ) -> None:
-        self.job_id, self.dataset_id = composite_key.split(":", 1)
-        self.run_id = run_id
-        self.partition_date = partition_date
+        self.task_ref = task_ref
+        self.job_id = task_ref.job_id
+        self.dataset_id = task_ref.dataset_id
+        self.run_id = task_ref.run_id
+        self.partition_date = task_ref.partition_date
+
         self.worker_id = worker_id
         self.exec_ctx = exec_ctx
-        self.target_stage = target_stage
+        self.target_stage = task_ref.stage
 
         # 1. Resolve physical folder location
         self._folder = folder_path or self.exec_ctx.get_run_path(
@@ -96,11 +96,9 @@ class Task:
         active_path = Path(folder_path)
         run_id = active_path.name
 
-        # The parent name is the full identifier: job_id:dataset_id:partition_date
-        job_id, dataset_id, partition_date, _ = exec_ctx.parse_identifier(
-            f"{active_path.parent.name}:{run_id}"
-        )
-        composite_key = f"{job_id}:{dataset_id}"
+        # Folder pattern: active/{job_id}:{dataset_id}:{partition_date}/{run_id}
+        identifier_parts = active_path.parent.name.split(":")
+        job_id, dataset_id, partition_date = identifier_parts
 
         # Re-hydrate manifest to find the correct target stage if not provided
         # Since we have the path, we can read it directly
@@ -111,21 +109,27 @@ class Task:
                 m = msgspec.json.decode(f.read(), type=TaskManifest)
                 current_stage = m.current_stage
 
-        return cls(
-            composite_key=composite_key,
-            run_id=run_id,
+        # Reconstruct identity (Ref)
+        task_ref = TaskRef(
+            namespace="task",
+            status="UNKNOWN",  # Status will be set by the caller/manifest
+            stage=current_stage,
+            job_id=job_id,
+            dataset_id=dataset_id,
             partition_date=partition_date,
+            run_id=run_id,
+        )
+
+        return cls(
+            task_ref=task_ref,
             worker_id="recovery",
             exec_ctx=exec_ctx,
-            target_stage=current_stage,
             folder_path=active_path,
         )
 
     @property
     def id(self) -> str:
-        return self.exec_ctx.get_task_identifier(
-            self.job_id, self.dataset_id, self.partition_date
-        )
+        return self.task_ref.identifier
 
     @property
     def folder(self) -> Path:

@@ -24,11 +24,12 @@ class ExecutionStage(ABC):
         self.name = stage.label
         self.bitmask = stage.bitmask
 
-    def get_stage(self, offset: int) -> str:
-        idx = EXEC_STAGES.index(self.name)
+    def get_stage(self, offset: int) -> StageName:
+        """Retrieves a stage relative to the current one based on the global order."""
+        current_member = StageName.from_label(self.name)
+        idx = EXEC_STAGES.index(current_member)
         if 0 <= idx + offset < len(EXEC_STAGES):
             return EXEC_STAGES[idx + offset]
-
         raise ValueError(f"Invalid offset: {offset}")
 
     # TODO: Trigger cleanup utility to remove old temporary task folders
@@ -64,16 +65,6 @@ class ExecutionStage(ABC):
             task.set_stage(get_stage_class_by_name(next_label))
 
         return next_label
-
-    def move_to_folder(self, task: "Task", category: str) -> None:
-        """
-        Physically moves the metadata folder to HOLD or QUARANTINE.
-        category: "HOLD" | "QUARANTINE" | "DONE"
-        """
-        LOG.info(
-            "Moving task to terminal directory", category=category, run_id=task.run_id
-        )
-        task.move_to_folder(category)
 
     def finalize(
         self,

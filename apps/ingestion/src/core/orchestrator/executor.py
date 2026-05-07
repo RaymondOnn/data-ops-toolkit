@@ -16,10 +16,10 @@ from apps.ingestion.src.core.models.states import (
     SuccessState,
 )
 from apps.ingestion.src.core.models.task import ExecutionStatus, Task
+from apps.ingestion.src.core.orchestrator.enums import TaskMetadata, TaskRef
 from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.services.registry import ServiceRegistry
 from apps.ingestion.src.utils.common import setup_logger
-from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE
 from apps.ingestion.src.utils.exceptions import RetryTask, RewindTask
 from filelock import FileLock
 from libs.cache.utils import get_cache
@@ -53,10 +53,9 @@ class Executor:
 
     def process_stage(self, key: str) -> None:
         # Key Format: {CACHE_TASK_NAMESPACE}:{status}:{stage}:{job}:{dataset}:{date}:{run_id}
-        parts = key.split(":")
-        current_stage = parts[2]
-        identifier = ":".join(parts[3:6])
-        run_id = parts[6]
+        task_ref = TaskRef.from_str(key)
+        current_stage = task_ref.stage
+        run_id = task_ref.run_id
 
         log = logger.bind(worker_id=self.worker_id, stage=current_stage, run_id=run_id)
 
@@ -71,22 +70,19 @@ class Executor:
             meta.status = ExecutionStatus.RUNNING.value
             meta.last_hb = time.time()
 
-            working_key = (
-                f"{CACHE_TASK_NAMESPACE}:{meta.status}:{current_stage}:"
-                f"{identifier}:{run_id}"
-            )
+            working_key = task_ref.with_updates(status=meta.status).build()
             self.cache[working_key] = meta
 
         try:
             with logger.contextualize(run_id=run_id):
                 # 2. Initialize and Sync Physical State (Disk)
+                # We hydrate the task with a "Running" identity so it can build its own working key
                 task: Task = Task(
-                    composite_key=f"{meta.job_id}:{meta.dataset_id}",
-                    run_id=meta.run_id,
-                    partition_date=meta.partition_date,
+                    task_ref=task_ref.with_updates(
+                        status=ExecutionStatus.RUNNING.value
+                    ),
                     worker_id=self.worker_id,
                     exec_ctx=self.exec_ctx,
-                    target_stage=current_stage,
                 )
 
                 # CRITICAL: Mark work as physically started on disk
@@ -128,16 +124,14 @@ class Executor:
                     task.stage.pre_flight(task)
                     task.execute()
 
-                self._handle_success(
-                    task, working_key, identifier, current_stage, meta, log
-                )
+                self._handle_success(task, log)
 
         except RetryTask as r:
-            self._handle_retry_task(task, working_key, meta, r, log)
+            self._handle_retry_task(task, r, log)
         except RewindTask as rw:
-            self._handle_rewind_task(task, working_key, identifier, meta, rw, log)
+            self._handle_rewind_task(task, rw, log)
         except Exception as e:
-            self._handle_failure(task, working_key, current_stage, e, log)
+            self._handle_failure(task, e, log, meta)
             raise
         finally:
             self.is_busy = False
@@ -145,9 +139,10 @@ class Executor:
             # or before Ray attempts to snapshot it.
             logger.remove()
 
-    def _handle_success(
-        self, task, key, identifier, current_stage, meta, log: "Logger"
-    ):
+    def _handle_success(self, task: Task, log: "Logger"):
+        current_stage = task.task_ref.stage
+        key = task.task_ref.build()
+
         is_success = SuccessState.is_applicable(task)
         log.debug(
             "Post-execution success evaluation",
@@ -176,9 +171,8 @@ class Executor:
 
                     meta_to_move.current_stage = next_label
                     meta_to_move.status = ExecutionStatus.WAITING.value
-                    new_key = (
-                        f"{CACHE_TASK_NAMESPACE}:{meta_to_move.status}:{next_label}:"
-                        f"{identifier}:{meta_to_move.run_id}"
+                    new_key = task.task_ref.build(
+                        status=meta_to_move.status, stage=next_label
                     )
                     self.cache[new_key] = meta_to_move
                 log.info(
@@ -188,7 +182,9 @@ class Executor:
                     task_stage=task.stage.name,
                 )
 
-    def _handle_retry_task(self, task: Task, key, meta, r, log: "Logger"):
+    def _handle_retry_task(self, task: Task, r: RetryTask, log: "Logger"):
+        key = task.task_ref.build()
+
         log.warning("Task signaled RETRY", reason=r.reason, wait=r.wait_seconds)
         RetryState().on_enter(
             task=task,
@@ -206,17 +202,12 @@ class Executor:
                 meta_to_update.blocked_by = r.service_name
                 meta_to_update.last_hb = time.time() + r.wait_seconds
 
-                parts = key.split(":")
-                # New key with updated status
-                new_key = (
-                    f"{CACHE_TASK_NAMESPACE}:{meta_to_update.status}:{parts[2]}:"
-                    f"{':'.join(parts[3:6])}:{parts[6]}"
-                )
+                new_key = task.task_ref.build(status=meta_to_update.status)
                 self.cache[new_key] = meta_to_update
 
-    def _handle_rewind_task(
-        self, task: Task, key, identifier, meta, rw: RewindTask, log: "Logger"
-    ):
+    def _handle_rewind_task(self, task: Task, rw: RewindTask, log: "Logger"):
+        key = task.task_ref.build()
+
         log.warning("Task signaled REWIND", to_stage=rw.target_stage)
         task.update_manifest(
             {
@@ -230,23 +221,42 @@ class Executor:
             if meta_to_move:
                 meta_to_move.current_stage = rw.target_stage
                 meta_to_move.status = ExecutionStatus.WAITING.value
-                new_key = (
-                    f"{CACHE_TASK_NAMESPACE}:{meta_to_move.status}:{rw.target_stage}:"
-                    f"{identifier}:{meta_to_move.run_id}"
+                new_key = task.task_ref.build(
+                    status=meta_to_move.status, stage=rw.target_stage
                 )
                 self.cache[new_key] = meta_to_move
 
     def _handle_failure(
-        self, task: Task, key, current_stage: str, e: Exception, log: "Logger"
+        self, task: Task, e: Exception, log: "Logger", meta: TaskMetadata
     ):
+        current_stage = task.task_ref.stage
+        key = task.task_ref.build()
+
         if RetryState.is_applicable(task, exception=e):
-            # For unhandled but retryable exceptions, we don't have an explicit wait_seconds.
-            # We pass the error message as the reason and let RetryState calculate the backoff.
-            log.warning("Handling unhandled retryable exception", error=str(e))
+            # Log with exception info to see exactly WHERE in the stage it failed
+            log.opt(exception=True).warning(
+                "Stage execution failed but is eligible for retry", stage=current_stage
+            )
             RetryState().on_enter(
                 task=task, data={"message": str(e), "error_type": type(e).__name__}
             )
+            # Update cache to reflect RETRY status
+            with self.lock:
+                self.cache.pop(key, None)  # Remove old RUNNING key
+                # Build new key and metadata from the task's current state (which is RETRY after RetryState.on_enter)
+                new_task_ref = task.task_ref.with_updates(
+                    status=ExecutionStatus.RETRY.value
+                )
+                new_meta = TaskMetadata.from_ref(
+                    new_task_ref,
+                    str(task.context.config_file_path),
+                    expires_at=meta.expires_at,
+                )
+                self.cache[new_task_ref.build()] = new_meta
         else:
+            log.opt(exception=True).error(
+                "Terminal failure in stage execution", stage=current_stage
+            )
             FailedState().on_enter(
                 task=task,
                 data={

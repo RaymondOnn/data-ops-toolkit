@@ -17,6 +17,7 @@ from apps.ingestion.src.core.models.task import (
     TaskSignal,
     create_task_folder,
 )
+from apps.ingestion.src.core.orchestrator.enums import TaskRef
 from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.utils.common import make_short_hash
 from apps.ingestion.src.utils.constants import (
@@ -175,15 +176,16 @@ class Orchestrator:
             return
 
         for event in events:
+            run_id = event.task_ref.run_id
             if event.signal_type == ".done":
-                LOG.success("Task Completion detected", run_id=event.run_id)
+                LOG.success("Task Completion detected", run_id=run_id)
                 if event.folder_path:
                     self.state_store.sync_from_folder(event.folder_path, deep_sync=True)
                     task = Task.from_folder(event.folder_path, self.exec_ctx)
                     self.janitor.cleanup_task(task)
 
             elif event.signal_type == ".fail":
-                LOG.error("Task Failure detected", run_id=event.run_id)
+                LOG.error("Task Failure detected", run_id=run_id)
                 if event.folder_path:
                     # 1. Authoritative Sync: Pull the error details into the log buffer.
                     # We use deep_sync=True to ensure the FINAL_MANIFEST JSON is captured.
@@ -201,10 +203,10 @@ class Orchestrator:
                         event.folder_path, deep_sync=False
                     )
                 else:
-                    self.state_store.update_run(event.run_id, {})
+                    self.state_store.update_run(run_id, {})
 
             elif event.signal_type == ".expired":
-                if run_record := self.state_store.active_registry.get(event.run_id):
+                if run_record := self.state_store.active_registry.get(run_id):
                     self.state_store.emit_expiry(
                         run=run_record, context=None, reason="TTL Expired"
                     )
@@ -558,58 +560,67 @@ class Orchestrator:
         )
 
         for task_ctx in task_contexts:
+            # 1. Create the TaskRef first - this is now the source of truth for identity
             run_id = run_id or generate_run_id()
-            log = LOG.bind(run_id=run_id, job_id=job_id, dataset_id=dataset_id)
-            identifier = self.exec_ctx.get_task_identifier(
+            task_ref = TaskRef(
+                namespace=CACHE_TASK_NAMESPACE,
+                status=ExecutionStatus.PROVISIONED.value,
+                stage=task_ctx.from_stage,
                 job_id=task_ctx.job_id,
                 dataset_id=task_ctx.dataset_id,
                 partition_date=task_ctx.partition_date,
+                run_id=run_id,
             )
-            prefix = f"{identifier}:{run_id}"
 
-            # C. Create the Folder Structure (Composite Key + Run ID)
+            log = LOG.bind(
+                run_id=task_ref.run_id,
+                job_id=task_ref.job_id,
+                dataset_id=task_ref.dataset_id,
+            )
             log.info(
                 "Provisioning new run",
-                run_id=run_id,
-                identifier=identifier,
-                from_stage=task_ctx.from_stage,
+                run_id=task_ref.run_id,
+                identifier=task_ref.identifier,
+                from_stage=task_ref.stage,
             )
 
-            # E. Freeze the Task Context (The instructions for the workers)
-            config_path = self.exec_ctx.active_path / f"{prefix}_{CONFIG_FILENAME}"
+            # 2. Freeze the Task Context using the TaskRef identity
+            config_path = (
+                self.exec_ctx.active_path
+                / f"{task_ref.identifier}:{task_ref.run_id}_{CONFIG_FILENAME}"
+            )
             with config_path.open("wb") as f:
                 f.write(msgspec.json.encode(task_ctx))
 
-            # F. Seed the State Store Cache
-            # This ensures that emit_state finds the record during the handoff,
-            # which is critical for Dumb Mode and preventing validation errors.
-            self.state_store.create_record(
-                job_id=task_ctx.job_id,
-                dataset_id=task_ctx.dataset_id,
-                partition_date=task_ctx.partition_date,
-                run_id=run_id,
-                status=ExecutionStatus.PROVISIONED.value,
-            )
+            # 3. Seed the State Store Registry using the key
+            self.state_store.create_record(task_ref=task_ref)
 
-            # G. Force Workspace Provisioning
-            # Accessing .folder triggers _make_folder() which relocates the config
-            task_folder_path = (
-                self.exec_ctx.active_path
-                / self.exec_ctx.get_task_identifier(
-                    task_ctx.job_id, task_ctx.dataset_id, task_ctx.partition_date
-                )
-                / str(run_id)
+            # 4. Force Workspace Provisioning
+            task_folder_path = self.exec_ctx.get_run_path(
+                task_ref.job_id,
+                task_ref.dataset_id,
+                task_ref.partition_date,
+                task_ref.run_id,
             )
             create_task_folder(
                 folder_path=task_folder_path, source_config_path=config_path
             )
 
-            # 4. Queue to Engine (Immediate move to DiskCache)
-            self.tasks.queue_tasks(
-                identifier=identifier,
-                run_id=run_id,
-                config_file_path=str(config_path),
+            # 5. Queue to Engine
+            # We pass the task_ref directly. queue_tasks will handle the transition to WAITING.
+            queued_ref = self.tasks.queue_tasks(
+                task_ref, config_file_path=str(config_path)
             )
+
+            # Update the state store with the actual TaskKey from the queue
+            if queued_ref:
+                self.state_store.update_run(
+                    task_ref.run_id,
+                    {
+                        "JOB_STATUS": queued_ref.status,
+                        "CURRENT_STAGE": queued_ref.stage,
+                    },
+                )
 
             # 5. Optional: Update DB so it doesn't trigger again immediately
             # self.state_store.update_status(job_id, ExecutionStatus.QUEUED)
