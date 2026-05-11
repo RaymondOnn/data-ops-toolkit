@@ -53,5 +53,5 @@ runs:
         pex --sources-directory apps/${{ inputs.app_name }}/src \
             $LIB_DIRS \
             --no-pypi \
-            --entry-point apps.${{ inputs.app_name }}.__main__:app \
+            --entry-point apps.${{ inputs.app_name }}.__main__:main \
             -o ${{ inputs.app_name }}.pex
