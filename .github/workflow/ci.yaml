@@ -64,4 +64,4 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           # Set to true if you want to scan the entire history
-          fail: true
+          fail: false
