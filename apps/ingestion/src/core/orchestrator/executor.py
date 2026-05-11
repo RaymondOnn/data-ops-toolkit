@@ -2,6 +2,7 @@ import os
 import subprocess
 import time
 import traceback
+from contextlib import suppress
 from typing import TYPE_CHECKING
 
 from apps.ingestion.src.core.contexts import ExecutionContext
@@ -26,7 +27,6 @@ from libs.cache.utils import get_cache
 from loguru import logger
 
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.orchestrator.enums import TaskMetadata
     from loguru import Logger
 
 
@@ -85,9 +85,6 @@ class Executor:
                     exec_ctx=self.exec_ctx,
                 )
 
-                # CRITICAL: Mark work as physically started on disk
-                task.check_in(current_stage)
-
                 setup_logger(
                     log_dir=self.exec_ctx.workspace_dir / "logs",
                     is_prod=self.exec_ctx.is_prod,
@@ -96,8 +93,17 @@ class Executor:
                     enqueue=True,
                 )
 
-                (task.folder / ".retrying").unlink(missing_ok=True)
-                (task.folder / ".blocked").unlink(missing_ok=True)
+                log.info(
+                    "Worker rehydrated task identity",
+                    target_stage=current_stage,
+                    resolved_stage=task.stage.name,
+                )
+
+                # CRITICAL: Mark work as physically started on disk
+                task.check_in(current_stage)
+
+                task.workspace.remove_marker(".retrying")
+                task.workspace.remove_marker(".blocked")
 
                 self.is_busy = True
                 log.info("Executor started processing stage", stage=current_stage)
@@ -164,7 +170,8 @@ class Executor:
                     meta_to_move = self.cache.pop(key, None)
                     if not meta_to_move:
                         log.error(
-                            "Cache key missing during transition. Was it recovered as a zombie?",
+                            "Cache key missing during transition. "
+                            "Was it recovered as a zombie?",
                             key=key,
                         )
                         return
@@ -186,19 +193,22 @@ class Executor:
         key = task.task_ref.build()
 
         log.warning("Task signaled RETRY", reason=r.reason, wait=r.wait_seconds)
-        RetryState().on_enter(
-            task=task,
-            data={
-                "message": r.reason,
-                "service_name": r.service_name,
-                "wait_seconds": r.wait_seconds,
-            },
-        )
+
+        # We catch it here to ensure the Hot Cache update logic below is executed.
+        with suppress(RetryTask):
+            RetryState().on_enter(
+                task=task,
+                data={
+                    "message": r.reason,
+                    "service_name": r.service_name,
+                    "wait_seconds": r.wait_seconds,
+                },
+            )
+
         with self.lock:
             if meta_to_update := self.cache.pop(key, None):
-                meta_to_update.status = (
-                    ExecutionStatus.BLOCKED if r.service_name else ExecutionStatus.RETRY
-                )
+                meta_to_update.status = task.manifest.status.value  # RETRY or BLOCKED
+
                 meta_to_update.blocked_by = r.service_name
                 meta_to_update.last_hb = time.time() + r.wait_seconds
 
@@ -237,22 +247,36 @@ class Executor:
             log.opt(exception=True).warning(
                 "Stage execution failed but is eligible for retry", stage=current_stage
             )
-            RetryState().on_enter(
-                task=task, data={"message": str(e), "error_type": type(e).__name__}
-            )
+
+            # Trigger the RetryState transition. This updates the manifest on disk.
+            # We catch the resulting RetryTask to finish the local cache update.
+            retry_exc = None
+            try:
+                RetryState().on_enter(
+                    task=task, data={"message": str(e), "error_type": type(e).__name__}
+                )
+            except RetryTask as rt:
+                retry_exc = rt
+
             # Update cache to reflect RETRY status
             with self.lock:
                 self.cache.pop(key, None)  # Remove old RUNNING key
-                # Build new key and metadata from the task's current state (which is RETRY after RetryState.on_enter)
-                new_task_ref = task.task_ref.with_updates(
-                    status=ExecutionStatus.RETRY.value
-                )
+
+                # Sync identity with the updated manifest status (handles BLOCKED vs RETRY)
+                new_status = task.manifest.status.value
+                new_task_ref = task.task_ref.with_updates(status=new_status)
                 new_meta = TaskMetadata.from_ref(
                     new_task_ref,
-                    str(task.context.config_file_path),
+                    str(task.workspace.config_path),
                     expires_at=meta.expires_at,
                 )
+                if retry_exc:
+                    new_meta.last_hb = time.time() + retry_exc.wait_seconds
+
                 self.cache[new_task_ref.build()] = new_meta
+
+            if retry_exc:
+                raise retry_exc
         else:
             log.opt(exception=True).error(
                 "Terminal failure in stage execution", stage=current_stage

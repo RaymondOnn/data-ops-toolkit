@@ -67,7 +67,7 @@ class StateStore:
 
     def _create_updated_record(
         self, base_record: JobRecord | None, updates: dict[str, Any]
-    ) -> JobRecord:
+    ) -> JobRecord | None:
         # 1. Convert base record to a mutable dictionary if it exists
         base_dict = msgspec.to_builtins(base_record) if base_record else {}
 
@@ -637,6 +637,11 @@ class StateStore:
                 return
 
             new_record = self._create_updated_record(current, update_dict)
+            if not new_record:
+                LOG.warning(
+                    "Update failed: Invalid data structure", run_id=run_id
+                )
+                return
 
             # --- NEW LOGIC: Only buffer if functional data changed ---
             # We compare the dicts but ignore the 'LAST_UPDATED' timestamp

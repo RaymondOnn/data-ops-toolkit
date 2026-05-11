@@ -7,10 +7,19 @@ inputs:
   force_rebuild_deps:
     description: 'Force rebuild of deps.pex'
     default: 'false'
+  python-version:
+    description: 'Python version to use for the build'
+    default: '3.11'
 
 runs:
   using: "composite"
   steps:
+    - name: Set up Python ${{ inputs.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+        cache: 'pip'
+
     - name: Install uv and pex
       shell: bash
       run: |
@@ -22,7 +31,7 @@ runs:
       uses: actions/cache@v4
       with:
         path: deps.pex
-        key: pex-deps-${{ inputs.app_name }}-${{ hashFiles('uv.lock') }}
+        key: pex-deps-${{ inputs.app_name }}-${{ inputs.python-version }}-${{ hashFiles('uv.lock') }}
 
     - name: Build deps.pex
       if: steps.cache-deps.outputs.cache-hit != 'true' || inputs.force_rebuild_deps == 'true'
@@ -31,7 +40,7 @@ runs:
         uv export --no-dev --project apps/${{ inputs.app_name }} --format requirements.txt > requirements.txt
         sed -i '/-e/d' requirements.txt
         pex -r requirements.txt \
-            --platform manylinux2014_x86_64-cp-311-cp311 \
+            --platform manylinux2014_x86_64-cp-${{ replace(inputs.python-version, '.', '') }}-cp${{ replace(inputs.python-version, '.', '') }} \
             -o deps.pex \
             --runtime-pty \
             --python-shebang="/usr/bin/env python3"

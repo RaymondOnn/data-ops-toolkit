@@ -1,0 +1,108 @@
+name: CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target Environment'
+        default: 'production'
+        type: choice
+        options: [ staging, production ]
+
+jobs:
+  list-apps:
+    runs-on: self-hosted
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      release_id: ${{ steps.set-matrix.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: set-matrix # Combined matrix discovery and release ID generation
+        run: |
+          # Auto-discover apps that contain a src directory
+          APPS=$(find apps -maxdepth 2 -name "src" | cut -d'/' -f2 | jq -R -s -c 'split("\n")[:-1]')
+          echo "matrix=$APPS" >> $GITHUB_OUTPUT
+          echo "release_id=$(date +%Y%m%d%H%M%S)-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+  build-and-plan:
+    needs: list-apps
+    runs-on: self-hosted
+    strategy:
+      matrix:
+        app: ${{ fromJson(needs.list-apps.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build PEX Artifacts
+        uses: ./.github/actions/build-pex
+        with:
+          app_name: ${{ matrix.app }}
+
+      - name: Setup SSH Access
+        uses: ./.github/actions/setup-ssh
+        with:
+          private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          host: ${{ secrets.SSH_HOST }}
+
+      - name: Rsync Dry Run
+        env:
+          CURRENT_DIR: /opt/apps/${{ matrix.app }}/current
+        run: |
+          echo "### 🚀 Deployment Plan for ${{ matrix.app }}" >> $GITHUB_STEP_SUMMARY
+          echo "🔍 Comparing build artifacts with the currently active version on the server..." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### Change Set (rsync itemized output)" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          # -i: itemize-changes, -v: verbose, -n: dry-run
+          # --max-delete=1: Safety switch to prevent accidental mass deletion
+          # -z added to dry-run to accurately reflect compression savings
+          rsync -ivzn --delete --max-delete=2 ./*.pex ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:$CURRENT_DIR >> $GITHUB_STEP_SUMMARY 2>&1 || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> [!IMPORTANT]" >> $GITHUB_STEP_SUMMARY
+          echo "> Please review the changes above before approving the deployment gate." >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pex-artifacts-${{ matrix.app }}
+          path: "*.pex"
+          retention-days: 1
+
+  deploy:
+    needs: [list-apps, build-and-plan]
+    runs-on: self-hosted
+    environment: ${{ github.event.inputs.environment || 'production' }} # 🛑 This is your Approval Gate
+    strategy:
+      matrix:
+        app: ${{ fromJson(needs.list-apps.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: pex-artifacts-${{ matrix.app }}
+          path: ./dist
+
+      - name: Setup SSH Access
+        uses: ./.github/actions/setup-ssh
+        with:
+          private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          host: ${{ secrets.SSH_HOST }}
+
+      - name: Atomic Deploy
+        uses: ./.github/actions/atomic-deploy
+        with:
+          ssh_host: ${{ secrets.SSH_HOST }}
+          ssh_user: ${{ secrets.SSH_USER }}
+          app_name: ${{ matrix.app }}
+          release_id: ${{ needs.list-apps.outputs.release_id }}
+          dist_path: "./dist"
+
+      - name: Notify Success
+        run: echo "✅ ${{ matrix.app }} deployed successfully."

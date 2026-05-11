@@ -12,6 +12,7 @@ __pycache__
 .cache
 *.egg-info/
 **/.secrets.json
+**/.env
 
 # Infrastructure temporary files
 **/infra/**/.tmp/

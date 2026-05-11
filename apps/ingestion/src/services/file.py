@@ -262,12 +262,11 @@ class StandardArchiveService(StorageArchive):
     """Standard archival for job artifacts and logs."""
 
     def __init__(self, name: str, **config: Any) -> None:
-        url = config.pop("url", "s3://archive-bucket")
         storage_options = config.pop("storage_options", {})
 
         super().__init__(
             name=name,
-            url=url,
+            url=config.pop("url"),
             capabilities={FileSystemSkills.ARCHIVE},
             storage_options=storage_options,
             **config,

@@ -1,5 +1,4 @@
 import logging
-import time
 from typing import Any
 
 import fsspec
@@ -15,7 +14,7 @@ class S3Client(FileSystemClient):
 
     Storage Options:
         - key (str): AWS Access Key ID
-        - secret (str): AWS Secret Access Key
+        - password (str): AWS Secret Access Key
         - token (str): Temporary session token
         - client_kwargs (dict): e.g., {'region_name': 'us-east-1', 'endpoint_url': '...'}
         - config_kwargs (dict): e.g., {'retries': {'max_attempts': 10}}
@@ -29,29 +28,28 @@ class S3Client(FileSystemClient):
     def fs(self) -> S3FileSystem:
         """Establishes the S3 connection using mapped credentials."""
         if not hasattr(self, "_fs") or self._fs is None:
-            # Map generic 'password' to S3-specific 'secret'
-            if "password" in self.opts:
-                self.opts["secret"] = self.opts.pop("password")
+            # Singleton access: Retrieves the master session configured at app startup
+            from libs.cloud.aws import AWSClient, AWSClientConfig
 
-            # Abstracting Mocking logic:
-            # If an endpoint_url is provided (Moto server or internal mock),
-            # ensure the filesystem is configured for it.
-            if "endpoint_url" in self.opts:
-                self.opts.setdefault("use_ssl", False)
-                self.opts.setdefault("anon", False)
+            client_cfg = self.opts["client"]
+            aws = AWSClient(
+                config=AWSClientConfig(
+                    region=client_cfg["region"],
+                    sts_endpoint_url=client_cfg["sts_endpoint_url"],
+                    role_arn=client_cfg["role_arn"],
+                    profile_name=client_cfg.get("profile_name"),
+                    aws_access_key_id=client_cfg.get("aws_access_key_id"),
+                    # Allow 'password' as an alias for secret key
+                    aws_secret_access_key=client_cfg.get("password"),  
+                )
+            )
+
+            # Inject AWS identity from singleton if not explicitly provided.
+            # This ensures S3 uses the shared session (and STS refresh logic)
+            # without requiring secrets to be passed for IAM-based access.
+            self.opts.setdefault("session", aws.get_session())
+            self.opts.setdefault("region_name", aws.config.region)
 
             self._fs: S3FileSystem = fsspec.filesystem("s3", **self.opts)
 
         return self._fs
-
-    def reconnect(self, max_retries: int = 3) -> None:
-        """Exponential backoff for long 50M row streams."""
-
-        for i in range(max_retries):
-            try:
-                self._fs = None  # Force clear
-                return
-            except Exception:
-                if i == max_retries - 1:
-                    raise
-                time.sleep(2**i)

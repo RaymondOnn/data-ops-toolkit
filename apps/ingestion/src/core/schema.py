@@ -16,62 +16,56 @@ def apply_schema_contract(df: pl.DataFrame, context: ReaderContext) -> pl.DataFr
     for hashing/casting and reduce memory usage by dropping extra cols immediately.
     """
     schema_items = context.schema_items
-    if not schema_items:
+
+    # Guard: If no schema is defined or the batch arrived without columns,
+    # skip processing to avoid ColumnNotFound errors.
+    if not schema_items or df.width == 0:
         return df
 
     exprs = []
     for item in schema_items:
+        # 1. Normalize Source Column (Handle CSV 'None' strings)
         s_col = item.get("source_col")
+        if s_col in (None, "None", "null", ""):
+            s_col = None
+
         t_col = item["target_col"]
 
-        # 1. Resolve Polars type using the Canonical Mapper
-        target_ptype = TypeResolver.resolve(context.source_type, item["target_dtype"])
+        # 2. Resolve Polars type using the Canonical Mapper
+        target_ptype = TypeResolver.resolve_to_polars(
+            context.source_type, item["target_dtype"]
+        )
 
-        # 1. Handle Audit Columns (Internal Flag + No Source Column)
-        if not s_col and t_col.startswith("_"):
-            if t_col == "_ingested_at":
+        # 3. Handle Audit/Literal Columns (No physical source column)
+        if s_col is None and t_col.startswith("_"):
+            if t_col in ("_created_at_ts", "_ingested_at"):
                 expr = pl.lit(time.time())
-                continue
-
-            if t_col == "_partition":
+            elif t_col == "_partition":
                 expr = pl.lit(context.partition_date)
-                continue
-
-            if t_col == "_run_id":
+            elif t_col == "_run_id":
                 expr = pl.lit(context.run_id)
-                continue
-
-            if t_col == "_source_host":
+            elif t_col in ("_source", "_source_host"):
                 expr = pl.lit(context.source_identifier)
-
             else:
                 expr = pl.lit(None)
 
-            exprs.append(expr.cast(pl.Utf8).alias(t_col))
-            continue
+            # Directly cast literal to target type and alias
+            exprs.append(expr.cast(target_ptype).alias(t_col))
 
-        # 2. Defensive: String-first to avoid type-inference crashes
-        expr = pl.col(s_col).cast(pl.Utf8)
+        else:
+            # 4. Standard Columns: Cast to String first for stability
+            expr = pl.col(str(s_col)).cast(pl.String)
 
-        # 2. Masking (Default: Hash)
-        mask_type = item.get("masking_type", "hash")
-        if mask_type == "hash":
-            # Fast Rust-based hashing
-            expr = expr.str.hash(seed=42).cast(pl.Utf8)
-        elif mask_type == "fixed":
-            expr = pl.lit("MASKED_VALUE")
+            # 5. Masking Logic
+            # Default to 'none' to prevent accidental hashing of non-PII columns like dates.
+            mask_val = str(item.get("masking", "none")).lower()
+            if mask_val == "hash":
+                expr = expr.hash(seed=42).cast(pl.String)
+            elif mask_val == "fixed":
+                expr = pl.lit("MASKED_VALUE")
 
-        # 3. Final Cast & Rename
-        exprs.append(expr.cast(target_ptype).alias(t_col))
+            # 6. Final Cast to target type (Int64, Date, etc.) and Rename
+            exprs.append(expr.cast(target_ptype).alias(t_col))
 
     # Single pass selection: Renames, Casts, and Drops extra columns
     return df.select(exprs)
-
-
-# def generate_quarantine_report(lf: pl.LazyFrame):
-#     # Only collect a tiny sample for debugging (e.g., 100 rows)
-#     report_sample = lf.filter(pl.col("_is_quarantined")).limit(100).collect()
-
-#     # This matches your 'masked_samples' requirement without loading 50M rows
-#     return report_sample.to_dicts()
-#     return report_sample.to_dicts()

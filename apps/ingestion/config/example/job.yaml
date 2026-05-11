@@ -28,7 +28,8 @@ datasets:
 
         # Database Source
         type: database
-        table_name: "production.orders" # For API: "/v1/customers"
+        table_name: "production.orders"
+        # For delta load mode
         filter_sql: "status = 'COMPLETED' AND updated_at >= {{partition_date}}"        
 
         # API Source
@@ -66,12 +67,11 @@ datasets:
       service_ref: "clickhouse"
       sink_params:
         type: database
-        table_name: "TEST.ORDERS"
+        identifier: "TEST.ORDERS"
 
         type: blob
         folder_path: "s3://bucket/processed/orders/"
 
-      sink_identifier: TEST.ORDERS
   
     
     # audit:

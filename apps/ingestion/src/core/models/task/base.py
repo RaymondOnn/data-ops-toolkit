@@ -1,5 +1,3 @@
-import os
-import shutil
 import time
 from pathlib import Path
 from typing import Any, Self
@@ -11,54 +9,24 @@ from apps.ingestion.src.core.models.stages.enums import StageName
 from apps.ingestion.src.core.models.task.manifest import TaskManifest
 from apps.ingestion.src.core.models.task.status import ExecutionStatus
 from apps.ingestion.src.utils.common import recursive_merge
-from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
 from loguru import logger
 
 from .enums import TaskRef, TaskSignal
+from .workspace import TaskWorkspace
 
 LOG = logger
-
-
-def create_task_folder(
-    folder_path: Path | str,
-    source_config_path: Path,  # The path to the config file in active_path
-) -> None:
-    """
-    Creates the task's dedicated workspace folder and relocates its config file.
-    This ensures that when a task is marked PROVISIONED, its physical files exist.
-    """
-    # 1. Determine the final destination folder
-    task_folder = Path(folder_path)
-
-    # 2. Physically create the folder if missing
-    if not task_folder.exists():
-        LOG.info("Creating job run directory", path=str(task_folder))
-        task_folder.mkdir(parents=True, exist_ok=True)
-
-    # 3. Relocate the config file from the active root to the task's folder
-    dest_config_path = task_folder / CONFIG_FILENAME
-
-    if source_config_path.exists() and not dest_config_path.exists():
-        LOG.info(
-            "Relocating configuration file",
-            src=str(source_config_path),
-            dst=str(dest_config_path),
-        )
-        shutil.move(source_config_path, dest_config_path)
 
 
 # TODO: Rename folders to include worker id?
 class Task:
     _stage: ExecutionStage
-    _folder: Path
-    _manifest_path: Path
 
     def __init__(
         self,
         task_ref: TaskRef,
         worker_id: str,
         exec_ctx: ExecutionContext,
-        folder_path: Path | None = None,
+        workspace: TaskWorkspace | None = None,
     ) -> None:
         self.task_ref = task_ref
         self.job_id = task_ref.job_id
@@ -70,11 +38,14 @@ class Task:
         self.exec_ctx = exec_ctx
         self.target_stage = task_ref.stage
 
-        # 1. Resolve physical folder location
-        self._folder = folder_path or self.exec_ctx.get_run_path(
-            self.job_id, self.dataset_id, self.partition_date, self.run_id
+        # 1. Identity the workspace (The storage driver)
+        self.workspace = workspace or TaskWorkspace(
+            job_id=self.job_id,
+            dataset_id=self.dataset_id,
+            partition_date=self.partition_date,
+            run_id=self.run_id,
+            exec_ctx=self.exec_ctx,
         )
-        self._manifest_path = self._folder / "manifest.json"
 
         # Immediately set the current stage based on the target_stage from the engine
         # This ensures the Task object knows what stage it's supposed to execute
@@ -102,12 +73,24 @@ class Task:
 
         # Re-hydrate manifest to find the correct target stage if not provided
         # Since we have the path, we can read it directly
-        manifest_path = active_path / MANIFEST_FILENAME
-        current_stage = target_stage.label if target_stage else StageName.START.label
-        if manifest_path.exists():
-            with manifest_path.open("rb") as f:
-                m = msgspec.json.decode(f.read(), type=TaskManifest)
-                current_stage = m.current_stage
+        workspace = TaskWorkspace(
+            job_id=job_id,
+            dataset_id=dataset_id,
+            partition_date=partition_date,
+            run_id=run_id,
+            exec_ctx=exec_ctx,
+        )
+        m = workspace.read_manifest()
+        current_stage = m.current_stage or (
+            target_stage.label if target_stage else StageName.START.label
+        )
+
+        LOG.debug(
+            "Task rehydrated from folder",
+            run_id=run_id,
+            manifest_stage=m.current_stage,
+            resolved_stage=current_stage,
+        )
 
         # Reconstruct identity (Ref)
         task_ref = TaskRef(
@@ -124,7 +107,7 @@ class Task:
             task_ref=task_ref,
             worker_id="recovery",
             exec_ctx=exec_ctx,
-            folder_path=active_path,
+            workspace=workspace,
         )
 
     @property
@@ -133,36 +116,12 @@ class Task:
 
     @property
     def folder(self) -> Path:
-        """
-        Lazily creates the composite structure:
-        active/[job_id]:[dataset]_[partition_date]/[run_id]
-        """
-        # 1. Physically create the folder if missing
-        if not self._folder.exists():
-            LOG.info("Creating job run directory", path=str(self._folder))
-            self._folder.mkdir(parents=True, exist_ok=True)
-
-        return self._folder
+        """DEPRECATED: Use workspace.run_url for cloud compatibility."""
+        return self.workspace.run_path
 
     @property
     def manifest(self) -> TaskManifest:
-        """
-        Dynamic accessor. Reads manifest from disk on demand.
-        Ensures we don't hold JSON objects for thousands of tasks in RAM.
-        """
-        if not self._manifest_path.exists() or self._manifest_path.stat().st_size == 0:
-            # Return a default manifest if file is missing/corrupt
-            return TaskManifest(
-                job_id=self.job_id,
-                run_id=self.run_id,
-                dataset_id=self.dataset_id,
-                current_stage=self.target_stage,
-                bitmask=0,
-                status=ExecutionStatus.UNKNOWN,
-            )
-
-        with self._manifest_path.open(mode="rb") as f:
-            return msgspec.json.decode(f.read(), type=TaskManifest)
+        return self.workspace.read_manifest()
 
     @property
     def is_dispatched(self) -> bool:
@@ -178,19 +137,13 @@ class Task:
         # Local import to prevent circular dependency
         from apps.ingestion.src.core.contexts import TaskContext
 
-        try:
-            # Priority 1: Check for the standardized 'config.json'
-            config_path = self.folder / CONFIG_FILENAME
-            with config_path.open(mode="rb") as f:
-                return msgspec.json.decode(f.read(), type=TaskContext)
-        except (FileNotFoundError, IndexError, StopIteration):
-            LOG.debug(
-                "TaskContext configuration missing on disk", folder=str(self.folder)
-            )
-            # Return an empty/default context if appropriate for your logic
+        if not self.workspace.config_path.exists():
             raise FileNotFoundError(
-                f"Config for task {self.id} not found in {self.folder}"
-            ) from None
+                f"Config for task {self.id} not found at {self.workspace.config_path}"
+            )
+
+        with self.workspace.config_path.open(mode="rb") as f:
+            return msgspec.json.decode(f.read(), type=TaskContext)
 
     @property
     def stage(self) -> ExecutionStage:
@@ -249,39 +202,18 @@ class Task:
         Performs an atomic partial update directly to the disk.
         """
         updates = updates or {}
-
-        # 1. Read current state as a raw dictionary.
-        # We avoid using self.manifest here because it performs strict type
-        # validation which will crash if the disk state is partially updated.
-        if not self._manifest_path.exists() or self._manifest_path.stat().st_size == 0:
-            data = msgspec.to_builtins(self.manifest)
-        else:
-            with self._manifest_path.open("rb") as f:
-                data = msgspec.json.decode(f.read())
+        data = msgspec.to_builtins(self.manifest)
 
         # 2. Apply updates using a recursive deep merge
         recursive_merge(data, updates)
-
         LOG.debug("Updating manifest", run_id=self.run_id, updates=updates)
-
-        # 3. Atomic Write to avoid corruption during crashes
-        # (Write to .tmp then replace)
-        tmp_path = self._manifest_path.with_suffix(".tmp")
-        self._folder.mkdir(parents=True, exist_ok=True)
-        with tmp_path.open(mode="wb") as f:
-            f.write(msgspec.json.encode(data))
-            f.flush()
-            os.fsync(f.fileno())  # Ensure bits are physically on the platter
-        tmp_path.replace(self._manifest_path)
+        self.workspace.write_manifest(data)
 
     def check_in(self, stage_name: str) -> None:
         """
         The 'Step Check-in': Mark the start of a process on disk immediately.
         Ensures the folder reflects the current stage if a crash/outage occurs.
         """
-        # Ensure workspace is provisioned (relocates config if needed
-        _ = self.folder
-
         updates: dict[str, Any] = {
             "current_stage": stage_name,
             "status": ExecutionStatus.RUNNING,
@@ -289,7 +221,7 @@ class Task:
 
         # If the manifest doesn't exist yet, we perform a "Fat Initial Update"
         # that includes all the required header fields in one go.
-        if not self._manifest_path.exists() or self._manifest_path.stat().st_size == 0:
+        if not self.workspace.manifest_path.exists():
             updates.update(
                 {
                     "job_id": self.job_id,
@@ -307,107 +239,35 @@ class Task:
         Physically relocates the metadata folder (active -> HOLD/FAILED).
         Because data is in /data/ vault via symlinks, this move is instant.
         """
-        # Target: e.g., /opt/app/stages/HOLD/123/run_abc
-        new_path = Path(self.exec_ctx.workspace_dir) / stage / self.id / self.run_id
-        new_path = self.exec_ctx.get_run_path(
-            self.job_id,
-            self.dataset_id,
-            self.partition_date,
-            self.run_id,
-            category=stage,
-        )
-        new_path.parent.mkdir(parents=True, exist_ok=True)
-
-        if self.folder.exists():
-            LOG.info(
-                "Relocating metadata folder", src=str(self.folder), dst=str(new_path)
-            )
-
-            # Atomic move across the filesystem
-            shutil.move(str(self.folder), str(new_path))
-
-            # Update internal references so further updates hit the new home
-            self._folder = new_path
-            self._manifest_path = new_path / "manifest.json"
+        self.workspace.relocate(stage)
 
     def request_status_sync(self, signal: TaskSignal = TaskSignal.SYNC) -> None:
         """
         Drops a signal file to notify the Orchestrator of a state change.
         """
-        # 2. Define the signal path
-        # Path: /data/signals/{run_id}.stage_name.bitmask.sync
-        signal_dir = self.exec_ctx.signal_path
-        signal_dir.mkdir(parents=True, exist_ok=True)
-
-        # 2. Drop the Signal
         ext = f".{signal.value.casefold()}"
-
-        # We embed metadata in the filename so the Orchestrator
-        # might not even need to open the manifest for simple status updates.
-        # Filename contains run_id for Orchestrator lookup
         signal_filename = self.exec_ctx.get_signal_name(
             self.job_id, self.dataset_id, self.partition_date, self.run_id, ext
         )
-        signal_path = signal_dir / signal_filename
 
-        LOG.debug(
-            "Dropping state sync signal: {signal}",
-            name=signal_path,
-            signal=signal.value,
-        )
-        signal_path.touch()  # Create hidden/temp
+        self.workspace.drop_signal(signal_filename)
 
         if signal == TaskSignal.RETRY:
-            (self.folder / ".retrying").touch()
+            self.workspace.touch_marker(".retrying")
 
     def purge_metadata(self) -> None:
-        """Deletes the task metadata folder (active, FAILED, HOLD, etc)."""
-        # Defensive: Prevent catastrophic deletion if IDs are malformed
-        if not self.job_id or len(self.job_id) < 3:
-            LOG.error(
-                "Refusing to purge metadata: job_id is too short", job_id=self.job_id
-            )
-            return
-
-        if self._folder.exists():
-            LOG.debug("Purging task workspace", path=str(self._folder))
-            shutil.rmtree(self._folder)
+        self.workspace.purge(include_vaults=False)
 
     def purge_data_vaults(self, stages: list[str] | None = None) -> None:
-        """
-        Physically deletes data artifacts in the data vaults.
-        Optional 'stages' list allows targeting e.g., only 'transform' data.
-        """
-        if not self.job_id or len(self.job_id) < 3:
-            LOG.error(
-                "Refusing to purge vaults: job_id is too short", job_id=self.job_id
-            )
-            return
-
-        data_root = self.exec_ctx.data_path
-        if data_root.exists():
-            for stage_dir in data_root.iterdir():
-                if not stage_dir.is_dir():
-                    continue
-
-                # If specific stages requested, skip others
-                if stages and stage_dir.name not in stages:
-                    continue
-
-                # Clean up all data folders belonging to this job ID
-                # Pattern: {job_id}_*
-                for physical_folder in stage_dir.glob(f"{self.job_id}_*"):
-                    try:
-                        shutil.rmtree(physical_folder)
-                        LOG.debug("Purged data vault", folder=physical_folder.name)
-                    except Exception as e:
-                        LOG.error(
-                            "Vault purge failed",
-                            folder=physical_folder.name,
-                            error=str(e),
-                        )
+        # Placeholder for targeted vault cleaning if workspace.purge is too broad
+        pass
 
     def purge(self) -> None:
         """Full purge of metadata and all data vaults."""
-        self.purge_metadata()
-        self.purge_data_vaults()
+        self.workspace.purge(include_vaults=True)
+
+
+def create_task_folder(folder_path: Any, source_config_path: Path) -> None:
+    """Legacy helper: Re-routing to the Task identity to handle provisioning."""
+    # This function is now just a bridge until Orchestrator is updated
+    pass

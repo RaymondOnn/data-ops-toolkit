@@ -15,7 +15,6 @@ from apps.ingestion.src.core.models.task import (
     ExecutionStatus,
     Task,
     TaskSignal,
-    create_task_folder,
 )
 from apps.ingestion.src.core.orchestrator.enums import TaskRef
 from apps.ingestion.src.services.factory import ServiceFactory
@@ -595,16 +594,13 @@ class Orchestrator:
             # 3. Seed the State Store Registry using the key
             self.state_store.create_record(task_ref=task_ref)
 
-            # 4. Force Workspace Provisioning
-            task_folder_path = self.exec_ctx.get_run_path(
-                task_ref.job_id,
-                task_ref.dataset_id,
-                task_ref.partition_date,
-                task_ref.run_id,
+            # 4. Workspace Provisioning (Using Task identity)
+            task = Task(
+                task_ref=task_ref,
+                worker_id="orchestrator",
+                exec_ctx=self.exec_ctx,
             )
-            create_task_folder(
-                folder_path=task_folder_path, source_config_path=config_path
-            )
+            task.workspace.provision(config_path)
 
             # 5. Queue to Engine
             # We pass the task_ref directly. queue_tasks will handle the transition to WAITING.

@@ -78,8 +78,8 @@ class RetryState(ResultState):
             # Marker for connectivity-based retries (Engine waits for signal/health)
             wait = wait or 300
             message = f"Service {service_name} down"
-            (task.folder / ".blocked").touch()
-            (task.folder / ".retrying").unlink(missing_ok=True)
+            task.workspace.touch_marker(".blocked")
+            task.workspace.remove_marker(".retrying")
         else:
             # Marker for normal transient retries (Engine waits for timer)
             wait = min(600, (2**retry_count) * 30)
@@ -91,10 +91,10 @@ class RetryState(ResultState):
                 "wait_seconds": wait,
                 "attempt": task.manifest.retry_count + 1,
             }
-            (task.folder / ".retrying").write_text(
-                msgspec.json.encode(retry_info).decode()
+            task.workspace.write_text(
+                ".retrying", msgspec.json.encode(retry_info).decode()
             )
-            (task.folder / ".blocked").unlink(missing_ok=True)
+            task.workspace.remove_marker(".blocked")
 
         task.update_manifest(
             {

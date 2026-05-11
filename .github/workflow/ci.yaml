@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-format:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install Packages
+        run: pip install ruff pex
+      - name: Install Tooling
+        run: pip install ruff pex pyright
+      - name: Install Project Dependencies
+        # Required so pyright can resolve imports from workspace libs
+        run: pip install -e ".[test]"
+      - name: Run Ruff (Lint & Format)
+        run: |
+          ruff format --check .
+          ruff check .
+      - name: Run Pyright (Type Check)
+        run: pyright .
+      - name: Run pip-audit
+        run: |
+          pip install pip-audit
+          pip-audit
+      - name: Verify PEX Reproducibility
+        env:
+          PEX_DETERMINISTIC_BINARIES: 1
+        run: |
+          # Build the artifact twice
+          pex . -o build1.pex
+          pex . -o build2.pex
+          
+          # Verify binary identity
+          sha256sum build1.pex build2.pex
+          diff build1.pex build2.pex
+          echo "✅ PEX artifacts are deterministic and reproducible."
+
+  scan-secrets:
+    name: Scan Secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Secrets Scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Set to true if you want to scan the entire history
+          fail: true

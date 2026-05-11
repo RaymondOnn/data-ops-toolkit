@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import msgspec
 from apps.ingestion.src.core.models.task import Task, TaskSignal
@@ -22,10 +23,16 @@ class ArchiveStage(ExecutionStage):
     def pre_flight(self, task: "Task") -> None:
         """Verify source connectivity from the execution node."""
         task_ctx = task.context
-        if task_ctx.archive.enabled:
+        if task_ctx.archive.enabled and task_ctx.archive.config:
             self.service = ServiceFactory.get_service(
                 service_type=str(task_ctx.archive.type), **task_ctx.archive.config
             )
+
+            # Verify that the archive destination actually exists.
+            if not self.service.client.exists(self.service.url):
+                raise ConnectionError(
+                    f"Archive pre-flight failed: Destination '{self.service.url}' is unreachable or does not exist."
+                )
 
     def execute(self, task: Task) -> str:
         """
@@ -36,23 +43,32 @@ class ArchiveStage(ExecutionStage):
 
         task_ctx = task.context
         LOG.info(
-            "ArchiveStage started: Beginning finalization and cleanup",
+            "ArchiveStage started",
             job_id=task.job_id,
             run_id=task.run_id,
         )
 
         start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
 
-
         try:
             # 1. OPTIONAL ARCHIVAL
             # Subject to privacy requirements defined in job_config
             final_archive_path = None
             if task_ctx.archive.enabled:
+                if not task_ctx.archive.base_path:
+                    raise ValueError("Archive base path is required for archival.")
+                # Establish the root archival path for this specific run
+                final_archive_path = (
+                    Path(task_ctx.archive.base_path)
+                    / task.job_id
+                    / task.partition_date
+                    / task.run_id
+                )
+
                 # 1. Archive Parquet Files
                 # We archive data from the 'data/' vault.
                 # This includes both the Extract (Sanitized) and Transform results.
-                self._archive_parquet_data(self.service, task)
+                self._archive_parquet_data(self.service, task, str(final_archive_path))
 
             # 2. Finalize Timing
             end_ts = get_current_timestamp(strip_tz=True)
@@ -93,19 +109,22 @@ class ArchiveStage(ExecutionStage):
             self.finalize(task, exception=e)
             raise
 
-    def _archive_parquet_data(self, object_store: Archive, task: Task) -> None:
+    def _archive_parquet_data(
+        self, object_store: Archive, task: Task, archive_root: str
+    ) -> None:
         """
         Decision: Move files to the Archive location defined in the Context.
         Standardizing on: archive/{job_id}/{run_id}/{stage}/
         """
-        archive_root = f"{task.context.archive.base_path}/{task.job_id}/{task.run_id}"
 
         # We loop through the stages we want to keep
-        for stage in ["extract", "transform"]:
+        for stage in [StageName.EXTRACT, StageName.TRANSFORM]:
+            # Using .label ensures we use the case-folded string expected by the filesystem
+            label = stage.label
             # Follow the active symlink to find the physical data
-            src_folder = task.folder.resolve() / stage
+            src_folder = task.folder.resolve() / label
             if src_folder.exists():
-                dest_folder = f"{archive_root}/{stage}"
+                dest_folder = f"{archive_root}/{label}"
                 object_store.archive_data(
                     source_dir=src_folder, archive_path=dest_folder
                 )
@@ -120,5 +139,6 @@ class ArchiveStage(ExecutionStage):
 
         Returns an ISO-formatted string representing the retention expiry date.
         """
-        retention_days = getattr(job.context, "retention_days", 2555)  # 7 years default
+        # retention_days is nested within the archive configuration
+        retention_days = getattr(job.context.archive, "retention_days", 2555) or 2555
         return (end_timestamp + timedelta(days=retention_days)).date().isoformat()

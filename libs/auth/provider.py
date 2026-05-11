@@ -68,16 +68,31 @@ class LocalSecretProvider(SecretProvider):
 class AWSSecretProvider(SecretProvider):
     """For Production: Fetches from AWS Secrets Manager."""
 
-    def __init__(self, session: Any | None = None, **config) -> None:
-        import boto3
+    def __init__(self, **config) -> None:
+        """
+        :param aws_client: An instance of libs.cloud.aws.AWSClient (Singleton)
+        """
+        
+        from libs.cloud.aws import AWSClient, AWSClientConfig
 
-        self.config = config
-        LOG.info(
-            "Initializing AWSSecretProvider", extra={"region": config.get("region")}
+        # Standard library unpacking - no msgspec for shared libs
+        client_cfg = config.get("client", {})
+        aws_config = AWSClientConfig(
+            region=client_cfg.get("region", "us-east-1"),
+            sts_endpoint_url=client_cfg.get("sts_endpoint_url"),
+            role_arn=client_cfg.get("role_arn"),
+            profile_name=client_cfg.get("profile_name"),
+            aws_access_key_id=client_cfg.get("aws_access_key_id"),
+            aws_secret_access_key=client_cfg.get("aws_secret_access_key"),
+
         )
-        # Use provided STS session or default to global boto3
-        self.client = (session or boto3).client(
-            "secretsmanager", region_name=config["region"]
+        
+        self.aws_client = AWSClient(config=aws_config)
+        
+        svc_cfg = config["service"]
+        self.client = self.aws_client.get_client(
+            "secretsmanager",
+            endpoint_url=svc_cfg["endpoint_url"]
         )
 
     def get_secret(self, secret_id: str) -> str:

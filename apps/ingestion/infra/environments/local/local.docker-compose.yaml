@@ -6,8 +6,8 @@ services:
       context: ./clickhouse
       dockerfile: Dockerfile
     environment:
-      - CLICKHOUSE_USER=default
-      - CLICKHOUSE_PASSWORD=password
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-password}
       - CH_HOST=localhost
       - LOCALSTACK_HOST=localstack
     volumes:
@@ -40,7 +40,10 @@ services:
       - ch_ntw
 
   grafana:
-    image: grafana/grafana:latest
+    # image: grafana/grafana:latest
+    build:
+      context: ./grafana
+      dockerfile: Dockerfile
     ports:
       - "3000:3000"
     environment:
@@ -50,20 +53,25 @@ services:
     networks:
       - ch_ntw
 
-
-  # localstack:
-  #   image: localstack/localstack:latest
-  #   container_name: localstack
-  #   ports:
-  #     - "4566:4566"            # LocalStack Edge Proxy
-  #   environment:
-  #     - SERVICES=s3,secretsmanager,sts
-  #     - DOCKER_HOST=unix:///var/run/docker.sock
-  #   volumes:
-  #     - "/var/run/docker.sock:/var/run/docker.sock"
-  #     - "./.tmp/localstack:/var/lib/localstack"
-  #   networks:
-  #     - ch_ntw
+  localstack:
+    image: localstack/localstack:latest
+    container_name: localstack
+    ports:
+      - "4566:4566"            # LocalStack Edge Proxy
+    environment:
+      - SERVICES=s3,secretsmanager,sts,logs,cloudwatch
+      - ACTIVATE_PRO=${ACTIVATE_PRO:-0}
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - LANDING_ZONE_BUCKET=${LANDING_ZONE_BUCKET:-landing-zone}
+      - ARCHIVE_VAULT_BUCKET=${ARCHIVE_VAULT_BUCKET:-archive-vault}
+      - CAS_VAULT_BUCKET=${CAS_VAULT_BUCKET:-cas-vault}
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "./.tmp/localstack:/var/lib/localstack"
+      - "./localstack:/etc/localstack/init/ready.d" # Mount the init scripts
+    networks:
+      - ch_ntw
 
 volumes:
   clickhouse_data:

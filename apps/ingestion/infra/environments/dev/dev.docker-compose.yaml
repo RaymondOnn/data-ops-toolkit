@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  localstack:
+    container_name: localstack
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"            # Edge Port (S3, Secrets Manager, etc.)
+      - "4510-4559:4510-4559"  # External services range
+    environment:
+      - SERVICES=s3,secretsmanager
+      - DEBUG=1
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - "${LOCALSTACK_VOLUME_DIR:-./.localstack}:/var/lib/localstack"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+
+  clickhouse:
+    container_name: clickhouse
+    image: clickhouse/clickhouse-server:latest
+    ports:
+      - "8123:8123" # HTTP
+      - "9000:9000" # Native
+    environment:
+      - CLICKHOUSE_DB=default
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=password
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+  app-server:
+    container_name: app-server
+    build:
+      context: .
+      dockerfile: infra/docker/worker.Dockerfile
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

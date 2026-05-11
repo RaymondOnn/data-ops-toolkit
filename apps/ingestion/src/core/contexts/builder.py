@@ -1,3 +1,5 @@
+import os
+import re
 from collections import ChainMap
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +20,34 @@ from loguru import logger
 
 LOG = logger
 APP_DEFAULT_CONFIG = APP_CONFIG_ROOT / "app.yaml"
+
+
+def expand_env_vars(value: Any) -> Any:
+    """
+    Recursively resolves ${VAR:-DEFAULT}, ${VAR}, or $VAR syntax in strings.
+    Leverages os.getenv for reliable cross-platform resolution.
+    """
+    if isinstance(value, dict):
+        return {k: expand_env_vars(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [expand_env_vars(v) for v in value]
+
+    if not isinstance(value, str) or "$" not in value:
+        return value
+
+    # Regex to capture ${VAR:-DEFAULT}, ${VAR}, or $VAR
+    pattern = re.compile(r"\$?\$\{([^:-]+)(?::-([^}]*))?\}|\$([a-zA-Z_][a-zA-Z0-9_]*)")
+
+    def replacer(match):
+        # group(1) & (2) are for ${VAR:-DEFAULT}, group(3) is for $VAR
+        var_name = match.group(1) or match.group(3)
+        default_val = match.group(2)
+
+        # If variable is missing and no default was provided in the YAML,
+        # return an empty string to allow downstream validators to catch it.
+        return os.getenv(var_name, default_val if default_val is not None else "")
+
+    return pattern.sub(replacer, value)
 
 
 def parse_set_options(settings: list[str] | None) -> dict[str, Any]:
@@ -184,7 +214,7 @@ class TaskContextBuilder:
             ) or self.app_settings.from_env("default").get(f"services.{ref}")
 
             if global_def:
-                svc_dict = global_def.to_dict()
+                svc_dict = expand_env_vars(global_def.to_dict())
                 LOG.debug(
                     "Found service definition in global app.yaml",
                     ref=ref,
@@ -199,7 +229,7 @@ class TaskContextBuilder:
             ).get(f"services.{ref}")
 
             if job_level_def:
-                svc_dict = job_level_def.to_dict()
+                svc_dict = expand_env_vars(job_level_def.to_dict())
                 LOG.debug(
                     "Found service definition in job config.yaml",
                     ref=ref,
@@ -215,14 +245,16 @@ class TaskContextBuilder:
 
             # Fallback to inline config block:
             # Dataset (Active -> Default) > Task (Active -> Default)
-            svc_dict = dict(
-                settings.get(f"datasets.{dataset_id}.{ref_key}.config")
-                or settings.from_env("default").get(
-                    f"datasets.{dataset_id}.{ref_key}.config"
+            svc_dict = expand_env_vars(
+                dict(
+                    settings.get(f"datasets.{dataset_id}.{ref_key}.config")
+                    or settings.from_env("default").get(
+                        f"datasets.{dataset_id}.{ref_key}.config"
+                    )
+                    or settings.get(f"job.{ref_key}.config")
+                    or settings.from_env("default").get(f"job.{ref_key}.config")
+                    or {}
                 )
-                or settings.get(f"job.{ref_key}.config")
-                or settings.from_env("default").get(f"job.{ref_key}.config")
-                or {}
             )
 
             if svc_dict is not None and "type" not in svc_dict:
@@ -293,13 +325,20 @@ class TaskContextBuilder:
         settings = self._settings_cache[cache_key]
 
         # 2. Establish partition_date
-        # Priority: partition_date_str > CLI --set partition_date > today
+        # Priority: partition_date_str > Job Config > App Config > today
+        p_date_raw = settings.get("partition_date") or self.app_settings.get(
+            "partition_date"
+        )
+        p_spec = (
+            p_date_raw
+            if isinstance(p_date_raw, dict)
+            else settings.get("partition_date_spec", {})
+        )
+
         tz_name = self.app_settings.get("timezone", "Asia/Singapore")
         partition_date = (
-            self._resolve_partition_date(
-                settings.get("partition_date_spec", {}), partition_date_str
-            )
-            or settings.get("partition_date")
+            self._resolve_partition_date(p_spec, partition_date_str)
+            or (p_date_raw if isinstance(p_date_raw, str) else None)
             or get_current_timestamp(timezone=tz_name, strip_tz=True).strftime(
                 "%Y-%m-%d"
             )
@@ -361,16 +400,20 @@ class TaskContextBuilder:
                 # 1. Check active environment
                 val = settings.get(p)
                 if val is not None:
-                    return val
+                    return expand_env_vars(val)
 
                 # 2. Check 'default' environment fallback
                 val = settings.from_env("default").get(p)
                 if val is not None:
-                    return val
+                    return expand_env_vars(val)
             # 2. Fallback to global app.yaml (respecting active environment)
             val = self.app_settings.get(path)
             if val is not None:
-                return val
+                return expand_env_vars(val)
+
+            # 3. Final Fallback: Check for Feature Flags in App Config
+            if path.startswith("feature_flags."):
+                return expand_env_vars(self.app_settings.get(path))
 
             return default
 
@@ -434,6 +477,7 @@ class TaskContextBuilder:
             "load": {
                 "sink_type": sink_type,
                 "sink_identifier": get_val("load.sink_identifier")
+                or get_val("load.identifier")
                 or get_val("target_destination"),
                 "sink_config": sink_svc,
                 "partition_col": get_val("load.partition_col", DEFAULT_PARTITION_COL),
@@ -447,6 +491,7 @@ class TaskContextBuilder:
                 "type": archive_type,
                 "config": archive_svc,
             },
+            "feature_flags": get_val("feature_flags", {}),
         }
 
         # 3. Final Layer: Apply Runtime CLI Overrides (--set) BEFORE freezing

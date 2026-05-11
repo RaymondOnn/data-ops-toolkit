@@ -1,6 +1,5 @@
 import time
 
-import msgspec
 import ray
 from apps.ingestion.src.core.contexts import ExecutionContext
 from apps.ingestion.src.core.models.stages.enums import (
@@ -11,10 +10,8 @@ from apps.ingestion.src.core.models.states import ZombieState
 from apps.ingestion.src.core.models.task import ExecutionStatus, Task, TaskSignal
 from apps.ingestion.src.core.orchestrator.compute import Compute
 from apps.ingestion.src.services.registry import ServiceRegistry
-from apps.ingestion.src.utils.common import find_path
 from apps.ingestion.src.utils.constants import (
     CACHE_TASK_NAMESPACE,
-    MANIFEST_FILENAME,
     STRIP_TZ_FOR_DB,
 )
 from apps.ingestion.src.utils.dates import get_end_of_day_ts
@@ -238,7 +235,7 @@ class TaskManager:
                     stage=task_ref.stage,
                 )
 
-        # STATEFUL LOGGING: Only log if pending count or capacity status changed
+        # Only log if pending count or capacity status changed
         has_pending = len(candidate_keys) > 0
         is_stuck = has_pending and dispatch_count == 0
         current_state = (len(candidate_keys), is_stuck)
@@ -294,16 +291,18 @@ class TaskManager:
             )
 
             if is_zombie:
+                # Rehydrate Task to leverage TaskWorkspace logic
+                task = Task(
+                    task_ref=task_ref,
+                    worker_id="engine-recovery",
+                    exec_ctx=self.exec_ctx,
+                )
+
                 # 1. Respect Self-Healing Disable
                 if self.exec_ctx.disable_self_healing:
                     LOG.error(
                         "Zombie detected | Self-healing disabled. Failing task.",
                         key=key,
-                    )
-                    task = Task(
-                        task_ref=task_ref,
-                        worker_id="engine-recovery",
-                        exec_ctx=self.exec_ctx,
                     )
                     task.update_manifest(
                         {
@@ -317,11 +316,10 @@ class TaskManager:
                         self.cache.pop(key, None)
                     continue
 
-                active_path = find_path(self.exec_ctx.active_path, meta.run_id)
-                manifest_file = active_path / MANIFEST_FILENAME if active_path else None
-
-                if manifest_file and manifest_file.exists():
-                    mtime = manifest_file.stat().st_mtime
+                if task.workspace.exists():
+                    manifest_file = task.workspace.manifest_path
+                    if manifest_file.exists():
+                        mtime = manifest_file.stat().st_mtime
                     if time.time() - mtime < 300:
                         # Physical heartbeat is fresh!
                         meta.last_hb = time.time()
@@ -349,8 +347,15 @@ class TaskManager:
         if not isinstance(task_meta, TaskMetadata):
             return
 
+        # Rehydrate the Task to perform a proper manifest reset or check
+        task = Task(
+            task_ref=task_ref,
+            worker_id="engine-recovery",
+            exec_ctx=self.exec_ctx,
+        )
+
         # 1. Verify if the stage actually finished on disk
-        if self._check_stage_completion_on_disk(task_ref.run_id, task_ref.stage):
+        if self._check_stage_completion_on_disk(task):
             # Promotion: Find the next stage label
             next_stage = StageName.next(task_ref.stage)
 
@@ -359,6 +364,15 @@ class TaskManager:
                 run_id=task_ref.run_id,
                 from_stage=task_ref.stage,
                 to_stage=next_stage,
+            )
+
+            # CRITICAL: Sync manifest with the promotion so the next worker
+            # doesn't revert to the previous stage.
+            task.update_manifest(
+                {
+                    "status": ExecutionStatus.WAITING.value,
+                    "current_stage": next_stage,
+                }
             )
 
             with self.lock:
@@ -378,24 +392,17 @@ class TaskManager:
                 stage=task_ref.stage,
             )
 
-            # Rehydrate the Task to perform a proper manifest reset
-            task = Task(
-                task_ref=task_ref,
-                worker_id="engine-recovery",
-                exec_ctx=self.exec_ctx,
-            )
-
             task.update_manifest(
                 {
                     "status": ExecutionStatus.WAITING.value,
-                    "current_stage": None,
+                    "current_stage": task_ref.stage,
                 }
             )
 
             # Sync the engine cache with the new manifest state
             # Clear indicators and set to WAITING
-            (task.folder / ".retrying").unlink(missing_ok=True)
-            (task.folder / ".blocked").unlink(missing_ok=True)
+            task.workspace.remove_marker(".retrying")
+            task.workspace.remove_marker(".blocked")
             with self.lock:
                 self.cache.pop(key, None)
                 task_meta.status = ExecutionStatus.WAITING.value
@@ -411,28 +418,17 @@ class TaskManager:
                 new_key = task_ref.build(status=ExecutionStatus.WAITING.value)
                 self.cache[new_key] = task_meta
 
-    def _check_stage_completion_on_disk(self, run_id: str, stage_name: str) -> bool:
+    def _check_stage_completion_on_disk(self, task: Task) -> bool:
         """
-        Checks if the 'active' symlink for this stage exists.
+        Checks if the stage results are recorded in the manifest.
         This is the definitive proof of success in our new structure.
         """
-        active_path = find_path(self.exec_ctx.active_path, run_id)
-        if not active_path:
+        if not task.workspace.exists():
             return False
 
-        manifest_path = active_path / MANIFEST_FILENAME
-        if not manifest_path.exists():
-            return False
-
-        try:
-            # Definitive proof: The stage results are recorded in the manifest
-            with manifest_path.open("rb") as f:
-                # We use a generic dict decode here to check key existence
-                manifest_data = msgspec.json.decode(f.read())
-                return manifest_data.get(stage_name) is not None
-        except Exception:
-            LOG.error("Failed to read manifest during recovery check", run_id=run_id)
-            return False
+        # Proof: The stage results (payload) are recorded in the manifest.
+        # getattr works because TaskManifest field names match StageName labels.
+        return getattr(task.manifest, task.task_ref.stage, None) is not None
 
     def _cleanup_finished_tasks(self) -> None:
         """Checks for finished Ray tasks and triggers resource reclamation."""

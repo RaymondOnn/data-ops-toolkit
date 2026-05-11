@@ -12,7 +12,7 @@ default:
     num_workers: 1
     archive:
       enable_archival: true
-      service_ref: "standard_archive"
+      service_ref: "s3_archive"
     
     # Job-level feature flag overrides
     feature_flags:
@@ -31,18 +31,18 @@ default:
       extract:
         load_mode: "snapshot"    
         source_params:
-          filter_sql: ""         # e.g. "WHERE order_date = {{partition_date}}"
-          bind_params: {}
-          schema_file: "schema.csv"
+          type: file
+          file_pattern: "s3://bucket/path/orders_{{partition_date}}.csv"
+        schema_file: "schema.csv"
       transform:
         type: default
-        options:
+        params:
       load:
-        sink_identifier: TEST.ORDERS
         service_ref: "clickhouse"
+        sink_identifier: TEST.ORDERS
       archive:
-        enable_archival: false    # per-dataset archival override
-        # service_ref: "s3_archive"
+        enable_archival: true    # per-dataset archival override
+        service_ref: "s3_archive"
       
       # Dataset-level override for cost comparison
       feature_flags:

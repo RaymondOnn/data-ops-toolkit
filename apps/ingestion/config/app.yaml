@@ -1,3 +1,7 @@
+# Dynaconf environments=True format:
+#   - 'default' keys apply to all environments
+#   - named env keys (local, production, etc.) override defaults
+
 version: "1.0"
 
 # --- Configuration Templates ---
@@ -5,14 +9,44 @@ x-localstack-base: &localstack_base
   endpoint_url: "http://${LOCALSTACK_HOST:-localhost}:4566"
   use_ssl: false
 
-x-s3-service-base: &s3_service_base
-  url: "s3://landing-zone"
-  storage_options:
-    <<: *localstack_base
+x-localstack-client: &localstack_client
+  region: "ap-southeast-1"
+  sts_endpoint_url: "http://${LOCALSTACK_HOST:-localhost}:4566"
+  role_arn: "arn:aws:iam::123456789012:role/ProdIngestionRole"
+  aws_access_key_id: test
+  secret_key: AWS_SECRET_ACCESS_KEY
+  use_ssl: false
+  anon: false
 
-# Dynaconf environments=True format:
-#   - 'default' keys apply to all environments
-#   - named env keys (local, production, etc.) override defaults
+x-aws-dev-client: &aws_dev_client
+  region: "ap-southeast-1"
+  sts_endpoint_url: "http://${LOCALSTACK_HOST:-localhost}:4566"
+  role_arn: "arn:aws:iam::123456789012:role/DevIngestionRole"
+
+x-aws-prod-client: &aws_prod_client
+  region: "ap-southeast-1"
+  sts_endpoint_url: "https://sts.us-west-2.amazonaws.com"
+  role_arn: "arn:aws:iam::123456789012:role/ProdIngestionRole"
+
+x-s3-archive-base: &s3_archive_base
+  type: "standard_archive"
+  storage_options:
+    s3_storage_class: "DEEP_ARCHIVE"
+
+x-s3-cas-base: &s3_cas_base
+  type: "cas_archive"
+  storage_options:
+    s3_storage_class: "GLACIER"
+
+x-s3-source-base: &s3_source_base
+  type: "data_lake"
+
+x-secrets-dev-svc: &secrets_dev_svc
+  endpoint_url: "http://${LOCALSTACK_HOST:-localhost}:4566"
+
+x-secrets-prod-svc: &secrets_prod_svc
+  endpoint_url: "https://secretsmanager.ap-southeast-1.amazonaws.com"
+
 
 default:
   workspace_dir: "~/.ingestion/data/"
@@ -20,11 +54,18 @@ default:
     num_workers: 10
   transform:
     type: default
-    options:
+    options: {}
   archive:
     retention_days: 2555  # 7-year default
     enable_archival: true
     archive_type: "standard_archive"
+  partition_date:
+    offset:
+      days: -1
+      months: 0
+      years: 0
+    format: "%Y-%m-%d"
+    wrap_quotes: false
 
   # Global Feature Flag Defaults
   feature_flags:
@@ -36,21 +77,15 @@ default:
 
 local:
   workspace_dir: "./.workspace/"
-  archive_base_path: "file:///tmp/archive"
-  storage_options:
-    region: "us-east-1"
   secret_provider:
     type: "env_file"
     path: "./apps/ingestion/infra/environments/local/.secrets.json"
     master_key: "SECRET_MASTER_KEY" # This can be an env var name or plain text for local dev
+  archive:
+    base_path: "s3://archive-vault/archival"
   cache:
     type: diskcache
     filepath: ".cache/cache.db"
-      # type: redis
-      # host: localhost
-      # port: 6379
-      # db: 0
-      # password: "test"
   services:
     file:
       type: flat_file
@@ -62,18 +97,33 @@ local:
       user: default
       secret_key: CLICKHOUSE_PASSWORD
       secure: false
-    local_s3:
-      <<: *s3_service_base
-      type: data_lake
+    s3_source:
+      <<: *s3_source_base
+      url: "s3://landing-zone"
+      client: *localstack_client
       storage_options:
         <<: *localstack_base
-        key: "test" 
-        secret_key: "test" 
+        anon: false
     s3_archive:
-      <<: *s3_service_base
-      type: standard_archive
+      <<: *s3_archive_base
+      url: "s3://archive-vault/archival"
+      client: *localstack_client
+      storage_options:
+        <<: *localstack_base
+        anon: false
+    s3_cas:
+      <<: *s3_cas_base
+      url: "s3://cas-vault"
+      client: *localstack_client
+      storage_options:
+        <<: *localstack_base
+        anon: false
 
 dev:
+  secret_provider:
+    type: aws_secrets_manager
+    service: *secrets_dev_svc
+    client: *aws_dev_client
   services:
     file:
       type: flat_file
@@ -83,19 +133,40 @@ dev:
       port: 8123
       user: "default"
       secret_key: "CLICKHOUSE_PASSWORD"
+    s3_source:
+      <<: *s3_source_base
+      url: "s3://dev-landing-zone"
+      client: *aws_dev_client
+    s3_archive:
+      <<: *s3_archive_base
+      url: "s3://dev-vault/archival"
+      client: *aws_dev_client
+    s3_cas:
+      <<: *s3_cas_base
+      url: "s3://dev-cas-vault"
+      client: *aws_dev_client
 
-# production:
-#   archive_base_path: "s3://prod-vault/archival"
-#   storage_options:
-#     s3_storage_class: "DEEP_ARCHIVE"
-#     region: "us-west-2"
-#   services:
-#     s3_archive:
-#       type: "standard_archive"   # Maps to StorageArchivist
-#       bucket: "prod-data-lake-archive"
-#       storage_options:
-#         s3_storage_class: "DEEP_ARCHIVE"
-#         region: "us-east-1"
-#     vault_cas:
-#       type: "cas_archive"        # Maps to StorageVault
-#       bucket: "immutable-legal-records"
+prod:
+  secret_provider:
+    type: aws_secrets_manager
+    service: *secrets_prod_svc
+    client: *aws_prod_client
+  storage_options:
+    s3_storage_class: "DEEP_ARCHIVE"
+    region: "us-west-2"
+  archive:
+    base_path: "s3://prod-vault/archival"
+  services:
+    s3_source:
+      <<: *s3_source_base
+      url: "s3://prod-landing-zone"
+      client: *aws_prod_client
+    s3_archive:
+      <<: *s3_archive_base
+      url: "s3://prod-vault/archival"
+      client: *aws_prod_client
+    s3_cas:
+      <<: *s3_cas_base
+      url: "s3://prod-cas-vault"
+      client: *aws_prod_client
+      

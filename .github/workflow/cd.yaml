@@ -13,7 +13,7 @@ on:
 
 jobs:
   list-apps:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
       release_id: ${{ steps.set-matrix.outputs.release_id }}
@@ -26,83 +26,113 @@ jobs:
           echo "matrix=$APPS" >> $GITHUB_OUTPUT
           echo "release_id=$(date +%Y%m%d%H%M%S)-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
-  build-and-plan:
+  package-artifacts:
     needs: list-apps
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     strategy:
       matrix:
         app: ${{ fromJson(needs.list-apps.outputs.matrix) }}
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: us-east-1
+      LOCALSTACK_URL: "http://localhost:4566"
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Build PEX Artifacts
         uses: ./.github/actions/build-pex
         with:
           app_name: ${{ matrix.app }}
+          python-version: '3.11'
 
-      - name: Setup SSH Access
-        uses: ./.github/actions/setup-ssh
-        with:
-          private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-          host: ${{ secrets.SSH_HOST }}
-
-      - name: Rsync Dry Run
-        env:
-          CURRENT_DIR: /opt/apps/${{ matrix.app }}/current
+      - name: Stage Artifacts with Rsync
         run: |
-          echo "### 🚀 Deployment Plan for ${{ matrix.app }}" >> $GITHUB_STEP_SUMMARY
-          echo "🔍 Comparing build artifacts with the currently active version on the server..." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "#### Change Set (rsync itemized output)" >> $GITHUB_STEP_SUMMARY
-          echo '```text' >> $GITHUB_STEP_SUMMARY
-          # -i: itemize-changes, -v: verbose, -n: dry-run
-          # --max-delete=1: Safety switch to prevent accidental mass deletion
-          # -z added to dry-run to accurately reflect compression savings
-          rsync -ivzn --delete --max-delete=2 ./*.pex ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:$CURRENT_DIR >> $GITHUB_STEP_SUMMARY 2>&1 || true
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "> [!IMPORTANT]" >> $GITHUB_STEP_SUMMARY
-          echo "> Please review the changes above before approving the deployment gate." >> $GITHUB_STEP_SUMMARY
+          # Use rsync to create a clean 'dist' folder.
+          # -a: archive mode, -v: verbose, --update: only copy if source is newer
+          mkdir -p ./dist/${{ matrix.app }}
+          rsync -av --update deps.pex ${{ matrix.app }}.pex ./dist/${{ matrix.app }}/
+          
+          echo "### 📂 Staging Summary" >> $GITHUB_STEP_SUMMARY
+          ls -lh ./dist/${{ matrix.app }} >> $GITHUB_STEP_SUMMARY
 
-      - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: pex-artifacts-${{ matrix.app }}
-          path: "*.pex"
-          retention-days: 1
+      - name: Upload to LocalStack S3
+        run: |
+          # S3 Path: s3://deployments/<app_name>/<release_id>/...
+          S3_PATH="s3://deployments/${{ matrix.app }}/${{ needs.list-apps.outputs.release_id }}"
+          
+          aws s3 mb s3://deployments --endpoint-url $LOCALSTACK_URL || true
+          aws s3 sync ./dist/${{ matrix.app }} $S3_PATH --endpoint-url $LOCALSTACK_URL
+
+      - name: Verify S3 Integrity with Rsync
+        run: |
+          S3_PATH="s3://deployments/${{ matrix.app }}/${{ needs.list-apps.outputs.release_id }}"
+          mkdir -p ./s3_verify
+          
+          echo "📥 Downloading artifacts from S3 for verification..."
+          aws s3 cp $S3_PATH ./s3_verify --recursive --endpoint-url $LOCALSTACK_URL
+          
+          echo "🔍 Running rsync checksum verification..."
+          # -i (itemize) outputs a code like '>f..t....' if there's a difference.
+          # If the output is empty, the folders are identical.
+          DIFFS=$(rsync -rvnc --delete --itemize-changes ./dist/${{ matrix.app }}/ ./s3_verify/ | grep -v 'sending list' || true)
+          
+          if [ -n "$DIFFS" ]; then
+            echo "❌ Verification Failed! S3 content does not match local dist."
+            echo "Differences found:"
+            echo "$DIFFS"
+            exit 1
+          else
+            echo "✅ S3 Integrity Verified via Checksum. Ready for deployment."
+            echo "### 🛡️ S3 Integrity Check: PASSED" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Cleanup Old S3 Releases
+        run: |
+          echo "🧹 Cleaning up old releases in S3 (keeping last 5)..."
+          # List folders, sort them, skip the last 5, and delete the rest
+          OLD_RELEASES=$(aws s3 ls s3://deployments/${{ matrix.app }}/ --endpoint-url $LOCALSTACK_URL | awk '{print $2}' | sort -r | tail -n +6)
+          
+          for RELEASE in $OLD_RELEASES; do
+            echo "Deleting old release: $RELEASE"
+            aws s3 rm s3://deployments/${{ matrix.app }}/$RELEASE --recursive --endpoint-url $LOCALSTACK_URL
+          done
+          
+          echo "✅ S3 Cleanup complete." >> $GITHUB_STEP_SUMMARY
 
   deploy:
-    needs: [list-apps, build-and-plan]
-    runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.environment || 'production' }} # 🛑 This is your Approval Gate
+    needs: [list-apps, package-artifacts]
+    runs-on: self-hosted
+    environment: ${{ github.event.inputs.environment || 'production' }}
     strategy:
       matrix:
         app: ${{ fromJson(needs.list-apps.outputs.matrix) }}
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: us-east-1
+      # Inside a container on Mac, host.docker.internal reaches the host's localhost
+      LOCALSTACK_INTERNAL_URL: "http://host.docker.internal:4566"
+      WORKER_CONTAINER: "ingestion-worker"
     steps:
-      - uses: actions/checkout@v4
+      - name: Trigger Pull and Run in Docker Container
+        run: |
+          RELEASE_ID="${{ needs.list-apps.outputs.release_id }}"
+          S3_URI="s3://deployments/${{ matrix.app }}/$RELEASE_ID"
+          DEPLOY_DIR="/opt/deploy/${{ matrix.app }}/$RELEASE_ID"
 
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: pex-artifacts-${{ matrix.app }}
-          path: ./dist
+          # Using 'docker exec' to act as our 'EC2' command trigger
+          docker exec $WORKER_CONTAINER /bin/sh -c "
+            # Exporting variables inside the container so the internal AWS CLI is authenticated
+            export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+            export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+            export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION
+            
+            mkdir -p $DEPLOY_DIR
 
-      - name: Setup SSH Access
-        uses: ./.github/actions/setup-ssh
-        with:
-          private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-          host: ${{ secrets.SSH_HOST }}
-
-      - name: Atomic Deploy
-        uses: ./.github/actions/atomic-deploy
-        with:
-          ssh_host: ${{ secrets.SSH_HOST }}
-          ssh_user: ${{ secrets.SSH_USER }}
-          app_name: ${{ matrix.app }}
-          release_id: ${{ needs.list-apps.outputs.release_id }}
-          dist_path: "./dist"
-
-      - name: Notify Success
-        run: echo "✅ ${{ matrix.app }} deployed successfully."
+            echo '📥 Container pulling artifacts from S3...'
+            aws s3 cp $S3_URI $DEPLOY_DIR --recursive --endpoint-url $LOCALSTACK_INTERNAL_URL
+            
+            echo '🏃 Running application...'
+            PEX_PATH=$DEPLOY_DIR/deps.pex python3 $DEPLOY_DIR/${{ matrix.app }}.pex
+          "
