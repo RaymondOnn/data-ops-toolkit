@@ -95,6 +95,7 @@ class FileSystemClient(BaseIOClient, ABC):
             self.fs.put(local_source, remote_dest)
 
     def exists(self, path: str | Path) -> bool:
+        print(f"Checking existence of path: {self.resolve_path(str(path))}")
         return self.fs.exists(self.resolve_path(str(path)))
 
     def info(self, path: str | Path) -> dict[str, Any]:

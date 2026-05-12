@@ -6,13 +6,13 @@ version: "1.0"
 
 # --- Configuration Templates ---
 x-localstack-base: &localstack_base
-  endpoint_url: "http://${LOCALSTACK_HOST:-localhost}:4566"
+  s3_endpoint_url: "http://${LOCALSTACK_HOST:-localhost}:4566"
   use_ssl: false
 
 x-localstack-client: &localstack_client
-  region: "ap-southeast-1"
-  sts_endpoint_url: "http://${LOCALSTACK_HOST:-localhost}:4566"
-  role_arn: "arn:aws:iam::123456789012:role/ProdIngestionRole"
+  region: ap-southeast-1
+  sts_endpoint_url: http://${LOCALSTACK_HOST:-localhost}:4566
+  role_arn: arn:aws:iam::000000000000:role/ProdIngestionRole
   aws_access_key_id: test
   secret_key: AWS_SECRET_ACCESS_KEY
   use_ssl: false
@@ -82,7 +82,7 @@ local:
     path: "./apps/ingestion/infra/environments/local/.secrets.json"
     master_key: "SECRET_MASTER_KEY" # This can be an env var name or plain text for local dev
   archive:
-    base_path: "s3://archive-vault/archival"
+    base_path: "s3://archive-vault"
   cache:
     type: diskcache
     filepath: ".cache/cache.db"
@@ -106,13 +106,13 @@ local:
         anon: false
     s3_archive:
       <<: *s3_archive_base
-      url: "s3://archive-vault/archival"
+      url: "s3://archive-vault"
       client: *localstack_client
       storage_options:
         <<: *localstack_base
         anon: false
     s3_cas:
-      <<: *s3_cas_base
+      <<: *s3_cas_base 
       url: "s3://cas-vault"
       client: *localstack_client
       storage_options:

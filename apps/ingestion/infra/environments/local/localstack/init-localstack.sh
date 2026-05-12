@@ -32,7 +32,7 @@ docker exec $CONTAINER_NAME awslocal s3api put-bucket-cors --bucket "$BUCKET_NAM
 # In localstack, these are usually 'test' / 'test'
 ACCESS_KEY="test"
 SECRET_KEY="test"
-REGION="us-east-1"
+REGION="ap-southeast-1"
 ENDPOINT="http://localhost:4566"
 
 # 4. Automate .secrets.json update

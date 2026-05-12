@@ -9,7 +9,7 @@ terraform {
 
 # 1. Configure the AWS Provider to point to LocalStack
 provider "aws" {
-  region                      = "us-east-1"
+  region                      = "ap-southeast-1"
   access_key                  = "test"
   secret_key                  = "test"
   skip_credentials_validation = true

@@ -14,17 +14,14 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Set up Python ${{ inputs.python-version }}
-      uses: actions/setup-python@v5
+    - name: Initialize Environment
+      uses: ./.github/actions/setup-uv
       with:
         python-version: ${{ inputs.python-version }}
-        cache: 'pip'
 
-    - name: Install uv and pex
+    - name: Install PEX Builder
       shell: bash
-      run: |
-        curl -LsSf https://astral.sh/uv/install.sh | sh
-        pip install pex
+      run: uv pip install pex
 
     - name: Cache Dependencies
       id: cache-deps
@@ -39,7 +36,14 @@ runs:
       run: |
         uv export --no-dev --project apps/${{ inputs.app_name }} --format requirements.txt > requirements.txt
         sed -i '/-e/d' requirements.txt
-        pex -r requirements.txt \
+
+        # Building the Dependency Bundle (deps.pex):
+        # -r: Bundles all requirements listed in the exported file.
+        # --platform: Forces the build to target the Linux environment used by the Docker worker.
+        # -o: Sets the output filename for the heavy dependency layer.
+        # --runtime-pty: Supports pseudo-terminals for tools that require interactive output.
+        # --python-shebang: Ensures the PEX uses the standard system python3 at runtime.
+        uv run pex -r requirements.txt \
             --platform manylinux2014_x86_64-cp-${{ replace(inputs.python-version, '.', '') }}-cp${{ replace(inputs.python-version, '.', '') }} \
             -o deps.pex \
             --runtime-pty \
@@ -47,10 +51,17 @@ runs:
 
     - name: Build app.pex
       shell: bash
+      env:
+        PEX_DETERMINISTIC_BINARIES: 1
       run: |
-        # Dynamically include all libraries in the libs/ folder
-        LIB_DIRS=$(ls -d libs/*/ | xargs -I {} echo "--sources-directory {}")
-        pex --sources-directory apps/${{ inputs.app_name }}/src \
+        # Robust discovery of library source directories
+        LIB_DIRS=$(find libs -maxdepth 1 -mindepth 1 -type d | xargs -I {} echo "--sources-directory {}")
+
+        # Building the Application layer (app.pex):
+        # --sources-directory: Includes the specific source code for the target application.
+        # --no-pypi: Prevents fetching external deps (ensures this PEX stays lightweight and relies on deps.pex).
+        # --entry-point: Defines the specific main function to execute when the file is run.
+        uv run pex --sources-directory apps/${{ inputs.app_name }}/src \
             $LIB_DIRS \
             --no-pypi \
             --entry-point apps.${{ inputs.app_name }}.__main__:main \

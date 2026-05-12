@@ -51,6 +51,30 @@ class Executor:
 
         self.is_busy = False
 
+    def _transition_task(
+        self,
+        old_key: str,
+        new_status: str,
+        next_stage: str | None = None,
+        last_hb_offset: float = 0,
+    ):
+        """Handles atomic cache updates during task state transitions."""
+        with self.lock:
+            meta = self.cache.pop(old_key, None)
+            if not meta:
+                return None
+            meta.status = new_status
+            if next_stage:
+                meta.current_stage = next_stage
+            meta.last_hb = time.time() + last_hb_offset
+            new_key = (
+                TaskRef.from_str(old_key)
+                .with_updates(status=new_status, stage=next_stage or meta.current_stage)
+                .build()
+            )
+            self.cache[new_key] = meta
+            return meta
+
     def process_stage(self, key: str) -> None:
         # Key Format: {CACHE_TASK_NAMESPACE}:{status}:{stage}:{job}:{dataset}:{date}:{run_id}
         task_ref = TaskRef.from_str(key)
@@ -60,18 +84,10 @@ class Executor:
         log = logger.bind(worker_id=self.worker_id, stage=current_stage, run_id=run_id)
 
         # 1. Atomic Check-in: Move from WAITING/DISPATCHED to RUNNING in cache
-        with self.lock:
-            meta: TaskMetadata = self.cache.get(key)
-            if not meta:
-                log.error("Executor failed to rehydrate task: key missing", key=key)
-                return
-
-            self.cache.pop(key, None)
-            meta.status = ExecutionStatus.RUNNING.value
-            meta.last_hb = time.time()
-
-            working_key = task_ref.with_updates(status=meta.status).build()
-            self.cache[working_key] = meta
+        meta = self._transition_task(key, ExecutionStatus.RUNNING.value)
+        if not meta:
+            log.error("Executor failed to rehydrate task: key missing", key=key)
+            return
 
         try:
             with logger.contextualize(run_id=run_id):
@@ -108,28 +124,7 @@ class Executor:
                 self.is_busy = True
                 log.info("Executor started processing stage", stage=current_stage)
 
-                if self.exec_ctx.code_pex_path and self.exec_ctx.code_pex_path.exists():
-                    env = os.environ.copy()
-                    if self.exec_ctx.deps_pex_path:
-                        env["PEX_PATH"] = str(self.exec_ctx.deps_pex_path)
-
-                    cmd = [
-                        "python3",
-                        str(self.exec_ctx.code_pex_path),
-                        "run",
-                        meta.partition_date,
-                        "--job-id",
-                        meta.job_id,
-                        "--dataset",
-                        meta.dataset_id,
-                        "--stage",
-                        current_stage,
-                    ]
-                    subprocess.run(cmd, env=env, check=True, capture_output=False)
-                else:
-                    task.stage.pre_flight(task)
-                    task.execute()
-
+                self._run_task_payload(task, meta)
                 self._handle_success(task, log)
 
         except RetryTask as r:
@@ -144,6 +139,30 @@ class Executor:
             # Remove all handlers to close file handles before the actor becomes idle
             # or before Ray attempts to snapshot it.
             logger.remove()
+
+    def _run_task_payload(self, task: Task, meta: TaskMetadata) -> None:
+        """Decides between subprocess (PEX) or internal execution."""
+        if self.exec_ctx.code_pex_path and self.exec_ctx.code_pex_path.exists():
+            env = os.environ.copy()
+            if self.exec_ctx.deps_pex_path:
+                env["PEX_PATH"] = str(self.exec_ctx.deps_pex_path)
+
+            cmd = [
+                "python3",
+                str(self.exec_ctx.code_pex_path),
+                "run",
+                meta.partition_date,
+                "--job-id",
+                meta.job_id,
+                "--dataset",
+                meta.dataset_id,
+                "--stage",
+                task.task_ref.stage,
+            ]
+            subprocess.run(cmd, env=env, check=True, capture_output=False)
+        else:
+            task.stage.pre_flight(task)
+            task.execute()
 
     def _handle_success(self, task: Task, log: "Logger"):
         current_stage = task.task_ref.stage
@@ -166,22 +185,9 @@ class Executor:
 
             ProgressState().on_enter(task, data={"next_stage": next_label})
             if next_label != STAGE_TERMINAL_SENTINEL:
-                with self.lock:
-                    meta_to_move = self.cache.pop(key, None)
-                    if not meta_to_move:
-                        log.error(
-                            "Cache key missing during transition. "
-                            "Was it recovered as a zombie?",
-                            key=key,
-                        )
-                        return
-
-                    meta_to_move.current_stage = next_label
-                    meta_to_move.status = ExecutionStatus.WAITING.value
-                    new_key = task.task_ref.build(
-                        status=meta_to_move.status, stage=next_label
-                    )
-                    self.cache[new_key] = meta_to_move
+                self._transition_task(
+                    key, ExecutionStatus.WAITING.value, next_stage=next_label
+                )
                 log.info(
                     f"Queued task for {next_label.upper()} stage",
                     next_stage=next_label.upper(),
@@ -205,19 +211,12 @@ class Executor:
                 },
             )
 
-        with self.lock:
-            if meta_to_update := self.cache.pop(key, None):
-                meta_to_update.status = task.manifest.status.value  # RETRY or BLOCKED
-
-                meta_to_update.blocked_by = r.service_name
-                meta_to_update.last_hb = time.time() + r.wait_seconds
-
-                new_key = task.task_ref.build(status=meta_to_update.status)
-                self.cache[new_key] = meta_to_update
+        # Use unified transition logic
+        self._transition_task(
+            key, new_status=task.manifest.status.value, last_hb_offset=r.wait_seconds
+        )
 
     def _handle_rewind_task(self, task: Task, rw: RewindTask, log: "Logger"):
-        key = task.task_ref.build()
-
         log.warning("Task signaled REWIND", to_stage=rw.target_stage)
         task.update_manifest(
             {
@@ -226,15 +225,11 @@ class Executor:
                 "current_stage": rw.target_stage,
             }
         )
-        with self.lock:
-            meta_to_move = self.cache.pop(key, None)
-            if meta_to_move:
-                meta_to_move.current_stage = rw.target_stage
-                meta_to_move.status = ExecutionStatus.WAITING.value
-                new_key = task.task_ref.build(
-                    status=meta_to_move.status, stage=rw.target_stage
-                )
-                self.cache[new_key] = meta_to_move
+        self._transition_task(
+            task.task_ref.build(),
+            new_status=ExecutionStatus.WAITING.value,
+            next_stage=rw.target_stage,
+        )
 
     def _handle_failure(
         self, task: Task, e: Exception, log: "Logger", meta: TaskMetadata
@@ -259,21 +254,11 @@ class Executor:
                 retry_exc = rt
 
             # Update cache to reflect RETRY status
-            with self.lock:
-                self.cache.pop(key, None)  # Remove old RUNNING key
-
-                # Sync identity with the updated manifest status (handles BLOCKED vs RETRY)
-                new_status = task.manifest.status.value
-                new_task_ref = task.task_ref.with_updates(status=new_status)
-                new_meta = TaskMetadata.from_ref(
-                    new_task_ref,
-                    str(task.workspace.config_path),
-                    expires_at=meta.expires_at,
-                )
-                if retry_exc:
-                    new_meta.last_hb = time.time() + retry_exc.wait_seconds
-
-                self.cache[new_task_ref.build()] = new_meta
+            self._transition_task(
+                key,
+                new_status=task.manifest.status.value,
+                last_hb_offset=retry_exc.wait_seconds if retry_exc else 0,
+            )
 
             if retry_exc:
                 raise retry_exc
@@ -290,8 +275,8 @@ class Executor:
                     "traceback": traceback.format_exc(),
                 },
             )
-            with self.lock:
-                self.cache.pop(key, None)
+            # Terminal failure: simply remove from cache
+            self._transition_task(key, ExecutionStatus.FAILED.value)
 
 
 def process_stage_task(worker_id: str, exec_ctx: ExecutionContext, key: str):

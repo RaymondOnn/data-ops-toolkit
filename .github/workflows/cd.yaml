@@ -1,15 +1,12 @@
 name: CD Pipeline
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
     inputs:
       environment:
         description: 'Target Environment'
-        default: 'production'
         type: choice
-        options: [ staging, production ]
+        options: [ dev, prod ]
 
 jobs:
   list-apps:
@@ -35,7 +32,7 @@ jobs:
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      AWS_DEFAULT_REGION: us-east-1
+      AWS_DEFAULT_REGION: ap-southeast-1
       LOCALSTACK_URL: "http://localhost:4566"
     steps:
       - uses: actions/checkout@v4
@@ -55,6 +52,13 @@ jobs:
           
           echo "### 📂 Staging Summary" >> $GITHUB_STEP_SUMMARY
           ls -lh ./dist/${{ matrix.app }} >> $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### 📊 PEX Metrics" >> $GITHUB_STEP_SUMMARY
+          echo "| Artifact | Size |" >> $GITHUB_STEP_SUMMARY
+          echo "| :--- | :--- |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📦 **Dependencies** (deps.pex) | $(du -h deps.pex | cut -f1) |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🚀 **Application Code** (${{ matrix.app }}.pex) | $(du -h ${{ matrix.app }}.pex | cut -f1) |" >> $GITHUB_STEP_SUMMARY
 
       - name: Upload to LocalStack S3
         run: |
@@ -110,29 +114,96 @@ jobs:
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      AWS_DEFAULT_REGION: us-east-1
+      AWS_DEFAULT_REGION: ap-southeast-1
       # Inside a container on Mac, host.docker.internal reaches the host's localhost
       LOCALSTACK_INTERNAL_URL: "http://host.docker.internal:4566"
       WORKER_CONTAINER: "ingestion-worker"
+
     steps:
-      - name: Trigger Pull and Run in Docker Container
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH Access
+        uses: ./.github/actions/setup-ssh
+        with:
+          private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          host: ${{ secrets.SSH_HOST }}
+          user: ${{ secrets.SSH_USER }}
+          port: 2222 # Explicitly pass the mapped port
+
+      - name: Verify SSH Connection
+        run: |
+          chmod +x ./scripts/verify_ssh.sh
+          ./scripts/verify_ssh.sh ${{ secrets.SSH_USER }} ${{ secrets.SSH_HOST }} 22
+
+      - name: Trigger Pull and Run on App Server
         run: |
           RELEASE_ID="${{ needs.list-apps.outputs.release_id }}"
           S3_URI="s3://deployments/${{ matrix.app }}/$RELEASE_ID"
           DEPLOY_DIR="/opt/deploy/${{ matrix.app }}/$RELEASE_ID"
 
-          # Using 'docker exec' to act as our 'EC2' command trigger
-          docker exec $WORKER_CONTAINER /bin/sh -c "
-            # Exporting variables inside the container so the internal AWS CLI is authenticated
+          # Passing variables into the SSH command to ensure the remote shell is authenticated
+          ssh -p 2222 -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "bash -s" << EOF
             export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
             export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
             export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION
             
             mkdir -p $DEPLOY_DIR
-
-            echo '📥 Container pulling artifacts from S3...'
+            
+            echo "📥 Remote host pulling artifacts from S3..."
             aws s3 cp $S3_URI $DEPLOY_DIR --recursive --endpoint-url $LOCALSTACK_INTERNAL_URL
             
-            echo '🏃 Running application...'
-            PEX_PATH=$DEPLOY_DIR/deps.pex python3 $DEPLOY_DIR/${{ matrix.app }}.pex
-          "
+            echo "🔗 Updating global dependency symlink..."
+            # Create a stable symlink for the deps.pex
+            ln -sfn $DEPLOY_DIR/deps.pex /opt/deploy/current_deps.pex
+            
+            echo "🏃 Running application..."
+            # PEX_PATH is already set in the Dockerfile ENV, so we just run the app
+            python3 $DEPLOY_DIR/${{ matrix.app }}.pex
+          EOF
+
+      - name: Post-Deployment Health Check
+        run: |
+          APP_NAME="${{ matrix.app }}"
+          # Assuming your app has a simple HTTP endpoint or a --version flag
+          # Replace with actual health check logic for your app
+          echo "🩺 Running post-deployment health check for $APP_NAME..."
+          # Example: SSH into the container and run a command to verify app status
+          # For a simple PEX, you might just check its version or a specific output
+          ssh -p 2222 -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "python3 /opt/deploy/$APP_NAME/${{ matrix.app }}.pex --version" || {
+            echo "❌ Health check failed for $APP_NAME!"
+            exit 1
+          }
+          echo "✅ Health check passed for $APP_NAME."
+
+      - name: Cleanup Old Releases on Server
+        run: |
+          APP_NAME="${{ matrix.app }}"
+          RELEASES_PATH="/opt/deploy/$APP_NAME"
+          
+          echo "🧹 Cleaning up old releases on remote server (keeping last 5)..."
+          # List directories, sort by name (which includes timestamp), keep the last 5, and delete the rest
+          ssh -p 2222 -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "bash -s" << EOF
+            if [ -d "$RELEASES_PATH" ]; then
+              cd $RELEASES_PATH
+              # Get all release directories, sort them, and delete all but the newest 5
+              ls -d */ | sort | head -n -5 | xargs -r rm -rf
+              echo "✅ Old releases cleaned up."
+            else
+              echo "No release directory found at $RELEASES_PATH to clean up."
+            fi
+          EOF
+
+      - name: Notify Success
+        run: echo "✅ ${{ matrix.app }} deployed successfully."
+
+  tag-release:
+    needs: deploy
+    if: github.event.inputs.environment == 'production'
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create Production Tag
+        run: |
+          TAG="prod-${{ needs.list-apps.outputs.release_id }}"
+          git tag $TAG
+          git push origin $TAG

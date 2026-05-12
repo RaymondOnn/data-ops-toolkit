@@ -1,0 +1,83 @@
+name: Rollback Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'Application to rollback (e.g., ingestion)'
+        required: true
+        type: string
+      target_release_id:
+        description: 'Full Release ID to revert to (e.g., 20240101123000-abcdef1)'
+        required: true
+        type: string
+      environment:
+        description: 'Target Environment'
+        default: 'production'
+        type: choice
+        options: [ staging, production ]
+
+jobs:
+  rollback:
+    runs-on: self-hosted
+    environment: ${{ github.event.inputs.environment }} # Approval gate for rollback
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ap-southeast-1
+      LOCALSTACK_INTERNAL_URL: "http://host.docker.internal:4566" # For potential post-rollback checks
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Make SSH Verification Script Executable
+        run: chmod +x ./scripts/verify_ssh.sh
+
+      - name: Setup SSH Access
+        uses: ./.github/actions/setup-ssh
+        with:
+          private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          host: ${{ secrets.SSH_HOST }}
+          user: ${{ secrets.SSH_USER }}
+          port: 2222 # Assuming your app-server container maps SSH to 2222
+
+      - name: Verify SSH Connection
+        run: |
+          ./scripts/verify_ssh.sh ${{ secrets.SSH_USER }} ${{ secrets.SSH_HOST }} 2222
+
+      - name: Perform Rollback
+        run: |
+          APP_NAME="${{ github.event.inputs.app_name }}"
+          TARGET_RELEASE_ID="${{ github.event.inputs.target_release_id }}"
+          BASE_PATH="/opt/deploy/$APP_NAME"
+          TARGET_RELEASE_PATH="$BASE_PATH/$TARGET_RELEASE_ID"
+          CURRENT_SYMLINK="/opt/deploy/current_deps.pex" # Global symlink for dependencies
+          APP_SYMLINK="$BASE_PATH/current_app.pex" # New symlink for the app itself
+
+          echo "Attempting rollback for $APP_NAME to release $TARGET_RELEASE_ID..."
+          
+          # Verify target release directory exists on the remote host
+          ssh -p 2222 -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "[ -d \"$TARGET_RELEASE_PATH\" ]" || {
+            echo "❌ Error: Target release directory $TARGET_RELEASE_PATH not found on remote host."
+            exit 1
+          }
+
+          # Atomically switch the symlinks
+          ssh -p 2222 -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "bash -s" << EOF
+            ln -sfn $TARGET_RELEASE_PATH/deps.pex $CURRENT_SYMLINK
+            ln -sfn $TARGET_RELEASE_PATH/$APP_NAME.pex $APP_SYMLINK
+          EOF
+          echo "✅ Rollback successful for $APP_NAME. Current release now points to $TARGET_RELEASE_ID."
+
+      - name: Post-Rollback Health Check
+        run: |
+          APP_NAME="${{ github.event.inputs.app_name }}"
+          echo "🩺 Running post-rollback health check for $APP_NAME..."
+          # Replace with actual health check logic for your app
+          ssh -p 2222 -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "python3 /opt/deploy/current_app.pex --version" || {
+            echo "❌ Post-rollback health check failed for $APP_NAME!"
+            exit 1
+          }
+          echo "✅ Post-rollback health check passed for $APP_NAME."
+
+      - name: Notify Rollback Success
+        run: echo "### ↩️ Rollback Complete to ${{ github.event.inputs.target_release_id }}" >> $GITHUB_STEP_SUMMARY

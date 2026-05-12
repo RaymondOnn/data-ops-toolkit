@@ -17,7 +17,7 @@ defaults:
 
 accounts:
   aws_primary:
-    region: "us-east-1"
+    region: "ap-southeast-1"
     dev:
       account_id: "aws_dev_01"
       secret_key: "vault/dev/s3"
@@ -36,7 +36,7 @@ environments:
   dev:
     archive_base_path: "file:///tmp/archive"
     storage_options:
-      region: "us-east-1"
+      region: "ap-southeast-1"
     services:
       s3_archive:
         account_ref: aws_primary
@@ -60,7 +60,7 @@ environments:
         bucket: "prod-data-lake-archive"
         storage_options:
           s3_storage_class: "DEEP_ARCHIVE"
-          region: "us-east-1"
+          region: "ap-southeast-1"
           
       vault_cas:
         type: "cas_archive" # Maps to StorageVault

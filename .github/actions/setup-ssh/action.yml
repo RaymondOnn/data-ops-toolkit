@@ -7,13 +7,20 @@ inputs:
   host:
     description: 'Target Host Address'
     required: true
+  user:
+    description: 'SSH User'
+    required: true
+  port:
+    description: 'SSH Port'
+    required: false
+    default: '22'
 
 runs:
   using: "composite"
-  stages:
+  steps:
     - shell: bash
       run: |
         mkdir -p ~/.ssh
         echo "${{ inputs.private-key }}" > ~/.ssh/id_rsa
         chmod 600 ~/.ssh/id_rsa
-        ssh-keyscan -H ${{ inputs.host }} >> ~/.ssh/known_hosts
+        ssh-keyscan -p ${{ inputs.port }} -H ${{ inputs.host }} >> ~/.ssh/known_hosts

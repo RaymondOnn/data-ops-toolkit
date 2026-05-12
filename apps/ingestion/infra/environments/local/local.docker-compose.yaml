@@ -54,22 +54,23 @@ services:
       - ch_ntw
 
   localstack:
-    image: localstack/localstack:latest
+    image: localstack/localstack:4.4.0
     container_name: localstack
     ports:
       - "4566:4566"            # LocalStack Edge Proxy
     environment:
-      - SERVICES=s3,secretsmanager,sts,logs,cloudwatch
-      - ACTIVATE_PRO=${ACTIVATE_PRO:-0}
+      - SERVICES=iam,s3,secretsmanager,sts,logs,cloudwatch
+      - DEBUG=1 # Better than SERVICES; tells you what's happening in logs
+      - ACTIVATE_PRO=0 # Explicitly use community features
       - DOCKER_HOST=unix:///var/run/docker.sock
-      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-ap-southeast-1}
       - LANDING_ZONE_BUCKET=${LANDING_ZONE_BUCKET:-landing-zone}
       - ARCHIVE_VAULT_BUCKET=${ARCHIVE_VAULT_BUCKET:-archive-vault}
       - CAS_VAULT_BUCKET=${CAS_VAULT_BUCKET:-cas-vault}
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock"
       - "./.tmp/localstack:/var/lib/localstack"
-      - "./localstack:/etc/localstack/init/ready.d" # Mount the init scripts
+      - "./localstack/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh" # Mount the init scripts
     networks:
       - ch_ntw
 

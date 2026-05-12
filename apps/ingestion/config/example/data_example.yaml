@@ -48,7 +48,7 @@ datasets:
       validation_cmd: "validation-app"
     # Free-form params for services / readers
     params:
-      s3_region: "us-east-1"
+      s3_region: "ap-southeast-1"
       max_batch_rows: 100000
       fetch_timeout_secs: 600
 
@@ -70,6 +70,6 @@ datasets:
       validation_cmd: "validation-app"
     # Free-form params for services / readers
     params:
-      s3_region: "us-east-1"
+      s3_region: "ap-southeast-1"
       max_batch_rows: 100000
       fetch_timeout_secs: 600

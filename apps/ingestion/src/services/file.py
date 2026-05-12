@@ -3,9 +3,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
+from libs.auth.models import Secret
 from libs.clients.base import ClientCantConnect
 from libs.file import FileSystemClient, FileSystemSkills, FormatFactory
 from libs.resilience.circuit_breaker import CircuitBreaker
+from libs.utils.dict import find_keys_by_pattern, update_nested_key
 from loguru import logger
 
 from .base import Archive, Service, Sink, Source
@@ -13,7 +15,6 @@ from .factory import ServiceFactory
 from .registry import protect_service
 
 if TYPE_CHECKING:
-    from libs.auth.models import Secret
     from libs.file.formats.base import FormatHandler
 
 LOG = logger
@@ -51,11 +52,17 @@ class BaseStorageService(Service):
     def _init_client(self, **config: Any) -> FileSystemClient:
         from libs.file.base import create_fs_client
 
-        # 1. Resolve Secret (Password/Keys)
-        # Assuming 'password' is the Secret object containing S3/Azure keys
-        if config.get("password") is not None:
-            secret: Secret = config["password"]
-            config["password"] = secret.resolve(sanitize=True) if secret else {}
+        # 1. Resolve any Secret objects in the config
+        for path, value in find_keys_by_pattern(
+            config, pattern="secret", ignore_case=True
+        ):
+            if isinstance(value, Secret):
+                update_nested_key(
+                    data=config,
+                    path=path,
+                    new_key="password",
+                    new_value=value.resolve(sanitize=True),
+                )
 
         # 2. Merge Credentials with Storage Options
         merged_opts = {**self.opts, **config}
@@ -63,6 +70,14 @@ class BaseStorageService(Service):
         return create_fs_client(
             url=self.url, capabilities=self.capabilities, storage_options=merged_opts
         )
+
+    def _get_handler(self, target_path: str) -> "FormatHandler":
+        """Resolves the appropriate FormatHandler by peeking at the filesystem."""
+        peek = next(self.client.walk_paths(target_path), None)
+        if not peek:
+            raise FileNotFoundError(f"No files found at {target_path}")
+        ext = Path(peek).suffix.lstrip(".").lower()
+        return FormatFactory.get_handler(ext, self.client.fs, self.opts)
 
 
 class StorageSource(BaseStorageService, Source):
@@ -75,17 +90,10 @@ class StorageSource(BaseStorageService, Source):
         if not getattr(self.client, "fs", None):
             raise RuntimeError("Filesystem client is not initialized")
 
-        # 1. Determine format from target or look for the first file to select handler
-        # This allows the handler to use its own glob pattern (e.g. *.csv)
-        # If target is a directory, we peek at one file to get the extension
-        peek = next(self.client.walk_paths(target), None)
-        if not peek:
+        try:
+            handler = self._get_handler(target)
+        except FileNotFoundError:
             return []
-
-        ext = Path(peek).suffix.lstrip(".").lower()
-        handler: FormatHandler = FormatFactory.get_handler(
-            ext, self.client.fs, self.opts
-        )
 
         # 2. Use Handler-specific discovery (e.g. CSVHandler
         # knows to find .csv and .txt)
@@ -114,11 +122,8 @@ class StorageSource(BaseStorageService, Source):
         # Resolve paths via the client (handles file:// vs s3:// etc)
         resolved_paths = [self.client.resolve_path(p) for p in paths]
 
-        # 1. Determine format from the first file to select the handler
-        ext = Path(resolved_paths[0]).suffix.lstrip(".").lower()
-        handler: FormatHandler = FormatFactory.get_handler(
-            ext, self.client.fs, self.opts
-        )
+        # 1. Determine format from the first file
+        handler = self._get_handler(resolved_paths[0])
 
         # 2. Iterate and fetch individually (supports per-file repairs/cleaning)
         # This aligns with the requirement that handlers accept a single Path.

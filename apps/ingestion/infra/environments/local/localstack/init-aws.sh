@@ -1,14 +1,15 @@
 #!/bin/bash
 
+set -e # Exit immediately if a command exits with a non-zero status
 echo "Initializing LocalStack resources..."
 
 # 0. Setup AWS CLI Profile for internal container tools
 # This ensures the [localstack] profile exists for any tool or worker
 # running inside the LocalStack environment.
-aws configure set aws_access_key_id test --profile localstack
-aws configure set aws_secret_access_key test --profile localstack
-aws configure set region "${AWS_DEFAULT_REGION:-ap-southeast-1}" --profile localstack
-aws configure set output json --profile localstack
+aws configure set aws_access_key_id test
+aws configure set aws_secret_access_key test
+aws configure set region "${AWS_DEFAULT_REGION:-ap-southeast-1}"
+aws configure set output json
 
 # Function to validate S3 bucket naming conventions
 validate_bucket_name() {
@@ -45,7 +46,8 @@ validate_bucket_name "$LANDING_BUCKET"
 validate_bucket_name "$ARCHIVE_BUCKET"
 validate_bucket_name "$CAS_BUCKET"
 
-# 1. Create S3 Buckets
+# 1. Create S3 Buckets using awslocal (automatically routes to localhost:4566)
+# No need to specify --endpoint-url when using the awslocal wrapper.
 awslocal s3 mb s3://"$LANDING_BUCKET"
 awslocal s3 mb s3://"$ARCHIVE_BUCKET"
 awslocal s3 mb s3://"$CAS_BUCKET"
@@ -77,7 +79,7 @@ awslocal secretsmanager create-secret \
 # Note: LocalStack Community doesn't strictly enforce policy JSON, 
 # but the role must exist for assume_role to succeed.
 awslocal iam create-role \
-    --role-name TaskManager \
+    --role-name ProdIngestionRole \
     --assume-role-policy-document '{
         "Version": "2012-10-17",
         "Statement": [{

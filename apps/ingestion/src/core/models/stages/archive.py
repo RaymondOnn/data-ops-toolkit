@@ -27,11 +27,27 @@ class ArchiveStage(ExecutionStage):
             self.service = ServiceFactory.get_service(
                 service_type=str(task_ctx.archive.type), **task_ctx.archive.config
             )
+            print(f"Initialized Archive service: {self.service}")
+            try:
+                # Do not use the S3 URL here, just list buckets to see what's visible
+                visible_buckets = [b['Name'] for b in self.service.client.fs.call_s3('list_buckets')['Buckets']]
+                print(f"WORKER DEBUG: Visible buckets: {visible_buckets}")
+                print(f"WORKER DEBUG: {self.service.client.fs.ls(self.service.url)}")
+            except Exception as e:
+                print(f"WORKER DEBUG: Failed to connect: {e}")
+                
+                
+            # For S3/Cloud storage, prefixes don't "exist" until they contain files.
+            # We verify the bucket/root exists to confirm connectivity and permissions.
+            check_url = self.service.url
+            if "://" in check_url:
+                # Extract protocol and bucket: s3://my-bucket/prefix -> s3://my-bucket
+                parts = check_url.split("/")
+                check_url = "/".join(parts[:3])
 
-            # Verify that the archive destination actually exists.
-            if not self.service.client.exists(self.service.url):
+            if not self.service.client.exists(check_url):
                 raise ConnectionError(
-                    f"Archive pre-flight failed: Destination '{self.service.url}' is unreachable or does not exist."
+                    f"Archive pre-flight failed: Root destination '{check_url}' is unreachable or does not exist."
                 )
 
     def execute(self, task: Task) -> str:

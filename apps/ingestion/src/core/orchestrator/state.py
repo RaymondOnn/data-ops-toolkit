@@ -1,5 +1,4 @@
 import time
-from collections import ChainMap
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
@@ -68,28 +67,17 @@ class StateStore:
     def _create_updated_record(
         self, base_record: JobRecord | None, updates: dict[str, Any]
     ) -> JobRecord | None:
-        # 1. Convert base record to a mutable dictionary if it exists
-        base_dict = msgspec.to_builtins(base_record) if base_record else {}
+        # Merge base record with updates
+        merged = msgspec.to_builtins(base_record) if base_record else {}
+        merged.update(updates)
 
-        # 2. Use ChainMap to merge. updates take precedence over base_dict.
-        # We include default values for critical columns to ensure they are never null
-        # if this is the first time a record is being created.
-        merged = dict(ChainMap(updates, base_dict))
-
-        # 3. FORCE the update of the tracking timestamp.
-        # This ensures that even if 'updates' contains an old TS,
-        # the orchestrator's current time wins.
-        current_ts = get_current_timestamp(
-            timezone=self.exec_ctx.timezone, strip_tz=STRIP_TZ_FOR_DB
+        # Force timestamp update
+        merged["LAST_UPDATED_AT_TS_LC"] = to_ch_datetime(
+            get_current_timestamp(
+                timezone=self.exec_ctx.timezone, strip_tz=STRIP_TZ_FOR_DB
+            )
         )
-        merged["LAST_UPDATED_AT_TS_LC"] = to_ch_datetime(current_ts)
 
-        # 4. Handle potential nested structures (like FINAL_MANIFEST)
-        # If the update didn't provide a manifest, keep the old one
-        if "FINAL_MANIFEST" not in updates and base_dict.get("FINAL_MANIFEST"):
-            merged["FINAL_MANIFEST"] = base_dict["FINAL_MANIFEST"]
-
-        # 6. Final conversion back to the JobRecord struct.
         try:
             return msgspec.convert(merged, type=JobRecord)
         except Exception as e:
@@ -434,26 +422,20 @@ class StateStore:
         Example: 7, [EXT, AUD, TRN, WRI] -> "EXT+ | AUD+ | TRN+ | WRI_"
         """
         planned_stages = planned_stages or EXEC_STAGES
-        tokens = []
         failure_detected = status.upper() == ExecutionStatus.FAILED.value
-        found_failure_point = False
+        failed_found = False
+        results = []
 
         for stage in planned_stages:
-            # Check if the bit for this stage is set in the bitmask
-            # We use stage.bitmask from your enums logic
-            is_complete = bool(bitmask & stage.bitmask)
-
-            if is_complete:
-                tokens.append(f"{stage.token}+")
-            elif failure_detected and not found_failure_point:
-                # The first stage that isn't complete in a FAILED job is the culprit
-                tokens.append(f"{stage.token}-")
-                found_failure_point = True
+            if bitmask & stage.bitmask:
+                results.append(f"{stage.token}+")
+            elif failure_detected and not failed_found:
+                results.append(f"{stage.token}-")
+                failed_found = True
             else:
-                # Stage not yet reached or skipped due to previous failure
-                tokens.append(f"{stage.token}_")
+                results.append(f"{stage.token}_")
 
-        return " | ".join(tokens)
+        return " | ".join(results)
 
     def flush(self) -> None:
         """Rotates JSONL to Parquet using optimized Lazy execution."""
@@ -484,39 +466,13 @@ class StateStore:
             # 2. Start Lazy Scan (Using explicit schema to bypass inference)
             lf = pl.scan_ndjson(temp_jsonl, schema=scan_schema)
 
-            # Map normalized (uppercase) ClickHouse columns to their actual names
-            # and create a lookup for Polars columns found in the JSONL.
+            # Build Alignment Expressions
             lf_cols = {c.upper(): c for c in lf.columns}
-            expressions = []
-
-            for row in schema_df.to_dicts():
-                col, raw_dtype = row["column_name"], row["data_type"]
-                db_col_upper = col.upper()
-                target_ptype = TypeResolver.resolve_to_polars("clickhouse", raw_dtype)
-
-                if db_col_upper in lf_cols:
-                    source_col = lf_cols[db_col_upper]
-                    # Treat all incoming JSONL data as String first to prevent pl.Null inference crashes.
-                    # This provides a stable foundation for the .str namespace and final type casting.
-                    source_expr = pl.col(source_col).cast(pl.String)
-
-                    if "date" in raw_dtype.casefold():
-                        expr = (
-                            source_expr.str.to_date(strict=False)
-                            if raw_dtype.casefold() == "date"
-                            else source_expr.str.to_datetime(strict=False)
-                        )
-                        expressions.append(expr.cast(target_ptype).alias(col))
-                    else:
-                        expressions.append(
-                            source_expr.cast(target_ptype, strict=False).alias(col)
-                        )
-                else:
-                    # Column missing from stream: explicitly add as Null to maintain schema parity
-                    expressions.append(pl.lit(None).cast(target_ptype).alias(col))
+            expressions = [
+                self._get_alignment_expr(row, lf_cols) for row in schema_df.to_dicts()
+            ]
 
             # 3. Collect and Write
-            # select(expressions) applies all casts in a single parallel pass
             df: pl.DataFrame = lf.select(expressions).collect()
 
             if df.height > 0:
@@ -536,6 +492,30 @@ class StateStore:
         except Exception as e:
             LOG.error("StateStore flush failed", error=str(e))
             raise  # Reraise to ensure the Orchestrator knows the sync failed
+
+    def _get_alignment_expr(
+        self, row: dict[str, str], lf_cols: dict[str, str]
+    ) -> pl.Expr:
+        """Generates a Polars cast expression for a single DB column."""
+        col, raw_dtype = row["column_name"], row["data_type"]
+        db_col_upper = col.upper()
+        target_ptype = TypeResolver.resolve_to_polars("clickhouse", raw_dtype)
+
+        if db_col_upper not in lf_cols:
+            return pl.lit(None).cast(target_ptype).alias(col)
+
+        # Treat as string first to prevent pl.Null inference crashes
+        expr = pl.col(lf_cols[db_col_upper]).cast(pl.String)
+
+        if "date" in raw_dtype.casefold():
+            if "datetime" in raw_dtype.casefold():
+                # For DateTime/DateTime64, rely on ISO-8601 inference
+                expr = expr.str.to_datetime(strict=False)
+            else:
+                # For Date/Date32, explicitly use the standard format to prevent ComputeError
+                expr = expr.str.to_date(format="%Y-%m-%d", strict=False)
+
+        return expr.cast(target_ptype, strict=False).alias(col)
 
     def _process_stage(self):
         """Iterates through stage folder and moves successful loads to archive"""
@@ -638,9 +618,7 @@ class StateStore:
 
             new_record = self._create_updated_record(current, update_dict)
             if not new_record:
-                LOG.warning(
-                    "Update failed: Invalid data structure", run_id=run_id
-                )
+                LOG.warning("Update failed: Invalid data structure", run_id=run_id)
                 return
 
             # --- NEW LOGIC: Only buffer if functional data changed ---

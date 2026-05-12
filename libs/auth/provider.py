@@ -72,27 +72,25 @@ class AWSSecretProvider(SecretProvider):
         """
         :param aws_client: An instance of libs.cloud.aws.AWSClient (Singleton)
         """
-        
+
         from libs.cloud.aws import AWSClient, AWSClientConfig
 
         # Standard library unpacking - no msgspec for shared libs
         client_cfg = config.get("client", {})
         aws_config = AWSClientConfig(
-            region=client_cfg.get("region", "us-east-1"),
+            region=client_cfg.get("region", "ap-southeast-1"),
             sts_endpoint_url=client_cfg.get("sts_endpoint_url"),
             role_arn=client_cfg.get("role_arn"),
             profile_name=client_cfg.get("profile_name"),
             aws_access_key_id=client_cfg.get("aws_access_key_id"),
             aws_secret_access_key=client_cfg.get("aws_secret_access_key"),
-
         )
-        
+
         self.aws_client = AWSClient(config=aws_config)
-        
+
         svc_cfg = config["service"]
         self.client = self.aws_client.get_client(
-            "secretsmanager",
-            endpoint_url=svc_cfg["endpoint_url"]
+            "secretsmanager", endpoint_url=svc_cfg["endpoint_url"]
         )
 
     def get_secret(self, secret_id: str) -> str:

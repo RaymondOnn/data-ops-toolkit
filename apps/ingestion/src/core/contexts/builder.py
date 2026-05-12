@@ -185,79 +185,50 @@ class TaskContextBuilder:
             cache_config=cache_cfg,
         )
 
+    def _get_val(
+        self, settings: Dynaconf, dataset_id: str, path: str, default: Any = None
+    ) -> Any:
+        """Hierarchical lookup: Dataset (Env > Default) > Job (Env > Default) > App (Env > Default)."""
+        search_paths = [f"datasets.{dataset_id}.{path}", f"job.{path}"]
+        for p in search_paths:
+            for env in [None, "default"]:
+                s = settings if env is None else settings.from_env("default")
+                val = s.get(p)
+                if val is not None:
+                    return expand_env_vars(val)
+
+        # Fallback to global app settings
+        val = self.app_settings.get(path) or self.app_settings.from_env("default").get(
+            path
+        )
+        return expand_env_vars(val) if val is not None else default
+
     # TODO: Skip archive if enable_archival = False
     def _resolve_service(
         self, settings: Dynaconf, ref_key: str, dataset_id: str
     ) -> dict:
-        # Search hierarchy for service_ref:
-        # Dataset (Active -> Default) > Task (Active -> Default)
-        ref = (
-            settings.get(f"datasets.{dataset_id}.{ref_key}.service_ref")
-            or settings.from_env("default").get(
-                f"datasets.{dataset_id}.{ref_key}.service_ref"
-            )
-            or settings.get(f"job.{ref_key}.service_ref")
-            or settings.from_env("default").get(f"job.{ref_key}.service_ref")
-        )
-
-        LOG.debug(
-            "Resolving service reference",
-            ref_key=ref_key,
-            ref=ref,
-            dataset_id=dataset_id,
-        )
-
+        """Resolves a service definition by reference or inline config."""
+        ref = self._get_val(settings, dataset_id, f"{ref_key}.service_ref")
         if ref:
-            # 1. Try Global app.yaml (Active env, then fallback to default)
-            global_def = self.app_settings.get(
-                f"services.{ref}"
-            ) or self.app_settings.from_env("default").get(f"services.{ref}")
-
-            if global_def:
-                svc_dict = expand_env_vars(global_def.to_dict())
-                LOG.debug(
-                    "Found service definition in global app.yaml",
-                    ref=ref,
-                    env=self.app_settings.current_env,
-                    config=svc_dict,
-                )
-                return svc_dict
-
-            # 2. Try Task-level config.yaml services block
-            job_level_def = settings.get(f"services.{ref}") or settings.from_env(
-                "default"
-            ).get(f"services.{ref}")
-
-            if job_level_def:
-                svc_dict = expand_env_vars(job_level_def.to_dict())
-                LOG.debug(
-                    "Found service definition in job config.yaml",
-                    ref=ref,
-                    config=svc_dict,
-                )
-                return svc_dict
+            # Search hierarchy for the 'services.{ref}' definition
+            # Priority: Job Config (Env > Default) > Global Config (Env > Default)
+            def_paths = [f"services.{ref}"]
+            for p in def_paths:
+                # We use None as dataset_id because service definitions are top-level
+                svc_def = self._get_val(settings, "GLOBAL", p)
+                if svc_def:
+                    return svc_def if isinstance(svc_def, dict) else svc_def.to_dict()
 
             LOG.warning(
-                f"Service reference '{ref}' found, "
-                "but no definition exists in services block.",
+                f"Service reference '{ref}' not found in any definition blocks.",
                 ref_key=ref_key,
             )
 
-            # Fallback to inline config block:
-            # Dataset (Active -> Default) > Task (Active -> Default)
-            svc_dict = expand_env_vars(
-                dict(
-                    settings.get(f"datasets.{dataset_id}.{ref_key}.config")
-                    or settings.from_env("default").get(
-                        f"datasets.{dataset_id}.{ref_key}.config"
-                    )
-                    or settings.get(f"job.{ref_key}.config")
-                    or settings.from_env("default").get(f"job.{ref_key}.config")
-                    or {}
-                )
+            # Fallback to inline config block
+            svc_dict = self._get_val(
+                settings, dataset_id, f"{ref_key}.config", default={}
             )
-
-            if svc_dict is not None and "type" not in svc_dict:
+            if svc_dict and "type" not in svc_dict:
                 LOG.warning(
                     f"Service dictionary for '{ref}' is missing the required 'type' key. "
                     "Factory initialization will likely fail.",
@@ -382,40 +353,9 @@ class TaskContextBuilder:
         settings: Dynaconf,
         overrides: dict[str, Any] | None = None,
     ) -> TaskContext:
-        """
-        Helper that implements the 'Dataset > Task' fallback logic.
-        """
-
-        def get_val(path: str, default: Any = None) -> Any:
-            """
-            Hierarchical lookup helper.
-            Search priority:
-            1. Job Config: Dataset (Active Env) -> Dataset (Default)
-            2. Job Config: Job-wide (Active Env) -> Job-wide (Default)
-            3. App Config: Global Environment-specific (e.g. 'local')
-            4. App Config: Global Defaults
-            """
-            search_paths = [f"datasets.{dataset_id}.{path}", f"job.{path}"]
-            for p in search_paths:
-                # 1. Check active environment
-                val = settings.get(p)
-                if val is not None:
-                    return expand_env_vars(val)
-
-                # 2. Check 'default' environment fallback
-                val = settings.from_env("default").get(p)
-                if val is not None:
-                    return expand_env_vars(val)
-            # 2. Fallback to global app.yaml (respecting active environment)
-            val = self.app_settings.get(path)
-            if val is not None:
-                return expand_env_vars(val)
-
-            # 3. Final Fallback: Check for Feature Flags in App Config
-            if path.startswith("feature_flags."):
-                return expand_env_vars(self.app_settings.get(path))
-
-            return default
+        # Short-cut for cleaner calls
+        def get_val(p, d=None):
+            return self._get_val(settings, dataset_id, p, d)
 
         # 0. Handle Schema File Loading
         schema_file = get_val("extract.schema_file")
@@ -423,37 +363,20 @@ class TaskContextBuilder:
         if schema_file:
             schema_items = self._load_schema_file(job_id, schema_file)
 
-        # 1. Resolve full service dictionaries (respecting service_ref)
-        # pop() extracts specific 'type' and leave residual as 'config'
-        source_svc = self._resolve_service(settings, "extract", dataset_id)
-        source_type = (
-            source_svc.pop("type", get_val("extract.source_type"))
-            if source_svc
-            else get_val("extract.source_type")
+        def resolve_full_config(key: str, fallback_path: str):
+            svc = self._resolve_service(settings, key, dataset_id)
+            stype = svc.pop("type", get_val(fallback_path))
+            return stype, svc
+
+        source_type, source_svc = resolve_full_config("extract", "extract.source_type")
+        sink_type, sink_svc = resolve_full_config("load", "load.sink_type")
+
+        enable_archival = get_val("archive.enable_archival")
+        archive_type, archive_svc = (
+            resolve_full_config("archive", "archive.archive_type")
+            if enable_archival
+            else (None, {})
         )
-
-        sink_svc = self._resolve_service(settings, "load", dataset_id)
-        sink_type = (
-            sink_svc.pop("type", get_val("load.sink_type"))
-            if sink_svc
-            else get_val("load.sink_type")
-        )
-
-        if enable_archival := get_val("archive.enable_archival"):
-            archive_svc = self._resolve_service(settings, "archive", dataset_id)
-            archive_type = (
-                archive_svc.pop("type", get_val("archive.archive_type"))
-                if archive_svc
-                else get_val("archive.archive_type")
-            )
-
-            retention_days = get_val("archive.retention_days")
-            base_path = get_val("archive.base_path")
-        else:
-            archive_svc = {}
-            archive_type = None
-            retention_days = None
-            base_path = None
 
         ctx_data = {
             "job_id": job_id,
@@ -486,8 +409,10 @@ class TaskContextBuilder:
             },
             "archive": {
                 "enabled": enable_archival,
-                "retention_days": retention_days,
-                "base_path": base_path,
+                "retention_days": (
+                    get_val("archive.retention_days") if enable_archival else None
+                ),
+                "base_path": get_val("archive.base_path") if enable_archival else None,
                 "type": archive_type,
                 "config": archive_svc,
             },
@@ -505,5 +430,5 @@ class TaskContextBuilder:
                 else:
                     ctx_data.setdefault("custom_overrides", {})[key] = value
 
-        # Validate via msgspec
-        return msgspec.json.decode(msgspec.json.encode(ctx_data), type=TaskContext)
+        # Perform type-safe conversion and validation from dict to Struct
+        return msgspec.convert(ctx_data, type=TaskContext)

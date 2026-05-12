@@ -3,11 +3,12 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from apps.ingestion.src.utils.exceptions import RetryTask
-from libs.auth.factory import AuthFactory
+from libs.auth.factory import AuthFactory, SecretProvider
 from libs.auth.models import Secret
 from libs.cache.base import KeyValueCache
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreakerTripped
+from libs.utils.dict import find_keys_by_pattern, update_nested_key
 from libs.utils.exceptions import AuthFailure, HostUnreachable
 from loguru import logger
 
@@ -25,7 +26,7 @@ class ServiceFactory:
     _SERVICES: ClassVar[dict[str, type]] = {}
     # Registry of Singleton Instances (Populated at Runtime)
     _INSTANCES: ClassVar[dict[str, Any]] = {}
-    _provider: ClassVar[Any] = None
+    _provider: ClassVar[SecretProvider | None] = None
 
     @staticmethod
     def _make_hashable(value: Any) -> Any:
@@ -63,7 +64,6 @@ class ServiceFactory:
         # If benchmark_mode is on, we can swap the requested service
         # for an experimental one
         effective_type = service_type
-        effective_type = service_type
         if (
             flags
             and getattr(flags, "benchmark_mode", False)
@@ -92,13 +92,21 @@ class ServiceFactory:
             # --- CENTRALIZED SECRET LOGIC ---
             # If 'secret_key' (the ID) is present, wrap it in a Secret object.
             # This 'Secret' object is what gets sent to Ray workers.
-            if config.get("secret_key"):
-                if cls._provider is None:
-                    raise ValueError(
-                        "Secret provider not configured in ServiceFactory."
+            for path, value in find_keys_by_pattern(
+                config, pattern="secret_key", ignore_case=True
+            ):
+                if path:
+                    if cls._provider is None:
+                        raise ValueError(
+                            "Secret provider not configured in ServiceFactory. "
+                            f"Cannot resolve secret for '{path}'."
+                        )
+                    update_nested_key(
+                        data=config, 
+                        path=path, 
+                        new_key="password", 
+                        new_value=Secret(value, provider=cls._provider)
                     )
-
-                config["password"] = Secret(config["secret_key"], cls._provider)
 
             try:
                 cls._INSTANCES[instance_key] = service_cls(name=instance_key, **config)
@@ -126,34 +134,35 @@ class ServiceFactory:
         return cls._INSTANCES[instance_key]
 
     @classmethod
+    def _get_typed_service(
+        cls, service_type: str, interface: type, flags: Any | None = None, **config: Any
+    ) -> Any:
+        """Helper to ensure the retrieved service matches the expected interface."""
+        service = cls.get_service(service_type, flags=flags, **config)
+        if not isinstance(service, interface):
+            raise TypeError(
+                f"Service {service_type} does not implement {interface.__name__}."
+            )
+        return service
+
+    @classmethod
     def get_source(
         cls, service_type: str, flags: Any | None = None, **config: Any
     ) -> Source:
-        service = cls.get_service(service_type, flags=flags, **config)
-        if not isinstance(service, Source):
-            raise TypeError(f"Service {service_type} does not implement Source.")
-        return service
+        return cls._get_typed_service(service_type, Source, flags, **config)
         # return cast(Source, service)
 
     @classmethod
     def get_sink(
         cls, service_type: str, flags: Any | None = None, **config: Any
     ) -> Sink:
-        service = cls.get_service(service_type, flags=flags, **config)
-        if not isinstance(service, Sink):
-            raise TypeError(f"Service {service_type} does not implement Sink.")
-        return service
-        # return cast(Sink, service)
+        return cls._get_typed_service(service_type, Sink, flags, **config)
 
     @classmethod
     def get_archive(
         cls, service_type: str, flags: Any | None = None, **config: Any
     ) -> Archive:
-        service = cls.get_service(service_type, flags=flags, **config)
-        if not isinstance(service, Archive):
-            raise TypeError(f"Service {service_type} does not implement Archive.")
-        return service
-        # return cast(Archive, service)
+        return cls._get_typed_service(service_type, Archive, flags, **config)
 
     @classmethod
     def get_cache(cls, workspace_dir: Path, cache_cfg: dict[str, Any]) -> KeyValueCache:

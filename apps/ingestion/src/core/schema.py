@@ -38,16 +38,17 @@ def apply_schema_contract(df: pl.DataFrame, context: ReaderContext) -> pl.DataFr
 
         # 3. Handle Audit/Literal Columns (No physical source column)
         if s_col is None and t_col.startswith("_"):
-            if t_col in ("_created_at_ts", "_ingested_at"):
-                expr = pl.lit(time.time())
-            elif t_col == "_partition":
-                expr = pl.lit(context.partition_date)
-            elif t_col == "_run_id":
-                expr = pl.lit(context.run_id)
-            elif t_col in ("_source", "_source_host"):
-                expr = pl.lit(context.source_identifier)
-            else:
-                expr = pl.lit(None)
+            resolvers = {
+                "_created_at_ts": lambda: pl.lit(time.time()),
+                "_ingested_at": lambda: pl.lit(time.time()),
+                "_partition": lambda: pl.lit(context.partition_date),
+                "_run_id": lambda: pl.lit(context.run_id),
+                "_source": lambda: pl.lit(context.source_identifier),
+                "_source_host": lambda: pl.lit(context.source_identifier),
+            }
+
+            resolver = resolvers.get(t_col, lambda: pl.lit(None))
+            expr = resolver()
 
             # Directly cast literal to target type and alias
             exprs.append(expr.cast(target_ptype).alias(t_col))

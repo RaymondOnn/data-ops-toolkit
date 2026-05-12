@@ -6,6 +6,7 @@ from typing import Any
 import boto3
 from botocore.credentials import RefreshableCredentials
 from botocore.session import get_session
+from aiobotocore.session import get_session as get_aio_session
 
 LOG = logging.getLogger(__name__)
 
@@ -129,6 +130,24 @@ class AWSClient:
             self.config.role_arn, session_name
         )
         return self._session
+    
+    def get_async_session(self):
+        """Returns an aiobotocore session for async libraries like s3fs."""
+        aio_session = get_aio_session()
+        
+        # Get the credentials object from your existing sync session
+        sync_session = self.get_session()
+        creds = sync_session._session.get_credentials()
+        
+        # Patch the missing method s3fs expects (as we discussed)
+        if not hasattr(creds, "get_account_id"):
+            creds.get_account_id = lambda: None
+            
+        # Inject the credentials into the async session
+        aio_session._credentials = creds
+        aio_session.set_config_variable("region", self.config.region)
+        
+        return aio_session
 
     def _create_refreshable_session(
         self, role_arn: str, session_name: str
@@ -163,7 +182,12 @@ class AWSClient:
             method="sts-assume-role",
         )
 
+        # s3fs/aiobotocore expects this method to exist on the credentials object
+        if not hasattr(session_credentials, "get_account_id"):
+            session_credentials.get_account_id = lambda: None
+            
         bc_session = get_session()
+        bc_session.set_config_variable("profile", None)
         bc_session._credentials = session_credentials
         bc_session.set_config_variable("region", self.config.region)
 
@@ -177,3 +201,14 @@ class AWSClient:
             region_name=self.config.region,
             endpoint_url=endpoint_url,
         )
+
+    def get_current_credentials(self) -> Any:
+        """Returns the raw credentials object from the session."""
+        creds = self.get_session()._session.get_credentials()
+        
+        # LocalStack fix: Force the account ID to 0s
+        # S3FS/Botocore uses this to resolve the bucket owner
+        if not hasattr(creds, "get_account_id") or creds.get_account_id() is None:
+            creds.get_account_id = lambda: "000000000000"
+            
+        return creds
