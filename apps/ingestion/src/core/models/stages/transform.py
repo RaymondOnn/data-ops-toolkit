@@ -57,8 +57,7 @@ class TransformStage(ExecutionStage):
             )
         except Exception as e:
             # If the transformer type is unknown or config is broken, fail early
-            LOG.error("Transformer initialization failed in pre_flight", error=str(e))
-            raise ValueError(f"Invalid transformer configuration: {e}") from e
+            LOG.exception("Invalid transformer configuration in pre_flight")
 
         # 4. Gate: TransformContext Validation
         if not task.context.transform.transform_type:

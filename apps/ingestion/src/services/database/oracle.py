@@ -1,3 +1,4 @@
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -15,12 +16,13 @@ LOG = logger
 
 @ServiceFactory.register("oracle_db")
 class OracleService(DatabaseSource, DatabaseSink):
-    def _init_client(self, **config: Any) -> Any:
-        secret: Secret = config["password"]
+    @cached_property
+    def client(self) -> OracleClient:
+        secret: Secret = self._config["password"]
         return OracleClient(
-            user=config["user"],
+            user=self._config["user"],
             password=secret.resolve(sanitize=True),
-            dsn=config["dsn"],
+            dsn=self._config["dsn"],
         )
 
     def stage_data(

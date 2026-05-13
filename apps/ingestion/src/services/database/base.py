@@ -31,11 +31,18 @@ class DatabaseService(Service):
 
     def __init__(self, name: str, **config: Any):
         super().__init__(name, **config)
-        self.client: DBClient = self._init_client(**config)
+        self._config = config
 
+    def reset_client(self) -> None:
+        """Force-clears the cached client, triggering a full re-initialization on next use."""
+        if "client" in self.__dict__:
+            LOG.warning(f"Resetting database client for service: {self.name}")
+            del self.client
+
+    @property
     @abstractmethod
-    def _init_client(self, **config: Any) -> Any:
-        """Subclasses must initialize their specific DB client."""
+    def client(self) -> "DBClient":
+        """Subclasses must provide a client property."""
         pass
 
     @contextlib.contextmanager

@@ -10,6 +10,7 @@ dependencies = [
     "s3fs",
     "adlfs",
     "gcsfs",
+    "universal-pathlib",
 ]
 requires-python = ">=3.11"
 

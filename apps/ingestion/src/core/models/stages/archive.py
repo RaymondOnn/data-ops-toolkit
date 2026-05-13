@@ -1,5 +1,4 @@
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import msgspec
 from apps.ingestion.src.core.models.task import Task, TaskSignal
@@ -8,6 +7,7 @@ from apps.ingestion.src.services.base import Archive
 from apps.ingestion.src.services.factory import ServiceFactory
 from libs.utils.dates import get_current_timestamp
 from loguru import logger
+from upath import UPath
 
 from .base import ExecutionStage
 from .enums import StageName
@@ -27,16 +27,7 @@ class ArchiveStage(ExecutionStage):
             self.service = ServiceFactory.get_service(
                 service_type=str(task_ctx.archive.type), **task_ctx.archive.config
             )
-            print(f"Initialized Archive service: {self.service}")
-            try:
-                # Do not use the S3 URL here, just list buckets to see what's visible
-                visible_buckets = [b['Name'] for b in self.service.client.fs.call_s3('list_buckets')['Buckets']]
-                print(f"WORKER DEBUG: Visible buckets: {visible_buckets}")
-                print(f"WORKER DEBUG: {self.service.client.fs.ls(self.service.url)}")
-            except Exception as e:
-                print(f"WORKER DEBUG: Failed to connect: {e}")
-                
-                
+
             # For S3/Cloud storage, prefixes don't "exist" until they contain files.
             # We verify the bucket/root exists to confirm connectivity and permissions.
             check_url = self.service.url
@@ -74,11 +65,11 @@ class ArchiveStage(ExecutionStage):
                 if not task_ctx.archive.base_path:
                     raise ValueError("Archive base path is required for archival.")
                 # Establish the root archival path for this specific run
+                # Pass the service client's storage options to UPath
+                # This ensures s3:// links use the correct credentials/endpoints
+                base = UPath(task_ctx.archive.base_path, **self.service.client.opts)
                 final_archive_path = (
-                    Path(task_ctx.archive.base_path)
-                    / task.job_id
-                    / task.partition_date
-                    / task.run_id
+                    base / task.job_id / task.partition_date / task.run_id
                 )
 
                 # 1. Archive Parquet Files

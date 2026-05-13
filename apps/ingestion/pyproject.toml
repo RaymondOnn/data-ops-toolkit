@@ -19,9 +19,8 @@ dependencies = [
     "typer",
     "filelock",
     "dynaconf",
-    "boto3",
     "apscheduler",
-    "tenacity",
+    "universal-pathlib",
 ]
 requires-python = ">=3.11"
 

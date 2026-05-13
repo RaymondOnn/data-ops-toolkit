@@ -1,12 +1,11 @@
 import logging
-from typing import TYPE_CHECKING, Any
+from collections.abc import Generator
+from pathlib import Path
+from typing import Any
 
-import fsspec
 from libs.cloud.aws import AWSClient, AWSClientConfig
 from libs.file.base import FileSystemClient
 from s3fs import S3FileSystem
-
-# if TYPE_CHECKING:
 
 LOG = logging.getLogger(__name__)
 
@@ -26,15 +25,14 @@ class S3Client(FileSystemClient):
 
     def __init__(self, url: str, storage_options: dict[str, Any] | None = None) -> None:
         super().__init__(url, storage_options)
-        print(f"Initialized S3Client with URL: {url}")
 
     @property
-    def fs(self) -> "S3FileSystem":
+    def fs(self) -> S3FileSystem:
         """Establishes the S3 connection using mapped credentials."""
 
         if not hasattr(self, "_fs") or self._fs is None:
             client_cfg = self.opts.pop("client")
-            
+
             aws = AWSClient(
                 config=AWSClientConfig(
                     region=client_cfg["region"],
@@ -65,38 +63,125 @@ class S3Client(FileSystemClient):
                         "region_name": aws.config.region,
                         "endpoint_url": s3_endpoint_url,
                         "use_ssl": self.opts.get("use_ssl", False),
-                        "verify": False
+                        "verify": False,
                     },
                     "config_kwargs": {
                         "s3": {
                             "signature_version": "s3v4",
-                            "addressing_style": "path"
+                            "addressing_style": "path",
                         },  # Essential for LocalStack compatibility
                     },
                 }
             )
-            print(f"S3 Client Config: {s3_opts}")
-            # self._fs = S3FileSystem(
-            #     key=creds.access_key,
-            #     secret=creds.secret_key,
-            #     token=creds.token,
-            #     use_ssl=False,
-            #     asynchronous=False,
-            #     use_listings_cache=False,  # CRITICAL: Don't cache the 404
-            #     client_kwargs={
-            #         "endpoint_url": s3_endpoint_url,
-            #         "region_name": aws.config.region,
-            #     },
-            #     config_kwargs={
-            #         "s3": {
-            #             "addressing_style": "path", # Force http://host/bucket
-            #             "signature_version": "s3v4"
-            #         }
-            #     }
-            # )
+            self._fs = S3FileSystem(
+                key=creds.access_key,
+                secret=creds.secret_key,
+                token=creds.token,
+                use_ssl=False,
+                asynchronous=False,
+                use_listings_cache=False,  # CRITICAL: Don't cache the 404
+                client_kwargs={
+                    "endpoint_url": s3_endpoint_url,
+                    "region_name": aws.config.region,
+                },
+                config_kwargs={
+                    "s3": {
+                        "addressing_style": "path",  # Force http://host/bucket
+                        "signature_version": "s3v4",
+                    }
+                },
+            )
             # 4. Create the filesystem using the 's3' protocol
             # Type cast for IDE support if necessary
-            LOG.debug(f"S3Client: Routing data to {s3_endpoint_url} using region {aws.config.region}")
-            self._fs = fsspec.filesystem("s3", **s3_opts)
+            LOG.debug(
+                f"S3Client: Routing data to {s3_endpoint_url} using "
+                f"region {aws.config.region}"
+            )
+            # self._fs = fsspec.filesystem("s3", **s3_opts)
 
         return self._fs
+
+    def exists(self, path: str | Path) -> bool:
+        """
+        WORKAROUND: Bypass the NoSuchBucket 404 in LocalStack
+        by using list_buckets for root-level checks.
+        """
+        resolved = self.resolve_path(str(path))
+
+        # Check if it's just the bucket root (s3://bucket-name)
+        if resolved.count("/") == 2:  # "s3://bucket-name" has 2 slashes
+            bucket_name = resolved.replace("s3://", "").rstrip("/")
+            try:
+                resp = self.fs.call_s3("list_buckets")
+                bucket_names = [b["Name"] for b in resp.get("Buckets", [])]
+                LOG.debug(f"Bucket check: {bucket_name} in {bucket_names}")
+                return bucket_name in bucket_names
+            except Exception as e:
+                LOG.error(f"Failed to list buckets: {e}")
+                return False
+
+        # For files, use driver but catch the phantom 404
+        try:
+            return self.fs.exists(resolved)
+        except Exception as e:
+            error_msg = str(e)
+            if "NoSuchBucket" in error_msg or "NoSuchKey" in error_msg:
+                LOG.debug(f"Path doesn't exist (caught expected error): {resolved}")
+                return False
+            LOG.error(f"Unexpected error in exists(): {e}")
+            raise
+
+    def find(self, path: str, pattern: str = "*") -> Generator[str, None, None]:
+        """Replacement for walk_paths following CLI search patterns."""
+        resolved = self.resolve_path(path)
+        # s3fs.find is optimized to use S3 Prefixes rather than recursive LS
+        for p in self.fs.find(resolved):
+            # Ensure protocol is attached for downstream processing
+            full_path = self.fs.unstrip_protocol(p)
+            if pattern == "*" or Path(full_path).match(pattern):
+                yield full_path
+
+    def cp(
+        self, source: str, destination: str, recursive: bool = True, **kwargs
+    ) -> None:
+        """
+        The Interaction Layer:
+        Determines if this is a Cloud-to-Cloud copy or a Local-to-Cloud upload.
+        """
+        src = self.resolve_path(source)
+        dst = self.resolve_path(destination)
+
+        # 1. Identify the Source Nature
+        # If the source doesn't have s3://, it's a local file/folder.
+        is_local_source = not src.startswith("s3://")
+
+        # 2. Local-to-S3 Interaction (Upload)
+        if is_local_source:
+            LOG.info(f"S3Client: Inter-filesystem Upload -> {src} to {dst}")
+            # s3fs.put() is optimized for local-to-s3 transfers
+            return self.fs.put(src, dst, recursive=recursive, **kwargs)
+
+        # 3. S3-to-S3 Interaction (Copy)
+        LOG.info(f"S3Client: Intra-filesystem Copy -> {src} to {dst}")
+        # Validate target bucket exists before expansion (The LocalStack fix)
+        self._ensure_bucket_exists(dst)
+
+        return self.fs.cp(src, dst, recursive=recursive, **kwargs)
+
+    def ls(self, path: str = "", detail: bool = False) -> list[Any]:
+        """Wrapper for listing objects."""
+        return self.fs.ls(path, detail=detail)
+
+    def open(self, path: str, mode: str = "rb") -> Any:
+        """Wrapper for file I/O."""
+        return self.fs.open(path, mode=mode)
+
+    def _ensure_bucket_exists(self, path: str) -> None:
+        bucket = path.replace("s3://", "").lstrip("/").split("/")[0]
+        if not self.exists(f"s3://{bucket}"):
+            LOG.info(f"S3Client: Creating missing bucket {bucket}")
+            self.fs.mkdir(bucket)
+
+    def rm(self, path: str, recursive: bool = False) -> None:
+        """Wrapper for deletion."""
+        self.fs.rm(path, recursive=recursive)

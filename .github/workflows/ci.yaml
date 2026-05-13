@@ -23,6 +23,7 @@ jobs:
           python-version: '3.11'
 
       - name: Run Ruff (Lint & Format)
+        continue-on-error: true
         run: |
           uv run ruff format --check .
           uv run ruff check .

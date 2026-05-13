@@ -1,4 +1,5 @@
 import time
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -16,14 +17,15 @@ LOG = logger
 
 @ServiceFactory.register("postgres_db")
 class PostgresService(DatabaseSource, DatabaseSink):
-    def _init_client(self, **config: Any) -> PostgresClient:
-        secret: Secret = config["password"]
+    @cached_property
+    def client(self) -> PostgresClient:
+        secret: Secret = self._config["password"]
         return PostgresClient(
-            host=config["host"],
-            database=config["database"],
-            user=config["user"],
+            host=self._config["host"],
+            database=self._config["database"],
+            user=self._config["user"],
             password=secret.resolve(sanitize=True),
-            port=config.get("port", 5432),
+            port=self._config.get("port", 5432),
         )
 
     def stage_data(

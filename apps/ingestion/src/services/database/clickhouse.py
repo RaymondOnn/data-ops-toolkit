@@ -1,5 +1,6 @@
 import re
 from collections.abc import Sequence
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -14,23 +15,23 @@ LOG = logger
 
 @ServiceFactory.register("clickhouse_db")
 class ClickHouseService(DatabaseSource, DatabaseSink):
-    def _init_client(self, **config: Any) -> ClickhouseClient:
+    @cached_property
+    def client(self) -> ClickhouseClient:
         # 1. Resolve Password safely
         # If 'secret_key' was used, 'password' is a Secret object.
         # If 'password' was a string in YAML, it stays a string.
-        raw_password = config.get("password", "")
+        raw_password = self._config.get("password", "")
         resolved_password = (
             raw_password.resolve(sanitize=True)
             if hasattr(raw_password, "resolve")
             else str(raw_password)
         )
-        print(f"{resolved_password=}")
         return ClickhouseClient(
-            host=config.get("host", "localhost"),
-            port=config.get("port", 8123),
-            user=config.get("user", "default"),
+            host=self._config.get("host", "localhost"),
+            port=self._config.get("port", 8123),
+            user=self._config.get("user", "default"),
             password=resolved_password,
-            database=config.get("database", "default"),
+            database=self._config.get("database", "default"),
         )
 
     def stage_data(

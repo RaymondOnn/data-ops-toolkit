@@ -9,6 +9,7 @@ import fsspec
 import polars as pl
 from libs.file.formats import FormatFactory
 from libs.utils.dates import get_current_timestamp
+from upath import UPath
 
 LOG = logging.getLogger(__name__)
 
@@ -63,16 +64,17 @@ class CASArchiveMixin:
 
         # 1. Generate Hash and Sharded Path
         file_hash = calculate_sha256(local_path)
-        shard = f"{file_hash[:2]}/{file_hash[2:4]}"
-        vault_dir = f"{self.url}/archive/vault/{shard}/{file_hash}"
+        base = UPath(self.url, **self.opts)
+        vault_dir = (
+            base / "archive" / "vault" / file_hash[:2] / file_hash[2:4] / file_hash
+        )
 
-        # We keep the original filename inside the hash-folder for context
-        original_name = Path(local_path).name
-        vault_path = f"{vault_dir}/{original_name}"
+        # Keep original filename inside the hash-folder
+        vault_path = vault_dir / Path(local_path).name
 
         # 2. Idempotent Vault Storage (Physical Tier)
-        if not self.fs.exists(vault_path):
-            self._atomic_vault_upload(local_path, vault_path, vault_dir)
+        if not self.fs.exists(str(vault_path)):
+            self._atomic_vault_upload(local_path, str(vault_path), str(vault_dir))
         else:
             LOG.info(
                 "CAS: Content already exists in vault, skipping upload.",
@@ -81,7 +83,7 @@ class CASArchiveMixin:
 
         # 3. Idempotent Manifest Write (Logical Tier)
         manifest_path = self._write_cas_manifest(
-            job_id, file_hash, vault_path, metadata
+            job_id, file_hash, str(vault_path), metadata
         )
 
         return vault_path, manifest_path
@@ -115,27 +117,37 @@ class CASArchiveMixin:
         """
         # Use the provided date (backfill) or current date (standard run)
         target_date = reference_date or get_current_timestamp()
-        date_path = target_date.strftime("%Y/%m/%d")
-        manifest_path = f"{manifest_dir}/manifest.json"
+
+        base = UPath(self.url, **self.opts)
+        manifest_dir = (
+            base
+            / "archive"
+            / "jobs"
+            / job_id
+            / target_date.strftime("%Y")
+            / target_date.strftime("%m")
+            / target_date.strftime("%d")
+        )
+        manifest_path = manifest_dir / "manifest.json"
 
         manifest_data = {
             "job_id": job_id,
-            "logical_date": date_path,
+            "logical_date": target_date.strftime("%Y/%m/%d"),
             "processed_at": get_current_timestamp(strip_tz=True).isoformat(sep=" "),
             "content_hash": file_hash,
             "physical_path": vault_path,
             "metadata": meta or {},
         }
 
-        self.fs.makedirs(manifest_dir, exist_ok=True)
+        self.fs.makedirs(str(manifest_dir), exist_ok=True)
 
         # Write using JSONHandler
         handler = FormatFactory.get_handler("json", self.fs, self.opts)
         handler.write_file(
-            json.dumps(manifest_data, indent=4).encode("utf-8"), manifest_path
+            json.dumps(manifest_data, indent=4).encode("utf-8"), str(manifest_path)
         )
 
-        return manifest_path
+        return str(manifest_path)
 
     def crawl_manifests(self, job_id: str | None = None) -> pl.DataFrame:
         """

@@ -48,7 +48,7 @@ class CompositePolicy(CleanupPolicy):
                 LOG.error(
                     f"Cleanup step {policy.__class__.__name__} failed",
                     run_id=task.run_id,
-                    error=str(e)
+                    error=str(e),
                 )
 
 
@@ -77,7 +77,9 @@ class VaultCleanupPolicy(CleanupPolicy):
             )
             return
 
-        LOG.debug("VaultCleanupPolicy: Purging physical data vaults", run_id=task.run_id)
+        LOG.debug(
+            "VaultCleanupPolicy: Purging physical data vaults", run_id=task.run_id
+        )
         task.purge_data_vaults()
 
 
@@ -89,7 +91,7 @@ class ExternalSourceCleanupPolicy(CleanupPolicy):
     def apply(self, task: "Task") -> None:
         is_test = getattr(task.exec_ctx, "is_test", False)
         params = task.context.custom_params
-        
+
         # Only proceed if explicitly requested and not in test mode.
         if not params.get("purge_external_source") or is_test:
             return
@@ -131,11 +133,13 @@ class CleanupCoordinator:
     def apply(self, task: "Task", policy: CleanupPolicy | None = None) -> None:
         """Applies the cleanup chain to the provided task."""
         if policy is None:
-            # Construct default chain using the flattened __and__ logic.
+            # MetadataCleanupPolicy must be the last step.
+            # It purges the workspace folder containing config.json and manifests
+            # which are required by the other policies to make cleanup decisions.
             policy = (
-                MetadataCleanupPolicy()
-                & VaultCleanupPolicy()
+                VaultCleanupPolicy()
                 & ExternalSourceCleanupPolicy()
+                & MetadataCleanupPolicy()
             )
-        
+
         policy.apply(task)

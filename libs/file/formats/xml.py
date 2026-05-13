@@ -76,7 +76,7 @@ class XMLHandler(FormatHandler):
                 # Note: This creates an in-memory DataFrame per file
                 lfs.append(pl.DataFrame(data).lazy())
             except Exception as e:
-                LOG.error(f"Failed to parse XML: {e}", extra={"path": str(p)})
+                LOG.exception(f"Failed to parse XML: {str(p)}")
                 raise
 
         return pl.concat(lfs) if lfs else pl.LazyFrame()

@@ -1,4 +1,5 @@
 import time
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -9,6 +10,7 @@ from libs.file import FileSystemClient, FileSystemSkills, FormatFactory
 from libs.resilience.circuit_breaker import CircuitBreaker
 from libs.utils.dict import find_keys_by_pattern, update_nested_key
 from loguru import logger
+from upath import UPath
 
 from .base import Archive, Service, Sink, Source
 from .factory import ServiceFactory
@@ -47,10 +49,13 @@ class BaseStorageService(Service):
         # or an absolute path '/tmp/data'.
         self.capabilities = capabilities
         self.opts = storage_options
-        self.client = self._init_client(**config)
+        self._config = config
 
-    def _init_client(self, **config: Any) -> FileSystemClient:
+    @cached_property
+    def client(self) -> FileSystemClient:
         from libs.file.base import create_fs_client
+
+        config = self._config.copy()
 
         # 1. Resolve any Secret objects in the config
         for path, value in find_keys_by_pattern(
@@ -71,12 +76,33 @@ class BaseStorageService(Service):
             url=self.url, capabilities=self.capabilities, storage_options=merged_opts
         )
 
+    def reset_client(self) -> None:
+        """Invalidates the cached FileSystemClient."""
+        if "client" in self.__dict__:
+            LOG.warning(f"Resetting filesystem client for service: {self.name}")
+            del self.client
+
     def _get_handler(self, target_path: str) -> "FormatHandler":
         """Resolves the appropriate FormatHandler by peeking at the filesystem."""
-        peek = next(self.client.walk_paths(target_path), None)
-        if not peek:
-            raise FileNotFoundError(f"No files found at {target_path}")
-        ext = Path(peek).suffix.lstrip(".").lower()
+        # 1. Construct a protocol-aware UPath
+        # We build the path directly to avoid resolve_path()'s local filesystem sniffing
+        if "://" in target_path:
+            path_obj = UPath(target_path, **self.opts)
+        else:
+            # Ensure target_path is relative to the service root,
+            # bypassing local absolute checks
+            path_obj = UPath(self.url, **self.opts) / target_path.lstrip("/")
+
+        # 2. Fast-path: Extract extension if the target is a specific file
+        ext = path_obj.suffix.lstrip(".").lower()
+
+        # 3. Fallback: Peek at the filesystem if no extension is present (directory discovery)
+        if not ext:
+            peek = next(self.client.walk_paths(str(path_obj)), None)
+            if not peek:
+                raise FileNotFoundError(f"No files found at {target_path}")
+            ext = UPath(peek).suffix.lstrip(".").lower()
+
         return FormatFactory.get_handler(ext, self.client.fs, self.opts)
 
 
@@ -149,10 +175,7 @@ class StorageSink(BaseStorageService, Sink):
         """
         # Create a unique staging path: e.g., tmp/staging/orders_1710123456/
         staging_path = f"tmp/staging/{target_table}_{int(time.time())}"
-
-        # We use the client's 'copy_dir' which should be a server-side
-        # operation (S3-to-S3) to avoid pulling 50M rows into our 2GB RAM.
-        self.client.copy_dir(source_dir, staging_path)
+        self.client.cp(str(source_dir), staging_path)
 
         staging_full_path = self.client.resolve_path(staging_path)
         files_staged = len(self.client.fs.find(staging_full_path))
@@ -182,11 +205,11 @@ class StorageSink(BaseStorageService, Sink):
 
         # 1. Idempotency: Remove existing data for this partition
         if self.client.exists(final_path):
-            self.client.delete_dir(final_path)
+            self.client.rm(final_path)
 
         # 2. Atomic Move: Move the staged folder to the production path
         # On S3, this is a metadata-only rename or a fast copy/delete
-        self.client.move_dir(staging_table, final_path)
+        self.client.mv(staging_table, final_path)
         LOG.info("Promoted data", staging=staging_table, final=final_path)
 
     @protect_service(breaker)
@@ -198,13 +221,19 @@ class StorageSink(BaseStorageService, Sink):
     ) -> None:
         # Check if the number of files is the same
 
-        def get_meta(path):
-            # Ensure trailing slash for accurate relative path slicing
-            root = path.rstrip("/") + "/"
-            # find() handles recursion automatically
-            data = self.client.fs.find(root, detail=True)
-            # Store {relative_path: (size, ETag)}
-            return {k[len(root) :]: (v["size"], v.get("ETag")) for k, v in data.items()}
+        def get_meta(path_str: str | Path):
+            resolved_root = UPath(self.client.resolve_path(path_str), **self.opts)
+            # find() returns paths that are usually bucket-relative or protocol-stripped
+            data = self.client.fs.find(str(resolved_root), detail=True)
+
+            meta = {}
+            for k, v in data.items():
+                # Re-attach protocol if missing to perform UPath comparison
+                full_item_path = UPath(self.client.fs.unstrip_protocol(k), **self.opts)
+                # Extract relative path from the root for comparison
+                rel_path = str(full_item_path.relative_to(resolved_root))
+                meta[rel_path] = (v["size"], v.get("ETag"))
+            return meta
 
         meta_reference = get_meta(reference)
         meta_other = get_meta(other)
@@ -231,7 +260,7 @@ class StorageSink(BaseStorageService, Sink):
 
     @protect_service(breaker)
     def clone(self, reference: str, other: str) -> None:
-        self.client.copy_dir(reference, other)
+        self.client.cp(reference, other)
 
 
 class StorageArchive(BaseStorageService, Archive):
@@ -240,7 +269,7 @@ class StorageArchive(BaseStorageService, Archive):
         """
         Archive data to the destination path.
         """
-        self.client.copy_dir(source_dir, archive_path)
+        self.client.cp(str(source_dir), archive_path)
 
 
 # --- Role 1: Reading Flat Files (Landing Zone) ---
