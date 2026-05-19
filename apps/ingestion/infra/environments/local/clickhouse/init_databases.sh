@@ -54,6 +54,7 @@ ch_client -q "KILL QUERY WHERE query_kind = 'RefreshView' ASYNC" || true
 # Add your table definitions here in the order they should be created
 SQL_FILES=(
     "/sql/definitions/tables/test.orders.sql"
+    "/sql/definitions/tables/test.sim_data.sql"
     "/sql/definitions/tables/meta.execution_log.sql"
     "/sql/definitions/tables/meta.job_schedules.sql"
     "/sql/definitions/tables/meta.execution_history.sql"

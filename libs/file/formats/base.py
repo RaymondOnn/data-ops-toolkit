@@ -40,12 +40,12 @@ class FormatHandler(ABC):
         pass
 
     @abstractmethod
-    def read_file(self, input_path: Path | str, **kwargs: Any) -> io.BytesIO:
+    def read(self, input_path: Path | str, **kwargs: Any) -> io.BytesIO:
         """Low-level: Read + Repair -> Memory Buffer"""
         pass
 
     @abstractmethod
-    def write_file(self, data: bytes, output_path: Path | str) -> None:
+    def write(self, data: bytes, output_path: Path | str) -> None:
         """Low-level: Raw Bytes -> Storage"""
         pass
 

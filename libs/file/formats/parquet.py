@@ -33,7 +33,7 @@ class ParquetHandler(FormatHandler):
             if self.fs.isfile(p)
         }
 
-    def read_file(self, input_path: Path | str, **kwargs: Any) -> io.BytesIO:
+    def read(self, input_path: Path | str, **kwargs: Any) -> io.BytesIO:
         """Parquet is binary; read directly into buffer."""
         paths = self.discover(input_path)
         if not paths:
@@ -63,7 +63,7 @@ class ParquetHandler(FormatHandler):
         # Polars scan_parquet handles list of paths natively and efficiently
         return pl.scan_parquet(list(paths), storage_options=self.opts)
 
-    def from_df(self, df: pl.LazyFrame | pl.DataFrame, output_file: Path | str) -> None:
+    def from_df(self, df: pl.LazyFrame | pl.DataFrame, output_path: Path | str) -> None:
         """
         Decision: Execution-Aware Sink.
         1. If LazyFrame: Use .sink_parquet() for memory-efficient streaming.
@@ -71,15 +71,15 @@ class ParquetHandler(FormatHandler):
         """
         if isinstance(df, pl.LazyFrame):
             df.sink_parquet(
-                output_file,
+                output_path,
                 maintain_order=False,  # Faster performance
                 compression="snappy",
                 row_group_size=100_000,  # Optimized for 2GB RAM
             )
         else:
-            df.write_parquet(output_file, compression="snappy")
+            df.write_parquet(output_path, compression="snappy")
 
-    def write_file(self, data: bytes, output_file: Path | str):
-        with self.fs.open(output_file, "wb") as f:
+    def write(self, data: bytes, output_path: Path | str):
+        with self.fs.open(output_path, "wb") as f:
             # Cast f to an IO[bytes] so Ty knows .write() accepts bytes
             cast("IO[bytes]", f).write(data)

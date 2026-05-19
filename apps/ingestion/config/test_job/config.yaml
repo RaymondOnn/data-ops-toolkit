@@ -32,7 +32,7 @@ default:
         load_mode: "snapshot"    
         source_params:
           type: file
-          file_pattern: "s3://bucket/path/orders_{{partition_date}}.csv"
+          file_pattern: ./mock_data/sample_orders.csv
         schema_file: "schema.csv"
       transform:
         type: default
@@ -53,11 +53,10 @@ default:
 
 
 # ── Local env overrides ──────────────────────────────────────────────────────
-local:
-  job:
-  datasets:
-    orders:
-      source_identifier: "apps/ingestion/samples/sample_orders.csv"
+# local:
+#   job:
+#   datasets:
+#     orders:
 
 # production:
 #   source:

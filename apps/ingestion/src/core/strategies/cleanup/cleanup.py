@@ -57,8 +57,10 @@ class MetadataCleanupPolicy(CleanupPolicy):
 
     def apply(self, task: "Task") -> None:
         LOG.debug("MetadataCleanupPolicy: Purging workspace", run_id=task.run_id)
-        # Assuming task.purge_metadata handles path existence internally.
-        task.purge_metadata()
+        # We explicitly remove the task folder using rmtree.
+        # This ensures the directory itself is removed, not just its contents.
+        if task.folder.exists():
+            shutil.rmtree(task.folder, ignore_errors=True)
 
 
 class VaultCleanupPolicy(CleanupPolicy):

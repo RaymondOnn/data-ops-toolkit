@@ -129,9 +129,11 @@ def setup_logging(
         level="DEBUG" if is_debug else "INFO",
         format=create_console_formatter(highlight_keys),
         colorize=True,
-        serialize=is_prod,
-        backtrace=True,
-        diagnose=is_debug,
+        # We disable serialization for the console. This ensures CLI users
+        # always see the formatted output instead of JSON blobs.
+        serialize=False,
+        backtrace=True,  # stops the repetitive stack nesting
+        diagnose=is_debug,  # hides the local variable values which clutter the group
         enqueue=enqueue,
     )
 

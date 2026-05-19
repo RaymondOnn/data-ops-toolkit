@@ -10,6 +10,11 @@ class DiskUsage(NamedTuple):
     free: int
     percent: float
 
+    @property
+    def free_gb(self) -> float:
+        """Converts free bytes to Gigabytes for human-readable reporting."""
+        return self.free / (1024**3)
+
 
 class SystemVitals(NamedTuple):
     cpu_pct: float

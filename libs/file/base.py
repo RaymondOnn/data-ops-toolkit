@@ -89,8 +89,7 @@ class FileSystemClient(BaseIOClient, ABC):
         resolved = self.resolve_path(path)
 
         if not self.fs.exists(resolved):
-            LOG.warning(f"Path does not exist: {resolved}")
-            return
+            raise FileNotFoundError(f"Path not found: {resolved}")
 
         if self.fs.isfile(resolved):
             if pattern == "*" or Path(resolved).match(pattern):

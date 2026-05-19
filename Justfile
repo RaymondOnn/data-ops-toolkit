@@ -51,9 +51,9 @@ clean-workspace:
 
 # --- Validation & Linting ---
 
-# Run type checking (using Pyright via uv)
+# Run type checking (using ty/pyright via uv)
 typecheck:
-    uv run pyright
+    uv run ty
 
 # Run ruff check and format check
 lint:
@@ -115,7 +115,6 @@ ensure-docker:
 
 # Start the Docker containers in detached mode
 docker-up: ensure-docker
-    @ls -ld apps/ingestion/infra/environments/local/garage/garage.toml > /dev/null
     {{dc}} up -d --remove-orphans
 
 # Stop and remove the Docker containers

@@ -1,0 +1,29 @@
+default:
+  job:
+    extract:
+      num_workers: 4
+    load:
+      service_ref: clickhouse
+  
+  
+  datasets:
+    sim_data:
+      partition_date:
+          offset:
+            days: -1
+      extract:
+        load_mode: "snapshot"  
+        service_ref: "file"  
+        source_params:
+          type: file
+          file_pattern: ./mock_data/test_large_job/part_*.parquet
+        schema_file: schema.csv
+      transform:
+        type: default
+        params:
+      load:
+        service_ref: "clickhouse"
+        sink_identifier: TEST.SIM_DATA
+      archive:
+        enable_archival: true    # per-dataset archival override
+        service_ref: "s3_archive"

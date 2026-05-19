@@ -29,6 +29,7 @@ class OracleService(DatabaseSource, DatabaseSink):
         self,
         source_dir: Path,
         target_table: str,
+        expected_count: int,
         file_ext: str = "parquet",
         audit_values: dict[str, Any] | None = None,
     ) -> tuple[str, int]:
@@ -66,6 +67,7 @@ class OracleService(DatabaseSource, DatabaseSink):
         target_table: str,
         partition_col: str,
         partition_val: str,
+        expected_count: int,
     ) -> None:
         # If partition_val is '2026-03-10', we wipe that day and replace it
         sql = f"""
@@ -95,37 +97,79 @@ class OracleService(DatabaseSource, DatabaseSink):
 
     def is_equal(
         self,
-        reference: Path,
-        other: Path,
+        reference: Any,
+        other: Any,
         exclude_columns: set[str] | None = None,
     ) -> bool:
-        pass
         exclude_columns = exclude_columns or set()
-        exclude_str = (
-            f"EXCEPT ({', '.join(exclude_columns)})" if exclude_columns else ""
-        )
+        ref_table, other_table = str(reference).upper(), str(other).upper()
+
+        # 1. Performance Optimization: Check row counts
+        count_ref = self.client.sql(f"SELECT count(*) FROM {ref_table}")[0][0]
+        count_other = self.client.sql(f"SELECT count(*) FROM {other_table}")[0][0]
+
+        if count_ref != count_other:
+            LOG.warning(
+                "Table comparison failed: Row count mismatch",
+                ref=ref_table,
+                other=other_table,
+            )
+            return False
+
+        # 2. Fast-Path: Checksum Comparison
+        if self.get_checksum(ref_table) == self.get_checksum(other_table):
+            LOG.info("Fast-path: Table checksums match.", table=ref_table)
+            return True
+
+        # 3. Schema alignment
+        col_sql = "SELECT column_name FROM all_tab_columns WHERE table_name = '{}'"
+        cols_ref = {row[0] for row in self.client.sql(col_sql.format(ref_table))}
+        cols_other = {row[0] for row in self.client.sql(col_sql.format(other_table))}
+
+        compare_cols = (cols_ref & cols_other) - {c.upper() for c in exclude_columns}
+        if not compare_cols:
+            LOG.error(
+                "No common columns found for comparison",
+                ref=ref_table,
+                other=other_table,
+            )
+            return False
+
+        col_selection = ", ".join(sorted(list(compare_cols)))
 
         sql = f"""
-            SELECT * {exclude_str}
-            FROM {reference}
+            SELECT {col_selection} FROM {ref_table}
             MINUS
-            SELECT * {exclude_str}
-            FROM {other}
+            SELECT {col_selection} FROM {other_table}
         """
-        results = self.sql(sql)
-        is_match = len(results) == 0
-        LOG.info(
-            "Comparing tables", reference=reference, other=other, is_match=is_match
-        )
-        if not is_match:
-            LOG.warning("Table comparison failed", differences=len(results))
-        return is_match
+        results = self.client.sql(sql)
+        return len(results) == 0
 
     def clone(self, reference: str, other: str) -> None:
+        # Removed TEMPORARY as regression shadow tables must persist between sessions
         sql = f"""
-            CREATE TEMPORARY TABLE {other} AS 
+            CREATE TABLE {other} AS 
             SELECT * FROM {reference} 
             WHERE 1 = 0
         """
         LOG.info("Cloning table structure", source=reference, destination=other)
+        self.client.sql(sql)
+
+    def get_checksum(self, identifier: str, columns: list[str] | None = None) -> str:
+        """Generates an order-independent checksum using ORA_HASH and SUM."""
+        col_expr = (
+            " || '|' || ".join(columns) if columns else "RAWTOHEX(SYS_GUID())"
+        )  # Fallback if no cols
+        # Oracle ORA_HASH is very fast for fingerprinting
+        query = f"SELECT SUM(ORA_HASH({col_expr})) FROM {identifier}"
+        try:
+            res = self.client.sql(query)
+            return str(res[0][0]) if res else "0"
+        except Exception as e:
+            LOG.error(f"Checksum failed for {identifier}: {e}")
+            return "ERROR"
+
+    def drop(self, identifier: str) -> None:
+        sql = f"DROP TABLE {identifier} PURGE"
+        LOG.warning("Dropping table from Oracle", table=identifier)
         self.client.sql(sql)

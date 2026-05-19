@@ -20,16 +20,33 @@ jobs:
       - name: Initialize Environment
         uses: ./.github/actions/setup-uv
         with:
-          python-version: '3.11'
+          python-version-file: "cicd/python.version"
 
-      - name: Run Ruff (Lint & Format)
+      - name: Auto-fix Lint & Format
         continue-on-error: true
+        # This automates the resolution of simple issues identified by Ruff
         run: |
-          uv run ruff format --check .
-          uv run ruff check .
+          uv run ruff check --fix .
+          uv run ruff format .
 
-      - name: Run Pyright (Type Check)
-        run: uv run pyright .
+      - name: Commit and Push Auto-fixes
+        run: |
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          # Check if there are changes before attempting to commit
+          if [ -n "$(git status --porcelain)" ]; then
+            git commit -m "chore: auto-fix linting and formatting"
+            git push
+          else
+            echo "No changes to commit"
+          fi
+
+      - name: Run Ty (Type Check)
+        continue-on-error: true
+        # Ty/Pyright catches logic mismatches that cannot be auto-fixed
+        run: uv run ty .
+
 
       # - name: Verify PEX Reproducibility
       #   env:

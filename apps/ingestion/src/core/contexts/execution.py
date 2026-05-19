@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,8 @@ class ExecutionContext(msgspec.Struct):
     cache_config: dict[str, Any] = {}
     provider_config: dict[str, str] = {}  # Config for secret provider
     disable_self_healing: bool = False
+    stop_at_ts: float | None = None
+    drain_timeout_secs: int = 600
 
     @property
     def active_path(self) -> Path:
@@ -70,6 +73,20 @@ class ExecutionContext(msgspec.Struct):
     def lock_file(self) -> Path:
         return self.workspace_dir / "orchestrator.lock"
 
+    def get_managed_directories(self) -> Iterable[Path]:
+        """Yields all core directories that must be writable."""
+        yield from [
+            self.workspace_dir,
+            self.active_path,
+            self.signal_path,
+            self.state_path,
+            self.data_path,
+            self.failed_path,
+            self.workspace_dir / "HOLD",
+            self.workspace_dir / ".cache",
+            self.workspace_dir / "logs",
+        ]
+
     @property
     def is_debug(self) -> bool:
         return self.execution_mode == ExecutionMode.DEBUG
@@ -81,6 +98,7 @@ class ExecutionContext(msgspec.Struct):
     @property
     def is_normal(self) -> bool:
         return self.execution_mode == ExecutionMode.NORMAL
+
     @property
     def is_dry_run(self) -> bool:
         return self.execution_mode == ExecutionMode.DRY_RUN

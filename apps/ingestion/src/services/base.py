@@ -31,6 +31,8 @@ class Service:
 
 
 class Source(Service, ABC):
+    """Base class for all data sources (e.g., databases, file systems)."""
+    
     @abstractmethod
     def get_work_units(self, target: str, num_workers: int) -> set[Any]:
         """How this service splits 50M rows into chunks."""

@@ -31,6 +31,7 @@ class WriteStage(ExecutionStage):
     def execute(self, task: "Task") -> str:
         start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
         task_ctx = task.context
+        extract_meta = task.manifest.extract
         transform_meta = task.manifest.transform
         if not transform_meta:
             raise ValueError(
@@ -69,7 +70,8 @@ class WriteStage(ExecutionStage):
             audit_values = {
                 "_partition": task_ctx.load.partition_value,
                 "_run_id": task.run_id,
-                "_source": task_ctx.extract.source_identifier,
+                "_source": (extract_meta.source_identifier if extract_meta else None)
+                or task_ctx.extract.source_identifier,
             }
             staging_artifact, rows_loaded = loader.load(
                 service=self.service,

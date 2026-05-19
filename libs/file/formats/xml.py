@@ -47,7 +47,7 @@ class XMLHandler(FormatHandler):
                 )
             return clean.encode("utf-8")
 
-    def read_file(self, input_path: Path | str, **kwargs: Any) -> io.BytesIO:
+    def read(self, input_path: Path | str, **kwargs: Any) -> io.BytesIO:
         """Removes illegal ASCII control characters."""
         paths = self.discover(input_path)
         if not paths:
@@ -70,21 +70,21 @@ class XMLHandler(FormatHandler):
         for p in paths:
             LOG.debug(f"Reading XML file: {p!s}")
             try:
-                buffer = self.read_file(p, **kwargs)
+                buffer = self.read(p, **kwargs)
                 # XML to Polars bridge
                 data = xmltodict.parse(buffer.read())
                 # Note: This creates an in-memory DataFrame per file
                 lfs.append(pl.DataFrame(data).lazy())
-            except Exception as e:
-                LOG.exception(f"Failed to parse XML: {str(p)}")
+            except Exception:
+                LOG.exception(f"Failed to parse XML: {p!s}")
                 raise
 
         return pl.concat(lfs) if lfs else pl.LazyFrame()
 
-    def from_df(self, df: pl.LazyFrame | pl.DataFrame, output_file: Path | str) -> None:
+    def from_df(self, df: pl.LazyFrame | pl.DataFrame, output_path: Path | str) -> None:
         raise NotImplementedError("Streaming XML write is not supported by Polars.")
 
-    def write_file(self, data: bytes, output_file: Path | str):
-        with self.fs.open(output_file, "wb") as f:
+    def write(self, data: bytes, output_path: Path | str):
+        with self.fs.open(output_path, "wb") as f:
             # Cast f to an IO[bytes] so Ty knows .write() accepts bytes
             cast("IO[bytes]", f).write(data)

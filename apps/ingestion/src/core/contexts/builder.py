@@ -183,6 +183,7 @@ class TaskContextBuilder:
             execution_mode=mode,
             env=self.env,
             cache_config=cache_cfg,
+            drain_timeout_secs=self.app_settings.get("drain_timeout_secs", 600),
         )
 
     def _get_val(

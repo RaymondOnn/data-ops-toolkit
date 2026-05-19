@@ -1,4 +1,4 @@
-from functools import partial
+import logging
 from pathlib import Path
 
 from libs.utils.log import setup_logging
@@ -27,4 +27,21 @@ def recursive_merge(base: dict, upd: dict) -> None:
         else:
             base[k] = v
 
-setup_logger = partial(setup_logging, highlight_keys=LOG_HIGHLIGHT_KEYS)
+
+def setup_logger(*args, **kwargs):
+    """
+    Unified logging entry point.
+    Configures Loguru and silences noisy third-party libraries.
+    """
+    # Silence noisy third-party loggers (AWS, Ray, Scheduler, etc.)
+    for logger_name in [
+        "botocore",
+        "boto3",
+        "urllib3",
+        "ray",
+        "apscheduler",
+        "filelock",
+    ]:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+    return setup_logging(*args, highlight_keys=LOG_HIGHLIGHT_KEYS, **kwargs)

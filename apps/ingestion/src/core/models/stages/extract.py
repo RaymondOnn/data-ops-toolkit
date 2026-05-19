@@ -44,7 +44,7 @@ class ExtractStage(ExecutionStage):
 
         task_ctx = task.context
         start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
-        
+
         try:
             # 1. Prepare Reader Context
             # This object is serialized and sent to Ray workers.
@@ -157,12 +157,17 @@ class ExtractStage(ExecutionStage):
             # This identifies all columns across all files, handling API drift.
             final_schema_dict = self._merge_schemas(all_schemas)
 
+            # 5. Resolve Final Audit Identity
+            # We look at the actual files discovered to decide the _source value
+            source_files = getattr(reader, "source_files", [])
+            audit_identity = self._resolve_audit_identity(ctx, source_files)
+
             # 6. Create Payload and Finalize
             # We map the strategy output to our ExtractPayload schema
             payload = ExtractPayload(
-                artifact_folder=str(
-                    data_store
-                ),  # ?: Point to virtual or physical folder
+                artifact_folder=str(data_store),
+                source_identifier=audit_identity,
+                source_files=source_files,
                 file_count=len(file_infos),
                 files=file_infos,
                 source_row_count=total_rows,
@@ -204,7 +209,26 @@ class ExtractStage(ExecutionStage):
                 hash_md5.update(chunk)
         return hash_md5.hexdigest()
 
-    def _merge_schemas(self, schemas: set[dict[str, str]]) -> dict[str, str]:
+    def _resolve_audit_identity(
+        self, context: ReaderContext, source_files: list[str]
+    ) -> str:
+        """
+        Determines the string identifier used for the '_source' audit column.
+
+        Rules:
+        1. If exactly one source file was found, use its filename.
+        2. If multiple files (batch) or a database table, use the name
+           of the source identifier (the folder name or table name).
+        """
+        if len(source_files) == 1:
+            return Path(source_files[0]).name
+
+        # For batches or DBs, we take the terminal portion of the identifier
+        # rstrip handles trailing slashes for folders
+        base_ident = context.source_identifier or ""
+        return Path(base_ident.rstrip("/")).name or base_ident
+
+    def _merge_schemas(self, schemas: list[dict[str, str]]) -> dict[str, str]:
         """
         Unions all schemas found in the source files to create a
         master schema for the Transform stage.

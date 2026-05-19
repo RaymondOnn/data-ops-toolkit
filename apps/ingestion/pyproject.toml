@@ -21,6 +21,7 @@ dependencies = [
     "dynaconf",
     "apscheduler",
     "universal-pathlib",
+    "faker",
 ]
 requires-python = ">=3.11"
 

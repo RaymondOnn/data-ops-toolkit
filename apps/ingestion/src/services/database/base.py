@@ -37,7 +37,7 @@ class DatabaseService(Service):
         """Force-clears the cached client, triggering a full re-initialization on next use."""
         if "client" in self.__dict__:
             LOG.warning(f"Resetting database client for service: {self.name}")
-            del self.client
+            self.__dict__.pop("client", None)
 
     @property
     @abstractmethod
@@ -127,15 +127,32 @@ class DatabaseSink(DatabaseService, Sink):
     @abstractmethod
     def is_equal(
         self,
-        reference: Path,
-        other: Path,
+        reference: str,
+        other: str,
         exclude_columns: set[str] | None = None,
     ) -> bool:
         pass
 
     @abstractmethod
-    def clone(self, reference: str, other: str) -> None:
+    def clone(self, reference: Any, other: Any) -> None:
         """Clone a table to a new table."""
+
+    @abstractmethod
+    def minus(
+        self,
+        reference: str,
+        other: str,
+        exclude_columns: set[str] | None = None,
+    ) -> int:
+        """Returns the number of rows in reference that do not exist in other."""
+
+    @abstractmethod
+    def drop(self, identifier: str) -> None:
+        """Physically removes a table or container."""
+
+    @abstractmethod
+    def get_checksum(self, identifier: str, columns: list[str] | None = None) -> str:
+        """Generates a unique fingerprint for the data in a table."""
 
     @protect_service(breaker)
     def exists(self, identifier: str) -> bool:

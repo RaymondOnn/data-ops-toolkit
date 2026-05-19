@@ -14,7 +14,7 @@ class ExtractConfig(msgspec.Struct):
     """Configuration for data extraction/ingestion."""
 
     source_type: str  # e.g. "postgres", "s3", "local"
-    source_identifier: str  # path, table, or API endpoint
+    source_identifier: str | None # path, table, or API endpoint
     num_workers: int = 10  # parallelism level
     load_mode: Literal["snapshot", "delta"] = "snapshot"
     source_config: dict[str, Any] = msgspec.field(

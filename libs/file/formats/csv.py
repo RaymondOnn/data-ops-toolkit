@@ -28,13 +28,14 @@ class CSVHandler(FormatHandler):
 
         # Matches .csv, .txt, .tsv
         pattern = f"{path_str.rstrip('/')}/**/*.[ct][sx][vt]"
+        print(f"Discovering files with pattern: {pattern}")
         return {
             str(self.fs.unstrip_protocol(str(p)))
             for p in self.fs.glob(pattern)
             if self.fs.isfile(p)
         }
 
-    def read_file(self, input_path: Path | str, **kwargs: Any) -> io.BytesIO:
+    def read(self, input_path: Path | str, **kwargs: Any) -> io.BytesIO:
         """Strips BOM and handles encoding-safe reading."""
         encoding = kwargs.get("encoding", "utf-8")
         paths = self.discover(input_path)
@@ -83,21 +84,21 @@ class CSVHandler(FormatHandler):
                 )
                 continue
 
-            buffer = self.read_file(p, **kwargs)
+            buffer = self.read(p, **kwargs)
             lfs.append(
                 pl.read_csv(buffer, encoding=kwargs.get("encoding", "utf-8")).lazy()
             )
 
         return pl.concat(lfs) if lfs else pl.LazyFrame()
 
-    def from_df(self, df: pl.LazyFrame | pl.DataFrame, output_file: Path | str) -> None:
+    def from_df(self, df: pl.LazyFrame | pl.DataFrame, output_path: Path | str) -> None:
         """Streaming write for 50M rows."""
         if isinstance(df, pl.LazyFrame):
-            df.sink_csv(output_file)
+            df.sink_csv(output_path)
         else:
-            df.write_csv(output_file)
+            df.write_csv(output_path)
 
-    def write_file(self, data: bytes, output_file: Path | str) -> None:
-        with self.fs.open(output_file, "wb") as f:
+    def write(self, data: bytes, output_path: Path | str) -> None:
+        with self.fs.open(output_path, "wb") as f:
             # Cast f to an IO[bytes] so Ty knows .write() accepts bytes
             cast("IO[bytes]", f).write(data)

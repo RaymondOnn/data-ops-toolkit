@@ -34,6 +34,12 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             database=self._config.get("database", "default"),
         )
 
+    def close(self) -> None:
+        """Closes the underlying ClickhouseClient connection."""
+        if hasattr(self, "_client") and self._client is not None:
+            self._client.close()
+            del self._client  # Clear the cached property
+
     def stage_data(
         self,
         source_dir: Path,
@@ -147,7 +153,8 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             )
             raise ValueError(
                 f"Cannot promote {staging_table} to {target_table}: Schema mismatch. "
-                f"Missing: {missing_in_staging}, Extra: {extra_in_staging}, Mismatches: {type_mismatches}"
+                f"Missing: {missing_in_staging}, Extra: {extra_in_staging}, "
+                "Mismatches: {type_mismatches}"
             )
 
         LOG.info("Schema audit successful", target=target_table, staging=staging_table)
@@ -212,39 +219,86 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
 
     def is_equal(
         self,
-        reference: Path,
-        other: Path,
+        reference: str,
+        other: str,
         exclude_columns: set[str] | None = None,
     ) -> bool:
+        """
+        Identity check using a tiered validation pyramid.
+        """
+        # Tier 1: Row Counts (Near-instant)
+        if self.get_row_count(reference) != self.get_row_count(other):
+            return False
+
+        # Tier 2: Checksum (High-speed hash fingerprint)
+        if self.get_checksum(reference) == self.get_checksum(other):
+            return True
+
+        # Tier 3: Set-Difference (Full deterministic check)
+        return self.minus(reference, other, exclude_columns) == 0
+
+    def minus(
+        self, reference: str, other: str, exclude_columns: set[str] | None = None
+    ) -> int:
+        """Calculates the count of rows in reference that are missing from other."""
         exclude_columns = exclude_columns or set()
-        exclude_str = (
-            f"EXCEPT ({', '.join(exclude_columns)})" if exclude_columns else ""
-        )
+
+        # Schema discovery to handle evolution/alignment
+        cols_ref = {
+            row[0].decode("utf-8") if isinstance(row[0], bytes) else str(row[0])
+            for row in self.fetch(f"DESCRIBE TABLE {reference}")
+        }
+        cols_other = {
+            row[0].decode("utf-8") if isinstance(row[0], bytes) else str(row[0])
+            for row in self.fetch(f"DESCRIBE TABLE {other}")
+        }
+
+        compare_cols = (cols_ref & cols_other) - exclude_columns
+        if not compare_cols:
+            LOG.error("No common columns found between tables for comparison.")
+            return 999_999_999  # Sentinel for "Totally different"
+
+        # Explicitly sort to ensure positional alignment in EXCEPT
+        col_selection = ", ".join(sorted(list(compare_cols)))
 
         sql = f"""
-            SELECT * {exclude_str}
-            FROM {reference}
-            EXCEPT
-            SELECT * {exclude_str}
-            FROM {other}
+            SELECT count() FROM (
+                SELECT {col_selection} FROM {reference}
+                EXCEPT
+                SELECT {col_selection} FROM {other}
+            )
         """
-        results = self.client.sql(sql)
-        is_match = len(results) == 0
-        LOG.info(
-            "Comparing tables", reference=reference, other=other, is_match=is_match
-        )
-        if not is_match:
-            LOG.warning("Table comparison failed", differences=len(results))
-        return is_match
+        res = self.client.sql(sql)
+        return int(res[0][0]) if res else 0
 
     def clone(self, reference: str, other: str) -> None:
         sql = f"""
-            CREATE TEMPORARY TABLE {other} 
+            CREATE TABLE IF NOT EXISTS {other} 
             ENGINE = MergeTree() AS 
                 SELECT * FROM {reference}
                 WHERE 1 = 0
         """
         LOG.info("Cloning table structure", source=reference, destination=other)
+        self.client.sql(sql)
+
+    def get_checksum(self, identifier: str, columns: list[str] | None = None) -> str:
+        """
+        Generates a 64-bit table fingerprint.
+        Uses cityHash64 for speed and groupBitXor for order-independence.
+        """
+        col_expr = ", ".join(columns) if columns else "*"
+        # We wrap in hex() for a readable string representation
+        query = f"SELECT hex(groupBitXor(cityHash64({col_expr}))) FROM {identifier}"
+        try:
+            res = self.client.sql(query)
+            return str(res[0][0]) if res else "0"
+        except Exception as e:
+            LOG.error(f"Checksum calculation failed for {identifier}: {e}")
+            return "ERROR"
+
+    def drop(self, identifier: str) -> None:
+        sql = f"DROP TABLE IF EXISTS {identifier}"
+        LOG.warning("Dropping table from ClickHouse", table=identifier)
         self.client.sql(sql)
 
     def get_row_count(self, table_name: str, where_clause: str | None = None) -> int:
@@ -270,5 +324,4 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
 
     def fetch(self, query: str) -> list[Sequence[Any]]:
         """Proxy to the client's sql method for standard DB access."""
-        return self.client.sql(query)
         return self.client.sql(query)

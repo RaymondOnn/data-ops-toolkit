@@ -80,10 +80,12 @@ class BaseStorageService(Service):
         """Invalidates the cached FileSystemClient."""
         if "client" in self.__dict__:
             LOG.warning(f"Resetting filesystem client for service: {self.name}")
-            del self.client
+            self.__dict__.pop("client", None)
 
     def _get_handler(self, target_path: str) -> "FormatHandler":
         """Resolves the appropriate FormatHandler by peeking at the filesystem."""
+        LOG.debug(f"🔍 Determining format handler for path: {target_path}")
+
         # 1. Construct a protocol-aware UPath
         # We build the path directly to avoid resolve_path()'s local filesystem sniffing
         if "://" in target_path:
@@ -98,10 +100,14 @@ class BaseStorageService(Service):
 
         # 3. Fallback: Peek at the filesystem if no extension is present (directory discovery)
         if not ext:
+            LOG.debug(f"No extension in path '{target_path}'. Peeking filesystem...")
             peek = next(self.client.walk_paths(str(path_obj)), None)
             if not peek:
                 raise FileNotFoundError(f"No files found at {target_path}")
             ext = UPath(peek).suffix.lstrip(".").lower()
+            LOG.debug(f"✅ Peeked file: {peek} | Extension: '{ext}'")
+
+        LOG.info(f"🚀 Final resolved extension for handler: '{ext}'")
 
         return FormatFactory.get_handler(ext, self.client.fs, self.opts)
 
@@ -124,7 +130,7 @@ class StorageSource(BaseStorageService, Source):
         # 2. Use Handler-specific discovery (e.g. CSVHandler
         # knows to find .csv and .txt)
         files = list(handler.discover(target))
-
+        print(f"Discovered files: {files}")
         LOG.debug(
             "Generating work units",
             target=target,

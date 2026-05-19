@@ -1,7 +1,7 @@
 from abc import abstractmethod
 from collections.abc import Generator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import msgspec
 import polars as pl
@@ -22,6 +22,11 @@ class DataReader(Reader):
     Subclasses implement _get_data_generator to handle source-specific logic.
     """
 
+    def __init__(self) -> None:
+        # Internal registry to track original source artifacts for the manifest
+        # audit trail.
+        self.source_files: list[str] = []
+
     def fetch(
         self, service: Source, context: ReaderContext, target_folder: Path
     ) -> Generator[dict[str, Any], None, None]:
@@ -36,6 +41,15 @@ class DataReader(Reader):
     ) -> Generator[pl.DataFrame, None, None]:
         # 1. Slice the work into parts (e.g., ORA_HASH queries)
         work_units = self.get_work_units(service, context)
+
+        # If units contain file lists (Standard for StorageSource),
+        # capture them for the manifest audit trail.
+        if work_units:
+            # Check the first unit to see if it follows the file-based pattern
+            first_unit = next(iter(work_units))
+            if isinstance(first_unit, dict) and "files" in first_unit:
+                for unit in work_units:
+                    self.source_files.extend(unit.get("files", []))
 
         LOG.info(
             "Slicing extraction into work units",
@@ -63,6 +77,7 @@ class DataReader(Reader):
             from pathlib import Path
 
             import msgspec
+            import polars as pl
             from apps.ingestion.src.core.schema import apply_schema_contract
             from apps.ingestion.src.core.strategies.extract.base import ReaderContext
             from apps.ingestion.src.services.factory import ServiceFactory
@@ -93,15 +108,20 @@ class DataReader(Reader):
             # Convert LazyFrame to DataFrame for Ray compatibility
             df = result.collect() if isinstance(result, pl.LazyFrame) else result
 
+            row_count = df.height if isinstance(df, pl.DataFrame) else len(df)
+
             worker_logger.info(
                 "Ray worker completed extraction task",
-                rows=len(df),
+                rows=row_count,
             )
 
             # 2. Guarding (Function Call)
             # Ray 2.5+ requires a supported batch format (PyArrow, Pandas, etc.)
             # Converting to Arrow is zero-copy and satisfies the requirement.
-            processed_df = apply_schema_contract(df, context)
+            # We explicitly cast to pl.DataFrame to resolve the InProcessQuery union
+            # conflict created by Ray's static type stubs.
+            final_df = cast("pl.DataFrame", df)
+            processed_df = apply_schema_contract(final_df, context)
             return processed_df.to_arrow()
 
         # 4. Map the task across the cluster
@@ -114,7 +134,9 @@ class DataReader(Reader):
         # Ray handles backpressure here: it only fetches the next block
         # when IngestionStream is ready for it.
         for batch in ray_dataset.iter_batches(batch_format="pyarrow"):
-            yield pl.from_arrow(batch)
+            res = pl.from_arrow(batch)
+            # Ensure we yield a DataFrame to satisfy the Generator type hint
+            yield res if isinstance(res, pl.DataFrame) else res.to_frame()
 
     def to_parquet(
         self, generator: Generator[pl.DataFrame, None, None], destination: Path
@@ -130,14 +152,18 @@ class DataReader(Reader):
                 LOG.debug("Skipping empty DataFrame chunk", chunk_index=i)
                 continue
 
+            # Ensure the type checker knows this is a Sized Polars object
+            # and use .height for unambiguous row counting
+            row_count = df.height
+
             file_path = destination / f"part_{i:04d}.parquet"
 
             # Write with snappy compression for a good balance of speed/size
             df.write_parquet(file_path, compression="snappy")
-            LOG.info("Exported parquet chunk", path=str(file_path), rows=len(df))
+            LOG.info("Exported parquet chunk", path=str(file_path), rows=row_count)
 
             # Yield metadata back to the Stage for checkpointing
-            yield {"path": file_path, "rows": len(df), "schema": df.schema}
+            yield {"path": file_path, "rows": row_count, "schema": df.schema}
 
     @abstractmethod
     def get_work_units(self, client: Any, context: ReaderContext) -> set[Any]:
@@ -147,10 +173,16 @@ class DataReader(Reader):
 @ReaderFactory.register("flat_file")
 class FileDataReader(DataReader):
     def get_work_units(self, client: Any, context: ReaderContext) -> set[Any]:
-        if not context.source_identifier:
-            raise ValueError("source_path is required for FileDataReader")
+        source_path = context.source_identifier or context.options.get(
+            "file_pattern", ""
+        )
+        print("source_path", source_path)
+        if not source_path:
+            raise ValueError(
+                "source_identifier or file_pattern is required for FileDataReader"
+            )
 
-        return client.get_work_units(context.source_identifier, context.num_workers)
+        return client.get_work_units(source_path, context.num_workers)
 
 
 @ReaderFactory.register("database")
@@ -160,7 +192,7 @@ class DBDataReader(DataReader):
 
     def get_work_units(
         self, client: DatabaseSource, context: ReaderContext
-    ) -> list[Any]:
+    ) -> set[Any]:
         # Uses ORA_HASH for Oracle or ctid for Postgres
         # to generate N unique queries for the 50M rows
         if not context.source_identifier:
@@ -170,4 +202,4 @@ class DBDataReader(DataReader):
         units = client.get_work_units(
             context.source_identifier, context.num_workers, filter_sql
         )
-        return [str(unit) for unit in units]
+        return {str(unit) for unit in units}

@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "uv",
     "ruff",
+    "ty",
     "pytest>=9.0.2",
     "rust-just",
     "ingestion",
@@ -45,6 +46,9 @@ extraPaths = [
 ]
 typeCheckingMode = "basic" # Suggest starting with basic to clear the noise
 reportMissingImports = true
+reportUnnecessaryTypeIgnoreComment = true
+reportUnusedImport = "error"
+reportUnusedVariable = "warning"
 reportMissingTypeStubs = false
 pythonVersion = "3.11"
 

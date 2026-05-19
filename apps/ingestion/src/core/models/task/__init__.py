@@ -17,5 +17,5 @@ __all__ = [
     "Task",
     "TaskManifest",
     "TaskRef",
-    "TaskSignal",
+    "TaskSignal",    
 ]

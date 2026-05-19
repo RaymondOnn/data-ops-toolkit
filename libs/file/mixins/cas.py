@@ -143,7 +143,7 @@ class CASArchiveMixin:
 
         # Write using JSONHandler
         handler = FormatFactory.get_handler("json", self.fs, self.opts)
-        handler.write_file(
+        handler.write(
             json.dumps(manifest_data, indent=4).encode("utf-8"), str(manifest_path)
         )
 

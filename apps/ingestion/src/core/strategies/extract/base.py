@@ -14,7 +14,7 @@ class ReaderContext(msgspec.Struct, frozen=True):
     """
 
     source_type: str
-    source_identifier: str | None = None  # Used by FileIngest
+    source_identifier: str | None = None
     num_workers: int = 10
     run_id: str | None = None
     partition_date: str | None = None
@@ -34,6 +34,4 @@ class Reader(ABC):
     def fetch(
         self, service: Source, context: ReaderContext, target_folder: Path
     ) -> Generator[dict[str, Any], None, None]:
-        raise NotImplementedError("Subclasses must implement this method")
-        raise NotImplementedError("Subclasses must implement this method")
         raise NotImplementedError("Subclasses must implement this method")

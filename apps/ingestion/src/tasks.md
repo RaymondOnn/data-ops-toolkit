@@ -1,10 +1,28 @@
-
+task context for regression testing
 ZombieState.is_applicable harding and make shift recovery into ZombieState
 Split Task into smaller components i.e TaskState
 incorporate data retention policies i.e. can keep data for 1 year
 disable self-healing
 masking type
-error_handling / exception hook /
+error_handling / exception hook /. 
+failing jobs recovery
+adding an adhoc job
+dry mode
+
+### Resilience & Limit Testing (Roadmap)
+- [ ] **Chaos Monkey**: Implement a utility to randomly `ray.cancel()` active tasks to verify Zombie recovery.
+- [ ] **Connectivity Interruption**: Simulate database "flapping" to verify that Circuit Breakers correctly move tasks to `BLOCKED`.
+- [ ] **Memory Pressure**: Run a 100M row ingestion with a 2GB container limit to verify Polars LazyFrame streaming.
+- [ ] **Backpressure Validation**: Queue 500 tasks simultaneously to verify the `Compute` logical capping and system-level CPU/MEM throttling.
+- [ ] **Disk Full Scenario**: Physically fill the workspace partition to verify the `DISK_THRESHOLD_HALT` logic.
+
+
+### K8S Deployment Readiness (Revisit during actual deployment)
+- [ ] **Cgroup Memory Reconciliation**: Refine `check_k8s_vitals` to ensure `Compute` uses pod limits instead of node memory.
+- [ ] **Storage Latency Benchmarking**: Tune `check_storage_performance` thresholds based on chosen cloud storage (EFS vs EBS).
+- [ ] **Downward API Integration**: Ensure Pod Name/Namespace env vars are correctly mapped in Helm charts.
+- [ ] **Ray-on-K8S Lifecycle**: Validate `ray.shutdown()` behavior during Pod pre-stop hooks.
+
 
 1. Artifact Verification (The "MD5 Handshake")
 Currently, you upload to S3 and then pull to the server. If a network hiccup occurs during the upload, you might end up with a corrupted PEX on your server.
