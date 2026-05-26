@@ -5,10 +5,14 @@ from typing import Any
 import ray
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
 from apps.ingestion.src.core.models.stages.enums import (
-    STAGE_TERMINAL_SENTINEL,
     StageName,
 )
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task, TaskRef
+from apps.ingestion.src.core.models.task import (
+    ExecutionStatus,
+    Task,
+    TaskRef,
+    TaskSignal,
+)
 from apps.ingestion.src.core.orchestrator.common.compute import Compute
 from apps.ingestion.src.core.orchestrator.enums import TaskMetadata
 from loguru import logger
@@ -57,52 +61,43 @@ class MaintenancePolicy(ABC):
         if not isinstance(task_meta, TaskMetadata):
             return
 
-        task = Task(task_ref=task_ref, worker_id="recovery", exec_ctx=exec_ctx)
-
-        # 1. Verify if the stage actually finished on disk
-        if self._check_stage_completion_on_disk(task):
-            next_stage = StageName.next(task_ref.stage)
-
-            task.update_manifest(
-                {"status": ExecutionStatus.WAITING.value, "current_stage": next_stage}
-            )
-
-            with lock:
-                cache.pop(key, None)
-                if next_stage != STAGE_TERMINAL_SENTINEL:
-                    new_key = task_ref.build(
-                        status=ExecutionStatus.WAITING.value, stage=next_stage
-                    )
-                    task_meta.status = ExecutionStatus.WAITING.value
-                    cache[new_key] = task_meta
-        else:
-            task.update_manifest(
-                {
-                    "status": ExecutionStatus.WAITING.value,
-                    "current_stage": task_ref.stage,
-                }
-            )
-
-            task.workspace.remove_marker(".retrying")
-            task.workspace.remove_marker(".blocked")
-            with lock:
-                cache.pop(key, None)
-                task_meta.status = ExecutionStatus.WAITING.value
-                task_meta.last_hb = time.time()
-
-                for ref, active_key in list(active_tasks.items()):
-                    if active_key == key:
-                        compute.reclaim_resources(ref)
-                        active_tasks.pop(ref)
-                        break
-
-                cache[task_ref.build(status=ExecutionStatus.WAITING.value)] = task_meta
-
-    def _check_stage_completion_on_disk(self, task: Task) -> bool:
-        return (
-            task.workspace.exists()
-            and getattr(task.manifest, task.task_ref.stage, None) is not None
+        LOG.warning(f"Resurrecting zombie task: {task_ref.run_id}")
+        task = Task(
+            task_ref=task_ref, worker_id="maintenance-recovery", exec_ctx=exec_ctx
         )
+
+        # 1. Clean up markers and force Engine re-evaluation
+        (task.folder / ".retrying").unlink(missing_ok=True)
+        (task.folder / ".blocked").unlink(missing_ok=True)
+
+        # Determine resume point: if current_stage is None, the engine defaults to StageName.first()
+        resume_stage = task.context.from_stage or StageName.first().label
+
+        task.update_manifest(
+            {
+                "status": ExecutionStatus.WAITING.value,
+                "current_stage": resume_stage,
+                "remarks": "Maintenance: Recovered from zombie state.",
+            }
+        )
+
+        with lock:
+            cache.pop(key, None)
+            task_meta.status = ExecutionStatus.WAITING.value
+            task_meta.current_stage = resume_stage
+            task_meta.last_hb = time.time()
+
+            for ref, active_key in list(active_tasks.items()):
+                if active_key == key:
+                    compute.reclaim_resources(ref)
+                    active_tasks.pop(ref)
+                    break
+
+            new_key = task_ref.with_updates(
+                status=task_meta.status, stage=resume_stage
+            ).build()
+            cache[new_key] = task_meta
+            task.request_status_sync(TaskSignal.SYNC)
 
     def _cleanup_finished_tasks(
         self, active_tasks: dict[ray.ObjectRef, str], compute: Compute

@@ -15,9 +15,20 @@ LOG = logging.getLogger(__name__)
 class JSONHandler(FormatHandler):
     fs: AbstractFileSystem
 
-    def discover(self, input_path: Path | str) -> set[str]:
+    @property
+    def is_splittable(self) -> bool:
+        # Only NDJSON can be scanned lazily for row counts
+        # Standard JSON (arrays) requires eager loading
+        return False
+
+    def discover(self, input_path: Path | str, pattern: str | None = None) -> set[str]:
         """Expands a path into a list of JSON files."""
-        path_str = str(input_path)
+        # Standardize the path by stripping the protocol if present
+        # so fsspec doesn't treat it as relative to CWD.
+        path_str = self.fs._strip_protocol(str(input_path))
+
+        if pattern:
+            path_str = f"{path_str.rstrip('/')}/{pattern.lstrip('/')}"
 
         # If the path already contains a wildcard, expand it directly
         if "*" in path_str:
@@ -28,10 +39,10 @@ class JSONHandler(FormatHandler):
             }
 
         if self.fs.isfile(path_str):
-            return {path_str}
+            return {str(self.fs.unstrip_protocol(path_str))}
 
         # Matches .json, .jsonl, .ndjson
-        pattern = f"{path_str.rstrip('/')}/**/*.json*"
+        pattern = f"{path_str.rstrip('/')}/**/*.json*" if not pattern else path_str
         return {
             str(self.fs.unstrip_protocol(str(p)))
             for p in self.fs.glob(pattern)

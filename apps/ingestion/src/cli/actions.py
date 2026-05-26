@@ -1,79 +1,26 @@
-import traceback
-from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
 import typer
 from apps.ingestion.src.core.contexts import (
-    ExecutionMode,
+    RayMode,
     TaskContextBuilder,
-    parse_set_options,
 )
-from apps.ingestion.src.core.models.stages.enums import StageName
 from apps.ingestion.src.core.orchestrator.factory import assemble_runtime
 from apps.ingestion.src.core.orchestrator.modes.daemon import DaemonRuntime
-from apps.ingestion.src.core.orchestrator.modes.trigger import TriggerRuntime
 from apps.ingestion.src.utils.common import setup_logger
-from loguru import logger
+
+state: dict[str, Any] = {"dry_run": False, "debug": False, "ray_mode": RayMode.CLUSTER}
 
 
-def run_pipeline(
-    partition_date: datetime,
-    job_id: str,
-    dataset: str,
-    from_stage: str | None,
-    to_stage: str | None,
-    debug: bool,
-    settings: list[str] | None,
-    state: dict[str, Any],
-) -> None:
-    """Implementation logic for the 'run' command."""
-    overrides = parse_set_options(settings)
+def configure_runtime(debug: bool, dry_run: bool, ray_mode: str = "cluster") -> None:
+    """Helper to apply runtime configurations (Logging, Dry Run)."""
+    state["dry_run"] = dry_run
+    state["debug"] = debug
+    state["ray_mode"] = RayMode(ray_mode.lower())
 
-    setup_logger(
-        log_dir=Path("./.workspace/logs"),
-        is_prod=not state["debug"],
-        is_debug=state["debug"],
-        filename=f"{job_id}.jsonl",
-        enqueue=True,
-    )
-
-    exec_mode = ExecutionMode.DEBUG if state["debug"] else ExecutionMode.NORMAL
-    builder = TaskContextBuilder()
-    exec_ctx = builder.get_execution_context(mode=exec_mode)
-    exec_ctx.ray_mode = state["ray_mode"]
-    runtime = assemble_runtime(exec_ctx, builder)
-
-    if not isinstance(runtime, TriggerRuntime):
-        typer.secho("❌ Error: 'run' command requires TriggerRuntime.", fg="red")
-        raise typer.Exit(code=1)
-
-    msg = f"🚀 Initializing {dataset} for {partition_date.date()}"
-    if from_stage or to_stage:
-        start_label = from_stage or StageName.first().label
-        end_label = to_stage or StageName.last().label
-        msg += f" (Range: {start_label} ➔ {end_label})"
-    typer.echo(msg)
-
-    if from_stage:
-        overrides["_global"]["from_stage"] = from_stage
-    if to_stage:
-        overrides["_global"]["to_stage"] = to_stage
-
-    try:
-        runtime.run(
-            job_id=job_id,
-            dataset_id=dataset,
-            partition_date_str=partition_date.strftime("%Y-%m-%d"),
-            overrides=overrides,
-        )
-    except ExceptionGroup as eg:
-        raise typer.Exit(code=1) from eg
-    except Exception as e:
-        logger.critical(f"Execution failed: {e}")
-        if state["debug"]:
-            traceback.print_exc()
-        raise typer.Exit(code=1) from e
+    if debug:
+        typer.secho("🔧 DEBUG MODE: ON", fg="cyan")
 
 
 def start_daemon(debug: bool) -> None:

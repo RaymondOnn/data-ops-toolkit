@@ -1,9 +1,13 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import msgspec
-from apps.ingestion.src.core.models.task.manifest import WritePayload
+from apps.ingestion.src.core.models.task.manifest import (
+    TransformPayload,
+    WritePayload,
+)
 from apps.ingestion.src.core.strategies.load.load import LoadContext, Loader
 from apps.ingestion.src.services.factory import ServiceFactory
+from apps.ingestion.src.utils.exceptions import RewindTask
 from libs.utils.dates import get_current_timestamp
 from loguru import logger
 
@@ -23,30 +27,48 @@ class WriteStage(ExecutionStage):
 
     def pre_flight(self, task: "Task") -> None:
         """Verify sink connectivity from the execution node."""
+        super().pre_flight(task)
+
         # Factory initialization already validates basic params and Secret resolution
         self.service = ServiceFactory.get_sink(
             task.context.load.sink_type, **task.context.load.sink_config
         )
+
+        # 1. Gate: Transform Metadata must exist
+        transform_meta = task.manifest.transform
+        if transform_meta is None:
+            raise RewindTask(
+                StageName.TRANSFORM.label, "Transformation metadata missing."
+            )
+
+        # 2. Gate: Transform Marker/Folder must exist
+        transform_path = task.folder / StageName.TRANSFORM.label
+        if not transform_path.exists():
+            raise RewindTask(
+                StageName.TRANSFORM.label, "Transformation data marker missing."
+            )
+
+        # 3. Gate: Physical artifact verification
+        # If the manifest indicates rows were processed, they must be present on disk
+        if (transform_meta.output_row_count > 0 and 
+            not any(transform_path.glob("*.parquet"))
+        ):
+            raise RewindTask(
+                StageName.TRANSFORM.label, "Transformed physical artifacts missing."
+            )
 
     def execute(self, task: "Task") -> str:
         start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
         task_ctx = task.context
         extract_meta = task.manifest.extract
         transform_meta = task.manifest.transform
-        if not transform_meta:
-            raise ValueError(
-                "Transform metadata is required in the manifest for the WRITE stage."
-            )
+
+        # Note: transform_meta is guaranteed by pre_flight at this point
+        transform_meta = cast("TransformPayload", transform_meta)
 
         try:
             # 1. Resolve logical input (The partitioned parquet files)
-            source_dir = (task.folder / "transform").resolve()
-
-            # Verify source_dir actually contains files before proceeding
-            if not any(source_dir.glob("*.parquet")):
-                raise FileNotFoundError(
-                    f"No parquet files found in transformed data directory: {source_dir}"
-                )
+            source_dir = (task.folder / StageName.TRANSFORM.label).resolve()
 
             LOG.info(
                 "Starting load into {target}",

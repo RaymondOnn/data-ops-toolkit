@@ -1,13 +1,10 @@
-from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
-from apps.ingestion.src.core.models.states import ExpiredState
 from apps.ingestion.src.core.models.task import ExecutionStatus, Task, TaskSignal
-from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE, CONFIG_FILENAME
+from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE
 from loguru import logger
 
-from ...common import Janitor, TaskManager
+from ...common import Janitor
 from ...enums import JobRecord, TaskRef
 from .state import DaemonStateStore
 
@@ -21,15 +18,12 @@ class DaemonJanitor:
     """
 
     def __init__(
-        self, 
-        janitor: Janitor, 
-        state_monitor: DaemonStateStore, 
-        queue_task_fn: Callable[[TaskRef, str], Any],
-        active_tasks_fn: Callable[[], dict]
+        self,
+        janitor: Janitor,
+        state_monitor: DaemonStateStore,
     ):
         self.janitor = janitor
         self.state_monitor = state_monitor
-        self.queue_task_fn = queue_task_fn
         self.exec_ctx = janitor.exec_ctx
 
     def recover_failed_tasks(self) -> None:
@@ -38,35 +32,10 @@ class DaemonJanitor:
         roots = [self.exec_ctx.failed_path, self.exec_ctx.workspace_dir / "HOLD"]
         for folder in self.janitor._discover_task_folders(roots):
             try:
-                self.recover_task_by_path(folder)
+                self.janitor.recover_task_by_path(folder)  # Call on common Janitor
             except Exception:
                 LOG.exception(f"Unexpected error recovering {folder}")
         LOG.info("Recovery sweep done.")
-
-    def recover_task_by_path(self, folder_path: Path) -> None:
-        """Helper to recover a single task given its directory."""
-        category = folder_path.parent.parent.name.upper()
-        try:
-            task = Task.from_folder(folder_path, exec_ctx=self.exec_ctx)
-            current_stage = task.manifest.current_stage
-            LOG.info(
-                f"Recovering {task.run_id} from {category} (Stage: {current_stage})"
-            )
-
-            updates = {
-                "status": ExecutionStatus.PENDING,
-                "current_stage": current_stage,
-            }
-            if category == "FAILED":
-                updates["retry_count"] = task.manifest.retry_count + 1
-                updates[current_stage] = None
-
-            task.update_manifest(updates)
-            task.move_to_folder("active")
-            self.queue_task_fn(task.task_ref, str(task.folder / CONFIG_FILENAME))
-            task.request_status_sync(TaskSignal.SYNC)
-        except Exception:
-            LOG.exception("Recovery failed", path=str(folder_path))
 
     def process_expired_run(self, run: JobRecord, task_ctx: Any | None) -> None:
         """Handles eviction of stale/expired records from the DB and disk."""
@@ -91,7 +60,9 @@ class DaemonJanitor:
                 worker_id="janitor-expiry",
                 exec_ctx=self.exec_ctx,
             )
-            ExpiredState().on_enter(task, data={"reason": full_reason})
+            LOG.warning(f"Task TTL exceeded for {run_id}: {full_reason}")
+            task.update_manifest({"status": ExecutionStatus.EXPIRED.value})
+            task.request_status_sync(TaskSignal.EXPIRED)
             self.janitor.cleanup_task(task)
         else:
             ident = self.exec_ctx.get_task_identifier(

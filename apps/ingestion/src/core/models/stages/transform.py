@@ -35,14 +35,15 @@ class TransformStage(ExecutionStage):
         if meta is None:
             raise RewindTask(StageName.EXTRACT.label, "Extraction metadata missing.")
 
-        # 2. Gate: If we expect data, it must physically exist and be non-zero.
-        # Note: If meta.file_count is 0, we skip the disk check entirely.
+        # 2. Gate: The extraction marker/folder must exist.
+        # If the symlink is broken or missing, the dependency is lost.
+        extract_path = task.folder / StageName.EXTRACT.label
+        if not extract_path.exists():
+            raise RewindTask(StageName.EXTRACT.label, "Extraction data marker missing.")
+
+        # 3. Gate: If we expect data, verify physical artifacts are non-zero.
         if meta.file_count > 0:
-            path = task.folder / "extract"
-            # Combined check for directory existence and non-empty parquet files
-            if not path.exists() or not any(
-                f.stat().st_size > 0 for f in path.glob("*.parquet")
-            ):
+            if not any(f.stat().st_size > 0 for f in extract_path.glob("*.parquet")):
                 raise RewindTask(
                     StageName.EXTRACT.label, "Physical artifacts missing or empty."
                 )
@@ -55,7 +56,7 @@ class TransformStage(ExecutionStage):
                 dataset_id=task.dataset_id,
                 job_id=task.job_id,
             )
-        except Exception as e:
+        except Exception:
             # If the transformer type is unknown or config is broken, fail early
             LOG.exception("Invalid transformer configuration in pre_flight")
 
@@ -99,18 +100,13 @@ class TransformStage(ExecutionStage):
                 return str(self._transit(task))
 
             # 1. Setup Context and Data Store
-            extract_path = (task.folder / "extract").resolve()
-            data_store = (
-                task.exec_ctx.workspace_dir
-                / "data"
-                / self.name
-                / f"{task.job_id}_{int(get_current_timestamp(strip_tz=True).timestamp())}"
-            )
-            data_store.mkdir(parents=True, exist_ok=True)
+            extract_path = (task.folder / StageName.EXTRACT.label).resolve()
+            # Get the deterministic physical folder from the workspace
+            data_store = task.workspace.clear_stage_data(self.name)
 
             ctx = TransformContext(
                 options=task.context.transform.transform_params,
-                source_dir=(task.folder / "extract" / "part_*.parquet").resolve(),
+                source_dir=(extract_path / "part_*.parquet").resolve(),
                 destination_dir=task.folder / "transform",
                 output_format=APP_TRANSFORM_OUTPUT_EXT,
                 type=task.context.transform.transform_type,

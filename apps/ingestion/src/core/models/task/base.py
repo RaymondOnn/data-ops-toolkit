@@ -17,7 +17,6 @@ from .workspace import TaskWorkspace
 LOG = logger
 
 
-# TODO: Rename folders to include worker id?
 class Task:
     _stage: ExecutionStage
 

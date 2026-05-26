@@ -6,6 +6,7 @@ from typing import Any
 
 import msgspec
 from apps.ingestion.src.core.contexts import ExecutionContext
+from apps.ingestion.src.core.models.stages.enums import StageName
 from apps.ingestion.src.core.models.task.manifest import TaskManifest
 from apps.ingestion.src.core.models.task.status import ExecutionStatus
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
@@ -53,6 +54,20 @@ class TaskWorkspace:
     def config_path(self) -> Path:
         return self.run_path / CONFIG_FILENAME
 
+    def get_data_path(self, stage_name: str) -> Path:
+        """
+        Formula for the deterministic, searchable data run path.
+        Pattern: data/{job_id}/{dataset_id}/{partition_date}/{run_id}/{stage_name}
+        """
+        return (
+            self.exec_ctx.data_path
+            / self.job_id
+            / self.dataset_id
+            / self.partition_date
+            / self.run_id
+            / stage_name
+        )
+
     def exists(self) -> bool:
         return self.run_path.is_dir()
 
@@ -77,7 +92,7 @@ class TaskWorkspace:
                 job_id=self.job_id,
                 run_id=self.run_id,
                 dataset_id=self.dataset_id,
-                current_stage="UNKNOWN",
+                current_stage=StageName.START.label,
                 bitmask=0,
                 status=ExecutionStatus.UNKNOWN,
             )
@@ -105,8 +120,10 @@ class TaskWorkspace:
     def relocate(self, new_category: str) -> str:
         """Moves the entire workspace to a new root (e.g. active -> FAILED)."""
         old_path = self.run_path
-        self.category = new_category
-        new_path = self.run_path
+        self.category = new_category.upper()
+        new_path = (
+            self.run_path
+        )  # run_path is a property, returns updated category path
 
         new_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -116,30 +133,44 @@ class TaskWorkspace:
 
     def purge(self, include_vaults: bool = True) -> None:
         """Removes the metadata workspace and optionally data artifacts."""
-        # 1. Physical Metadata Purge
+        # 1. Physical Metadata Purge (The active/failed task folder)
         if self.run_path.is_dir():
             shutil.rmtree(self.run_path)
 
-        # 2. Cleanup orphaned config in active root if applicable
-        identifier = self.exec_ctx.get_task_identifier(
+        # 2. Cleanup orphaned config in active root (from the Provisioning phase)
+        ident = self.exec_ctx.get_task_identifier(
             self.job_id, self.dataset_id, self.partition_date
         )
         root_config = (
-            self.base_dir / "active" / f"{identifier}:{self.run_id}_{CONFIG_FILENAME}"
+            self.base_dir / "active" / f"{ident}:{self.run_id}_{CONFIG_FILENAME}"
         )
-        if root_config.is_file():
-            root_config.unlink()
+        root_config.unlink(missing_ok=True)
 
-        # 3. Vault Purge (Local high-speed disk cleanup)
+        # 3. Hierarchical Vault Purge
         if include_vaults:
-            data_root = self.exec_ctx.data_path
-            if data_root.exists():
-                # This still uses Path for local data vault cleaning
-                # as data vaults are specifically for local SSD performance
-                for stage_dir in data_root.iterdir():
-                    if stage_dir.is_dir():
-                        for folder in stage_dir.glob(f"{self.job_id}_*"):
-                            shutil.rmtree(folder, ignore_errors=True)
+            # Targeted path: data/{job_id}/{dataset_id}/{partition_date}/{run_id}
+            run_data_root = self.get_data_path("").parent
+
+            if run_data_root.is_dir():
+                LOG.debug("Purging deterministic data vault", path=run_data_root)
+                shutil.rmtree(run_data_root)
+
+                # SELF-HEALING: Recursively remove empty parent directories
+                # This keeps the 'data/' directory searchable and clean.
+                # We stop climbing when we reach the base 'data' root.
+                for parent in run_data_root.parents:
+                    if parent == self.exec_ctx.data_path:
+                        break
+
+                    try:
+                        # iterdir() throws StopIteration immediately if empty
+                        if not any(parent.iterdir()):
+                            parent.rmdir()
+                            LOG.trace("Cleanup: Removed empty parent", path=parent)
+                        else:
+                            break  # Parent is not empty, stop climbing
+                    except OSError:
+                        break
 
     def drop_signal(self, filename: str) -> None:
         """Drops a zero-byte signal file."""
@@ -152,13 +183,18 @@ class TaskWorkspace:
 
     def remove_marker(self, name: str) -> None:
         """Deletes a marker file if it exists."""
-        (self.run_path / name).unlink(missing_ok=True)
+        path = self.run_path / name
+        if path.exists() or path.is_symlink():
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
 
     def write_text(self, filename: str, content: str) -> None:
         """Writes a string to a file within the workspace."""
         (self.run_path / filename).write_text(content)
 
-    def create_stage_marker(self, stage_name: str, target_data_path: Path) -> None:
+    def create_stage_marker(self, stage_name: str, data_folder: Path) -> None:
         """
         Creates a relative symlink from the workspace to the physical data vault.
         Optimized for local filesystems/Shared PVCs.
@@ -169,10 +205,21 @@ class TaskWorkspace:
         # e.g., active/job/run/extract -> ../../../data/extract/folder
         # This ensures that if the PVC is mounted at a different path in another pod,
         # the link remains valid.
-        rel_target = os.path.relpath(target_data_path, marker_path.parent)
+        rel_target = os.path.relpath(data_folder, marker_path.parent)
 
         if marker_path.exists() or marker_path.is_symlink():
             marker_path.unlink()
 
         marker_path.symlink_to(rel_target, target_is_directory=True)
         LOG.debug("Created local stage symlink", src=str(marker_path), dst=rel_target)
+
+    def clear_stage_data(self, stage_name: str) -> Path:
+        """Ensures a clean data vault for a specific stage before execution."""
+        path = self.get_data_path(stage_name)
+        if path.is_dir():
+            LOG.debug(
+                f"Cleaning stale artifacts from {stage_name} vault", path=str(path)
+            )
+            shutil.rmtree(path)
+        path.mkdir(parents=True, exist_ok=True)
+        return path

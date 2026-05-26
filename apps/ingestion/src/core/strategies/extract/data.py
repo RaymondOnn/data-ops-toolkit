@@ -51,6 +51,9 @@ class DataReader(Reader):
                 for unit in work_units:
                     self.source_files.extend(unit.get("files", []))
 
+                # Optimization: Don't spawn Ray tasks for empty file lists
+                work_units = [u for u in work_units if u.get("files")]
+
         LOG.info(
             "Slicing extraction into work units",
             count=len(work_units),
@@ -111,8 +114,9 @@ class DataReader(Reader):
             row_count = df.height if isinstance(df, pl.DataFrame) else len(df)
 
             worker_logger.info(
-                "Ray worker completed extraction task",
+                "Ray worker extracted {rows} rows from {unit}",
                 rows=row_count,
+                unit=unit,
             )
 
             # 2. Guarding (Function Call)
@@ -133,7 +137,15 @@ class DataReader(Reader):
         # 5. Yield blocks back to IngestionStream
         # Ray handles backpressure here: it only fetches the next block
         # when IngestionStream is ready for it.
-        for batch in ray_dataset.iter_batches(batch_format="pyarrow"):
+
+        # STRATEGY:
+        # 1. If batch_size is in options, use it (Targeted Row Count).
+        # 2. Otherwise, use None (Work-Unit based, one file per Ray partition).
+        target_batch_size = context.options.get("batch_size")
+
+        for batch in ray_dataset.iter_batches(
+            batch_format="pyarrow", batch_size=target_batch_size
+        ):
             res = pl.from_arrow(batch)
             # Ensure we yield a DataFrame to satisfy the Generator type hint
             yield res if isinstance(res, pl.DataFrame) else res.to_frame()
@@ -198,8 +210,10 @@ class DBDataReader(DataReader):
         if not context.source_identifier:
             raise ValueError("target_table is required for DBDataReader")
 
-        filter_sql = context.options.get("filter_sql")
+        condition = context.options.get("filter_condition") or context.options.get(
+            "filter_sql"
+        )
         units = client.get_work_units(
-            context.source_identifier, context.num_workers, filter_sql
+            context.source_identifier, context.num_workers, condition
         )
         return {str(unit) for unit in units}

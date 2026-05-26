@@ -22,6 +22,8 @@ datasets:
       service_ref: "postgres" # for credential lookup
       load_mode: delta # Loading Strategy: delta | snapshot 
       source_params:
+        batch_size: 100000
+
         # file source
         type: file
         file_pattern: "s3://bucket/path/orders_{{partition_date}}.csv"

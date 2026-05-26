@@ -2,12 +2,10 @@ import os
 import subprocess
 import time
 import traceback
-from contextlib import suppress
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from apps.ingestion.src.core.contexts import ExecutionContext
 from apps.ingestion.src.core.models.stages.enums import (
-    STAGE_TERMINAL_SENTINEL,
     StageName,
 )
 from apps.ingestion.src.core.models.states import (
@@ -16,16 +14,17 @@ from apps.ingestion.src.core.models.states import (
     RetryState,
     SuccessState,
 )
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task
+from apps.ingestion.src.core.models.task import ExecutionStatus, Task, TaskSignal
 from apps.ingestion.src.core.orchestrator.enums import TaskMetadata, TaskRef
 from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.services.registry import ServiceRegistry
-from apps.ingestion.src.utils.common import setup_logger
 from apps.ingestion.src.utils.exceptions import RetryTask, RewindTask
 from filelock import FileLock
 from libs.cache.utils import get_cache
-from libs.utils.exceptions import install_exception_hooks
+from libs.utils.exceptions import TransientError, install_exception_hooks
 from loguru import logger
+
+from .session import TaskSession
 
 if TYPE_CHECKING:
     from loguru import Logger
@@ -90,63 +89,28 @@ class Executor:
             log.error("Executor failed to rehydrate task: key missing", key=key)
             return
 
-        handler_id = None
         try:
             with logger.contextualize(run_id=run_id):
-                # 2. Initialize and Sync Physical State (Disk)
-                # We hydrate the task with a "Running" identity so it can build its own working key
-                task: Task = Task(
-                    task_ref=task_ref.with_updates(
-                        status=ExecutionStatus.RUNNING.value
-                    ),
-                    worker_id=self.worker_id,
-                    exec_ctx=self.exec_ctx,
-                )
+                # Use class-based context manager to automate check-in/finalize
+                with TaskSession(self, task_ref, log) as task:
+                    self.is_busy = True
+                    self._run_task_payload(task, meta)
 
-                # Validate the "Workbench" exists before we start working
-                if not task.workspace.exists():
-                    raise FileNotFoundError(
-                        f"Task workbench missing: {task.folder}. Identity cannot be verified."
-                    )
-
-                handler_id = setup_logger(
-                    log_dir=self.exec_ctx.workspace_dir / "logs",
-                    is_prod=self.exec_ctx.is_prod,
-                    is_debug=self.exec_ctx.is_debug,
-                    filename=f"{task.id}_{task.run_id}.jsonl".replace(":", "_"),
-                    enqueue=True,
-                )
-
-                log.info(
-                    "Worker rehydrated task identity",
-                    target_stage=current_stage,
-                    resolved_stage=task.stage.name,
-                )
-
-                # CRITICAL: Mark work as physically started on disk
-                task.check_in(current_stage)
-
-                task.workspace.remove_marker(".retrying")
-                task.workspace.remove_marker(".blocked")
-
-                self.is_busy = True
-                log.info("Executor started processing stage", stage=current_stage)
-
-                self._run_task_payload(task, meta)
-                self._handle_success(task, log)
-
-        except RetryTask as r:
-            self._handle_retry_task(task, r, log)
         except RewindTask as rw:
+            if self.exec_ctx.disable_self_healing:
+                log.error(
+                    "Rewind requested but self-healing is disabled",
+                    target=rw.target_stage,
+                )
+                # Finalize with original rewind exception to move to HOLD/FAILED
+                # instead of attempting a logical rewind.
+                self.finalize_task_execution(task, runtime_exception=rw)
+                return
+
             self._handle_rewind_task(task, rw, log)
-        except Exception as e:
-            self._handle_failure(task, e, log, meta)
+        except Exception:
+            # Errors are handled by the TaskSession.__exit__ unless raised here
             raise
-        finally:
-            self.is_busy = False
-            # Remove only the task-specific handler to avoid blinding the worker process
-            if handler_id is not None:
-                logger.remove(handler_id)
 
     def _run_task_payload(self, task: Task, meta: TaskMetadata) -> None:
         """Decides between subprocess (PEX) or internal execution."""
@@ -172,57 +136,6 @@ class Executor:
             task.stage.pre_flight(task)
             task.execute()
 
-    def _handle_success(self, task: Task, log: "Logger"):
-        current_stage = task.task_ref.stage
-        key = task.task_ref.build()
-
-        is_success = SuccessState.is_applicable(task)
-        log.debug(
-            "Post-execution success evaluation",
-            is_applicable=is_success,
-            stage=current_stage,
-        )
-        if is_success:
-            SuccessState().on_enter(task, data={"stage": current_stage})
-            self.cache.pop(key, None)
-            log.info("Task fully completed.")
-        else:
-            # Determine next stage label
-            next_label = StageName.next(current_stage)
-
-            ProgressState().on_enter(task, data={"next_stage": next_label})
-            if next_label != STAGE_TERMINAL_SENTINEL:
-                self._transition_task(
-                    key, ExecutionStatus.WAITING.value, next_stage=next_label
-                )
-                log.info(
-                    f"Queued task for {next_label.upper()} stage",
-                    next_stage=next_label.upper(),
-                    previous_stage=current_stage,
-                    task_stage=task.stage.name,
-                )
-
-    def _handle_retry_task(self, task: Task, r: RetryTask, log: "Logger"):
-        key = task.task_ref.build()
-
-        log.warning("Task signaled RETRY", reason=r.reason, wait=r.wait_seconds)
-
-        # We catch it here to ensure the Hot Cache update logic below is executed.
-        with suppress(RetryTask):
-            RetryState().on_enter(
-                task=task,
-                data={
-                    "message": r.reason,
-                    "service_name": r.service_name,
-                    "wait_seconds": r.wait_seconds,
-                },
-            )
-
-        # Use unified transition logic
-        self._transition_task(
-            key, new_status=task.manifest.status.value, last_hb_offset=r.wait_seconds
-        )
-
     def _handle_rewind_task(self, task: Task, rw: RewindTask, log: "Logger"):
         log.warning("Task signaled REWIND", to_stage=rw.target_stage)
         task.update_manifest(
@@ -238,52 +151,123 @@ class Executor:
             next_stage=rw.target_stage,
         )
 
-    def _handle_failure(
-        self, task: Task, e: Exception, log: "Logger", meta: TaskMetadata
-    ):
-        current_stage = task.task_ref.stage
-        key = task.task_ref.build()
-
-        if RetryState.is_applicable(task, exception=e):
-            # Log with exception info to see exactly WHERE in the stage it failed
-            log.opt(exception=True).warning(
-                "Stage execution failed but is eligible for retry", stage=current_stage
-            )
-
-            # Trigger the RetryState transition. This updates the manifest on disk.
-            # We catch the resulting RetryTask to finish the local cache update.
-            retry_exc = None
-            try:
-                RetryState().on_enter(
-                    task=task, data={"message": str(e), "error_type": type(e).__name__}
-                )
-            except RetryTask as rt:
-                retry_exc = rt
-
-            # Update cache to reflect RETRY status
-            self._transition_task(
-                key,
-                new_status=task.manifest.status.value,
-                last_hb_offset=retry_exc.wait_seconds if retry_exc else 0,
-            )
-
-            if retry_exc:
-                raise retry_exc
+    def finalize_task_execution(
+        self, task: Task, runtime_exception: Exception | None = None
+    ) -> None:
+        """
+        THE AUTHORITATIVE BORDER CLOSER: Resolves worker file state
+        and updates manifests deterministically based on data policies.
+        """
+        # 1. Deduce target policy rule based on the execution outcome
+        if SuccessState.is_applicable(task, runtime_exception):
+            policy = SuccessState
+        elif FailedState.is_applicable(task, runtime_exception):
+            policy = FailedState
+        elif runtime_exception is not None and RetryState.is_applicable(
+            task, runtime_exception
+        ):
+            # Explicitly delegate retry configurations and temporal backoffs
+            self._handle_retry_finalization(task, runtime_exception)
+            return
         else:
-            log.opt(exception=True).error(
-                "Terminal failure in stage execution", stage=current_stage
+            policy = ProgressState
+
+        # 2. Apply updates sequentially based on policy fields
+        new_status = policy.target_status.value
+        payload: dict[str, Any] = {"status": new_status}
+        next_stage = None
+
+        if runtime_exception and policy == FailedState:
+            payload["error"] = {
+                "stage": task.task_ref.stage,
+                "message": str(runtime_exception),
+                "error_type": type(runtime_exception).__name__,
+                "traceback": traceback.format_exc(),
+            }
+        if policy == ProgressState:
+            next_stage = StageName.next(task.task_ref.stage or task.stage.name)
+            payload["current_stage"] = next_stage
+            # For progress, the cache needs to return to WAITING to be picked up for the next stage
+            new_status = ExecutionStatus.WAITING.value
+
+        # 3. Persist the state change structurally down to the JSON manifest file
+        task.update_manifest(payload)
+
+        # 3. Request sync to drop the state flag file for the Orchestrator to collect
+        task.request_status_sync(policy.signal)
+
+        # 4. Synchronize Orchestrator Cache (Hot Cache)
+        # If successful completion, we pop. Otherwise, we transition.
+        cache_key = task.task_ref.build(status=ExecutionStatus.RUNNING.value)
+        if policy == SuccessState:
+            self.cache.pop(cache_key, None)
+        else:
+            self._transition_task(
+                cache_key, new_status=new_status, next_stage=next_stage
             )
-            FailedState().on_enter(
-                task=task,
-                data={
-                    "stage": current_stage,
-                    "error_type": type(e).__name__,
-                    "message": str(e),
-                    "traceback": traceback.format_exc(),
-                },
+
+    def _handle_retry_finalization(
+        self, task: Task, exc: RetryTask | TransientError
+    ) -> None:
+        """Handles backoff scheduling configurations and writes operational markers."""
+        retry_count = task.manifest.retry_count
+        service_name = getattr(exc, "service_name", None)
+        message = str(exc)
+
+        if service_name:
+            # Circuit breaker / lockouts write a .blocked file for external recovery checks
+            wait_secs = 0
+            task.workspace.touch_marker(".blocked")
+            task.workspace.remove_marker(".retrying")
+            target_status = ExecutionStatus.BLOCKED
+        else:
+            # Standard exponential backoff: 30s, 60s, 120s... maxing out at 10 minutes
+            wait_secs = min(600, (2**retry_count) * 30)
+            import msgspec
+            from libs.utils.dates import get_current_timestamp
+
+            retry_info = {
+                "retry_at": get_current_timestamp(strip_tz=True).isoformat(),
+                "reason": message,
+                "wait_seconds": wait_secs,
+                "attempt": retry_count + 1,
+            }
+            task.workspace.write_text(
+                ".retrying", msgspec.json.encode(retry_info).decode()
             )
-            # Terminal failure: simply remove from cache
-            self._transition_task(key, ExecutionStatus.FAILED.value)
+            task.workspace.remove_marker(".blocked")
+            target_status = ExecutionStatus.RETRY
+
+        task.update_manifest(
+            {
+                "status": target_status.value,
+                "error": {"message": message, "type": type(exc).__name__},
+                "retry_count": retry_count + 1,
+            }
+        )
+
+        logger.info(
+            "Task transitioning to RETRY state",
+            job_id=task.job_id,
+            run_id=task.run_id,
+            attempt=task.manifest.retry_count,
+            wait_seconds=wait_secs,
+        )
+        task.request_status_sync(TaskSignal.RETRY)
+
+        # Update Hot Cache to reflect backoff
+        self._transition_task(
+            task.task_ref.build(status=ExecutionStatus.RUNNING.value),
+            new_status=target_status.value,
+            last_hb_offset=wait_secs,
+        )
+
+        # Bubble control flow out to Ray cluster mesh layer cleanly
+        if not isinstance(exc, RetryTask):
+            raise RetryTask(
+                reason=message, wait_seconds=wait_secs, service_name=service_name
+            ) from exc
+        raise exc
 
 
 def process_stage_task(worker_id: str, exec_ctx: ExecutionContext, key: str):

@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Optional
+
+from apps.ingestion.src.core.models.task import ExecutionStatus, TaskSignal
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.task import Task
@@ -7,36 +9,33 @@ if TYPE_CHECKING:
 
 
 class LifecycleState(ABC):
-    folder_name: str  # e.g., "HOLD", "FAILED", "DONE"
-
-    @abstractmethod
-    def on_enter(self, task: "Task", data: dict[str, Any] | None = None) -> None:
-        """Logic executed when a task is moved into this state."""
-        pass
-
-    @abstractmethod
-    def can_recover(self, task: "Task", **kwargs: Any) -> bool:
-        """Logic to determine if the task can return to 'active'."""
-        pass
-
+    pass
 
 class ResultState(LifecycleState):
-    """Experts in assessing worker-reported results (Success, Fail, Retry)."""
+    """Base class for states that represent the outcome of a task's execution."""
+
+    folder_name: ClassVar[str | None] = None  # Where to move the task folder (e.g., "FAILED", "RETRY", "active")
+    target_status: ClassVar[ExecutionStatus] = ExecutionStatus.UNKNOWN  # The status to set in the manifest
+    is_terminal: ClassVar[bool] = False  # True if this state is an end-state (no further processing)
+    signal: ClassVar[TaskSignal | None] = None  # The signal to drop for the orchestrator
+
+    @classmethod
+    @abstractmethod
+    def is_applicable(cls, task: "Task", exception: Exception | None = None) -> bool:
+        """
+        Determines if this state policy is applicable given the current task 
+        and exception.
+        """
+        pass
+
+class InferredState(LifecycleState):
+    """Experts in orchestrator-side diagnoses (Zombie, Expired)."""
+    target_status: ClassVar[ExecutionStatus] = ExecutionStatus.UNKNOWN 
 
     @classmethod
     @abstractmethod
     def is_applicable(
-        cls, task: "Task", exception: Exception | None = None
+        cls,
+        record: Optional["JobRecord"] = None, **kwargs: Any,
     ) -> bool:
-        """Determines if the stage execution resulted in this outcome."""
-        pass
-
-
-class InferredState(LifecycleState):
-    """Experts in orchestrator-side diagnoses (Zombie, Expired)."""
-
-    @classmethod
-    @abstractmethod
-    def is_applicable(cls, record: Optional["JobRecord"] = None, **kwargs: Any) -> bool:
-        """Determines if the system state (TTL, heartbeats) matches this diagnosis."""
         pass

@@ -44,17 +44,15 @@ def assemble_runtime(
         base_janitor = Janitor(
             exec_ctx=exec_ctx,
             state_store=base_state_store,
+            queue_task_fn=task_manager.queue_tasks,
             active_tasks_fn=lambda: task_manager.active_tasks,
         )
         daemon_janitor = DaemonJanitor(
             janitor=base_janitor,
             state_monitor=daemon_state_store,
-            queue_task_fn=task_manager.queue_tasks,
-            active_tasks_fn=lambda: task_manager.active_tasks,
         )
         commands = CommandProcessor(
             exec_ctx,
-            task_manager=task_manager,
             janitor=daemon_janitor,
             state_store=daemon_state_store,
         )
@@ -74,7 +72,7 @@ def assemble_runtime(
             orchestrator=orchestrator,
             daemon_state=daemon_state_store,
             daemon_janitor=daemon_janitor,
-            process_commands_fn=commands.process_commands,
+            command_processor=commands,
             trigger_job_fn=triggers.evaluate,
         )
 
@@ -91,6 +89,7 @@ def assemble_runtime(
     base_janitor = Janitor(
         exec_ctx=exec_ctx,
         state_store=base_state_store,
+        queue_task_fn=task_manager.queue_tasks,
         active_tasks_fn=lambda: task_manager.active_tasks,
     )
 

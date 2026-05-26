@@ -77,13 +77,23 @@ class DatabaseService(Service):
                 "Database client does not support batch execution."
             )
 
+    def get_row_count(self, target: str, filter_condition: str | None = None) -> int:
+        """
+        Returns the total number of rows for a target table/query.
+        """
+        raise NotImplementedError(
+            "Database client must implement get_row_count method."
+        )
+
 
 class DatabaseSource(DatabaseService, Source):
+
     def get_work_units(
-        self, target: str, num_workers: int, filter_sql: str | None = None
+        self, target: str, num_workers: int, filter_condition: str | None = None
     ) -> set[str]:
         # All DBs use the client's load strategy (e.g., ORA_HASH, ctid)
-        return self.client.get_load_strategy(target, num_workers, filter_sql)
+
+        return self.client.get_load_strategy(target, num_workers, filter_condition)
 
     @protect_service(breaker)
     def fetch_data(self, unit: str) -> pl.DataFrame:

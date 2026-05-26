@@ -106,3 +106,4 @@ class PublishStage(ExecutionStage):
 
         except Exception as e:
             self.finalize(task, exception=e)
+            raise

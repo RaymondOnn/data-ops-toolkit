@@ -7,8 +7,14 @@ from typing import Any
 import pendulum
 from apps.ingestion.src.core.contexts import ExecutionContext
 from apps.ingestion.src.core.contexts.task import load_task_context
+from apps.ingestion.src.core.models.stages.enums import StageName
 from apps.ingestion.src.core.models.states import ExpiredState
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task, TaskRef
+from apps.ingestion.src.core.models.task import (
+    ExecutionStatus,
+    Task,
+    TaskRef,
+    TaskSignal,
+)
 from apps.ingestion.src.core.strategies.cleanup.cleanup import CleanupCoordinator
 from apps.ingestion.src.utils.constants import (
     CONFIG_FILENAME,
@@ -27,9 +33,11 @@ class Janitor:
         exec_ctx: ExecutionContext,
         state_store: StateStore,
         active_tasks_fn: Callable[[], dict],
+        queue_task_fn: Callable[[TaskRef, str], Any],
     ) -> None:
         self.state_store = state_store
         self.active_tasks_fn = active_tasks_fn
+        self.queue_task_fn = queue_task_fn
         self.exec_ctx = exec_ctx
 
         # Decentralized: Janitor owns the quarantine and logging zones
@@ -140,9 +148,10 @@ class Janitor:
 
             # Trigger state machine if this is an expiry-related purge
             if "Expired" in reason and task.manifest.status != ExecutionStatus.EXPIRED:
-                ExpiredState().on_enter(
-                    task, data={"reason": f"JANITOR_REAP: {reason}"}
-                )
+                task.update_manifest({
+                    "status": ExecutionStatus.EXPIRED,
+                    "remarks": f"{reason}"
+                })
 
             self.cleanup_task(task)
             return True
@@ -203,6 +212,87 @@ class Janitor:
                 ):
                     count += 1
         LOG.info(f"Age sweep done. Purged: {count}")
+
+    def quarantine_task(self, folder_path: Path, category: str) -> None:
+        """
+        Authoritative quarantining logic.
+        Moves a task from 'active' to a terminal category (e.g. FAILED, HOLD).
+        """
+        try:
+            task = Task.from_folder(folder_path, exec_ctx=self.exec_ctx)
+            LOG.info(f"Quarantining task {task.run_id} -> {category.upper()}")
+            task.move_to_folder(category.upper())
+        except Exception:
+            LOG.exception("Quarantine failed", path=str(folder_path))
+            # We don't reraise here to ensure the signal loop continues
+
+    def recover_task_by_path(self, folder_path: Path) -> None:
+        """
+        Authoritative recovery logic shifted to common Janitor.
+        Moves a quarantined task back to active and re-queues it.
+        """
+        # category is the parent of the identifier folder (FAILED or HOLD)
+        category = folder_path.parent.parent.name.upper()
+        try:
+            task = Task.from_folder(folder_path, exec_ctx=self.exec_ctx)
+
+            # Authoritative: manifest.current_stage is the most recent state.
+            # The CLI/Daemon patches this field to signal a rewind point.
+            resume_stage = task.manifest.current_stage
+
+            LOG.info(
+                f"Recovering {task.run_id} from {category} (Resume Point: {resume_stage})"
+            )
+
+            # 1. Reset Manifest State and Stage Payloads
+            updates: dict[str, Any] = {
+                "status": ExecutionStatus.PENDING,
+                "current_stage": resume_stage,
+                "error": None,  # Clear previous error state
+            }
+
+            # 2. Re-calculate Bitmask and Purge Markers
+            # We clear bits for the resume stage and all stages that follow it.
+            new_mask = task.manifest.bitmask
+            found_resume_point = False
+            for s in StageName:
+                if s.label == resume_stage:
+                    found_resume_point = True
+
+                if found_resume_point:
+                    # Unset the bit for this stage
+                    new_mask &= ~s.bitmask
+                    # Clear stage payload from manifest
+                    updates[s.label] = None
+
+                    # Encapsulated marker removal via workspace
+                    task.workspace.remove_marker(s.label)
+
+            updates["bitmask"] = new_mask
+
+            # Reset retry count on manual recovery, as human intervention implies a fresh start.
+            updates["retry_count"] = 0
+
+            task.update_manifest(updates)
+            task.move_to_folder("active")
+
+            # Create a new TaskRef instance with updated stage and status
+            updated_ref = TaskRef(
+                namespace=task.task_ref.namespace,
+                status=ExecutionStatus.PENDING.value,
+                stage=resume_stage,
+                job_id=task.task_ref.job_id,
+                dataset_id=task.task_ref.dataset_id,
+                partition_date=task.task_ref.partition_date,
+                run_id=task.task_ref.run_id,
+            )
+
+            # Use the queue function which must be available on common Janitor
+            self.queue_task_fn(updated_ref, str(task.folder / CONFIG_FILENAME))
+            task.request_status_sync(TaskSignal.SYNC)
+
+        except Exception:
+            LOG.exception("Recovery failed", path=str(folder_path))
 
 
 # TODO: Can we add a 'dry_run' flag to the Janitor class to allow simulating expiry sweeps without deleting files?

@@ -7,7 +7,7 @@ if TYPE_CHECKING:
     import polars as pl
 
 
-class Service:
+class Service(ABC):
     """
     Base class for all resilient services.
     Ensures the decorator can find the 'name' for the Registry.
@@ -17,24 +17,31 @@ class Service:
         self.name = name
         self.config = config
 
+    @abstractmethod
+    def get_total_count(self, target: str, filter_condition: str | None = None) -> int:
+        """Returns total row/item count for resource calculation or validation."""
+        pass
+
     def fetch(self, query: str) -> list[Sequence[Any]]:
         """Base signature for executing SQL commands."""
-        raise NotImplementedError
+        raise NotImplementedError("Service does not support fetch()")
 
     def fetch_df(self, query: str) -> Generator["pl.DataFrame", Any, None]:
         """Base signature for streaming DataFrames."""
-        raise NotImplementedError
+        raise NotImplementedError("Service does not support fetch_df()")
 
     def exists(self, identifier: str) -> bool:
         """Base signature for checking if an artifact/table exists."""
-        raise NotImplementedError
+        raise NotImplementedError("Service does not support exists()")
 
 
 class Source(Service, ABC):
     """Base class for all data sources (e.g., databases, file systems)."""
-    
+
     @abstractmethod
-    def get_work_units(self, target: str, num_workers: int) -> set[Any]:
+    def get_work_units(
+        self, target: str, num_workers: int, filter_condition: str | None = None
+    ) -> Any:
         """How this service splits 50M rows into chunks."""
         pass
 

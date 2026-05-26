@@ -24,8 +24,13 @@ class FormatHandler(ABC):
         self.fs = fs or fsspec.filesystem("file")
         self.opts = storage_options or {}
 
+    @property
+    def is_splittable(self) -> bool:
+        """Returns True if the format supports lazy metadata/row-counting."""
+        return False
+
     @abstractmethod
-    def discover(self, input_path: Path | str) -> set[str]:
+    def discover(self, input_path: Path | str, pattern: str | None = None) -> set[str]:
         """Expands a path into a list of Parquet files."""
         pass
 

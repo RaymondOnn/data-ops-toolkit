@@ -1,3 +1,5 @@
+import contextlib
+import json
 import logging
 import os
 import platform
@@ -5,10 +7,11 @@ import socket
 import ssl
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import psutil
+from libs.utils.dates import get_current_timestamp
 from pypac import resolver
 
 if TYPE_CHECKING:
@@ -29,35 +32,40 @@ class NetworkDoctor:
         target_port: int,
         proxy_url: str = "http://127.0.0.1:3128",
         vpn_prefixes: list[str] | None = None,
+        debug_traffic: bool = False,
     ):
         self.target_host = target_host
         self.target_port = target_port
         self.proxy_url = proxy_url
+        self.debug_traffic = debug_traffic
         self.vpn_prefixes = vpn_prefixes or [
             "10.",
             "172.16.",
             "192.168.",
         ]  # Common internal subnets
+        self._results: list[dict[str, Any]] = []
 
         # Breakdown proxy components safely
         try:
             clean_url = proxy_url.replace("http://", "").replace("https://", "")
             self.proxy_host = clean_url.split(":")[0]
             self.proxy_port = int(clean_url.split(":")[-1])
-        except Exception:
+        except Exception as e:
             LOG.warning(
-                f"Could not parse proxy URL format '{proxy_url}'. "
-                "Defaulting to standard loopback."
+                "Could not parse proxy URL format '%s'. Defaulting to standard loopback. Error: %s",
+                proxy_url,
+                e,
             )
             self.proxy_host = "127.0.0.1"
             self.proxy_port = 3128
 
     def run_diagnostics(self) -> bool:
         """Runs the sequential health evaluation pipeline."""
+        self._results = []
         LOG.info("=" * 60)
         LOG.info("🚀 STARTING USER-SPACE NETWORK ENVIRONMENT CHECK")
-        LOG.info(f"Target Destination : {self.target_host}:{self.target_port}")
-        LOG.info(f"Local Proxy Target : {self.proxy_host}:{self.proxy_port}")
+        LOG.info("Target Destination : %s:%d", self.target_host, self.target_port)
+        LOG.info("Local Proxy Target : %s:%d", self.proxy_host, self.proxy_port)
         LOG.info("=" * 60)
 
         # Order matters: VPN/DNS/Proxy checks should precede target-specific checks
@@ -74,19 +82,28 @@ class NetworkDoctor:
 
         all_passed = True
         for section_name, task in pipeline:
-            LOG.info(f"Checking: {section_name}...")
+            LOG.info("Checking: %s...", section_name)
             try:
                 passed, report = task()
+                self._results.append(
+                    {"section": section_name, "passed": passed, "report": report}
+                )
                 if passed:
-                    LOG.info(f"✅ PASS: {report}")
+                    LOG.info("✅ PASS: %s", report)
                 else:
-                    LOG.error(f"❌ FAIL: {report}")
+                    LOG.error("❌ FAIL: %s", report)
                     all_passed = False
             except Exception:
-                # Utilizing loguru's structural trace context for unhandled runtime hiccups
                 LOG.exception(
-                    f"💥 CRITICAL BREAKDOWN: Unhandled failure in "
-                    f"section [{section_name}]"
+                    "💥 CRITICAL BREAKDOWN: Unhandled failure in section [%s]",
+                    section_name,
+                )
+                self._results.append(
+                    {
+                        "section": section_name,
+                        "passed": False,
+                        "report": "Unhandled exception during diagnostic check.",
+                    }
                 )
                 all_passed = False
             print("-" * 60)
@@ -101,6 +118,36 @@ class NetworkDoctor:
             )
 
         return all_passed
+
+    def get_report(self) -> dict[str, Any]:
+        """Returns the diagnostic results as a dictionary for reporting."""
+        return {
+            "metadata": {
+                "target_host": self.target_host,
+                "target_port": self.target_port,
+                "proxy_url": self.proxy_url,
+                "timestamp": get_current_timestamp("UTC").isoformat(),
+                "platform": platform.system(),
+                "os_release": platform.release(),
+            },
+            "results": self._results,
+            "all_passed": (
+                all(r["passed"] for r in self._results) if self._results else False
+            ),
+        }
+
+    def export_json(self, output_path: Path | str) -> Path:
+        """Exports the diagnostic report to a JSON file."""
+        report = self.get_report()
+        path = Path(output_path)
+        try:
+            with path.open("w", encoding="utf-8") as f:
+                json.dump(report, f, indent=4)
+            LOG.info("Diagnostic report exported to: %s", path)
+            return path
+        except Exception:
+            LOG.exception("Failed to export diagnostic report to %s", path)
+            raise
 
     def check_vpn_presence(self) -> tuple[bool, str]:
         """Verifies if the local machine is assigned an IP within expected corporate ranges."""
@@ -147,7 +194,7 @@ class NetworkDoctor:
             else ["traceroute", "-n", self.target_host]
         )
 
-        LOG.info(f"🩺 Executing route trace to {self.target_host}...")
+        LOG.info("🩺 Executing route trace to %s...", self.target_host)
 
         try:
             # We stream the output to the log in real-time
@@ -174,17 +221,18 @@ class NetworkDoctor:
 
                     if "*" in line:
                         LOG.warning(
-                            f"Hop {hop_count}: {line} | "
-                            "STATUS: Packet Dropped (Likely Firewall)"
+                            "Hop %d: %s | STATUS: Packet Dropped (Likely Firewall)",
+                            hop_count,
+                            line,
                         )
                     else:
-                        LOG.info(f"Hop {hop_count}: {line} {context}")
+                        LOG.info("Hop %d: %s %s", hop_count, line, context)
 
             process.wait()
 
             if process.returncode == 0:
                 LOG.info(
-                    f"🎉 Trace complete. Path to {self.target_host} is fully visible."
+                    "🎉 Trace complete. Path to %s is fully visible.", self.target_host
                 )
                 return True
             LOG.error("Traceroute process exited with errors.")
@@ -196,13 +244,13 @@ class NetworkDoctor:
                 "Install 'traceroute' or 'iputils-tracepath'."
             )
             return False
-        except Exception as e:
-            LOG.exception(f"Unexpected failure during network trace: {e!s}")
+        except Exception:
+            LOG.exception("Unexpected failure during network trace")
             return False
 
     def check_dns_servers(self) -> tuple[bool, str]:
         """
-        Verifies the system's configured DNS servers, especially for 
+        Verifies the system's configured DNS servers, especially for
         corporate environments.
         """
         try:
@@ -290,11 +338,11 @@ class NetworkDoctor:
     def check_pac_discovery(self) -> tuple[bool, str]:
         """Detects if a hidden network PAC setup blocks standard socket access lines."""
         try:
-            pac_urls = resolver.collect_pac_urls()
-            if pac_urls:
+            pac_url = resolver.get_pac_url()
+            if pac_url:
                 return (
                     True,
-                    f"Proxy Auto-Configuration (PAC) detected at: {pac_urls}. "
+                    f"Proxy Auto-Configuration (PAC) detected at: {pac_url}. "
                     "Outbound requests will be routed according to "
                     "corporate traffic policies.",
                 )
@@ -336,17 +384,31 @@ class NetworkDoctor:
         """Validates proxy exit credentials and checks for SSL
         interception artifacts.
         """
-        proxies = {"all://": self.proxy_url}
+
+        @contextlib.contextmanager
+        def maybe_tap():
+            if self.debug_traffic:
+                try:
+                    from httptap import httpx_tap
+
+                    with httpx_tap():
+                        yield
+                except ImportError:
+                    LOG.warning("httptap not installed. Skipping traffic inspection.")
+                    yield
+            else:
+                yield
+
         try:
-            with httpx.Client(proxies=proxies, timeout=5.0) as client:
+            with maybe_tap(), httpx.Client(proxy=self.proxy_url, timeout=5.0) as client:
                 # Outbound request to verify external routing
                 res = client.get("https://ipify.org")
                 res.raise_for_status()
+                public_ip = res.text.strip()
                 return (
                     True,
                     "Outbound traffic successfully routed through "
-                    "corporate proxy gateway. "
-                    f"Public IP verified as {res.text.strip()}.",
+                    f"corporate proxy gateway. Public IP: {public_ip}",
                 )
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 407:

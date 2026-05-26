@@ -204,7 +204,6 @@ class TaskContextBuilder:
         )
         return expand_env_vars(val) if val is not None else default
 
-    # TODO: Skip archive if enable_archival = False
     def _resolve_service(
         self, settings: Dynaconf, ref_key: str, dataset_id: str
     ) -> dict:

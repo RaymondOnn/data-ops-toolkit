@@ -141,11 +141,8 @@ class Orchestrator:
                     # We use deep_sync=True to ensure the FINAL_MANIFEST JSON is captured.
                     self.state_store.sync_from_folder(event.folder_path, deep_sync=True)
 
-                    # 2. Quarantining: Physically move the folder for analysis
-                    from apps.ingestion.src.core.models.states import FailedState
-
-                    task = Task.from_folder(event.folder_path, self.exec_ctx)
-                    task.move_to_folder(FailedState.folder_name)
+                    # 2. Quarantining: Physically move the folder using the Janitor
+                    self.janitor.quarantine_task(event.folder_path, "FAILED")
 
             elif event.signal_type == ".sync":
                 if event.folder_path:
@@ -225,7 +222,7 @@ class Orchestrator:
     def _trigger_job(
         self,
         job_id: str,
-        dataset_id: str,
+        dataset_id: str | None = None,
         partition_date_str: str | None = None,
         overrides: dict[str, Any] | None = None,
         run_id: str | None = None,

@@ -1,7 +1,7 @@
 default:
   job:
     extract:
-      num_workers: 4
+      num_workers: 10
     load:
       service_ref: clickhouse
   

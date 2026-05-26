@@ -40,6 +40,10 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             self._client.close()
             del self._client  # Clear the cached property
 
+    def get_total_count(self, target: str, filter_condition: str | None = None) -> int:
+        """Implementation required for resource-aware scaling in ExtractStage."""
+        return self.get_row_count(target, filter_condition)
+
     def stage_data(
         self,
         source_dir: Path,
@@ -183,8 +187,8 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             )
 
             rows_promoted = self.get_row_count(
-                table_name=target_table,
-                where_clause=f"{partition_col} = '{partition_val}'",
+                target=target_table,
+                filter_condition=f"{partition_col} = '{partition_val}'",
             )
             if rows_promoted != expected_count:
                 raise ValueError(
@@ -259,7 +263,7 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             return 999_999_999  # Sentinel for "Totally different"
 
         # Explicitly sort to ensure positional alignment in EXCEPT
-        col_selection = ", ".join(sorted(list(compare_cols)))
+        col_selection = ", ".join(sorted(compare_cols))
 
         sql = f"""
             SELECT count() FROM (
@@ -301,17 +305,17 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         LOG.warning("Dropping table from ClickHouse", table=identifier)
         self.client.sql(sql)
 
-    def get_row_count(self, table_name: str, where_clause: str | None = None) -> int:
+    def get_row_count(self, target: str, filter_condition: str | None = None) -> int:
         # 1. Clean the where clause (Case-Insensitive)
         clean_where = "1=1"
-        if where_clause and where_clause.strip():
+        if filter_condition and filter_condition.strip():
             # Removes "where " or "WHERE " from the start
-            clean_where = re.sub(r"(?i)^where\s+", "", where_clause.strip())
+            clean_where = re.sub(r"(?i)^where\s+", "", filter_condition.strip())
 
         # Protect table_name by wrapping in backticks and removing existing ones
         # safe_table = '"{}"'.format(table_name.replace('"', '""'))
 
-        query = f"SELECT COUNT(*) FROM {table_name} WHERE {clean_where.rstrip('; ')}"
+        query = f"SELECT COUNT(*) FROM {target} WHERE {clean_where.rstrip('; ')}"
 
         try:
             res = self.client.sql(query)
@@ -319,7 +323,7 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         except Exception:
             # Log error using Loguru!
             # logger.error(f"Query failed: {e}")
-            LOG.exception("Failed to get row count", table=table_name, query=query)
+            LOG.exception("Failed to get row count", table=target, query=query)
             return 0
 
     def fetch(self, query: str) -> list[Sequence[Any]]:

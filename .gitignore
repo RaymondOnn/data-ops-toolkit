@@ -6,6 +6,7 @@ tmp/
 .vscode
 .workspace
 logs/
+sim_data/
 __pycache__
 *.py[cod]
 .DS_STORE     

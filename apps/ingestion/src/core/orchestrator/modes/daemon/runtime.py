@@ -3,12 +3,15 @@ import threading
 import time  # Moved time import here for consistency
 from collections.abc import Callable
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 from zoneinfo import ZoneInfo
 
+import msgspec
 import pendulum
 import ray
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
+from apps.ingestion.src.core.models.task import Task
 from apscheduler.events import EVENT_JOB_ERROR, JobExecutionEvent
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -19,6 +22,7 @@ if TYPE_CHECKING:
     from apps.ingestion.src.core.orchestrator.common.orchestrator import Orchestrator
     from apps.ingestion.src.core.orchestrator.enums import JobRecord
 
+    from .commands import CommandProcessor
     from .janitor import DaemonJanitor
     from .state import DaemonStateStore
     from .trigger import TriggerDecision
@@ -33,6 +37,14 @@ INTERVAL_RECOVERY_SWEEP_SECS = 300
 INTERVAL_PROBE_SECS = 3600
 
 
+class ResumePayload(msgspec.Struct):
+    """Structured payload for surgical task recovery."""
+
+    run_id: str
+    from_stage: str | None = None
+    overrides: dict[str, Any] = {}
+
+
 class DaemonRuntime:
     """
     Always-On: Manages background threads, schedulers, and a reactive polling loop.
@@ -44,7 +56,7 @@ class DaemonRuntime:
         orchestrator: "Orchestrator",
         daemon_state: "DaemonStateStore",
         daemon_janitor: "DaemonJanitor",
-        process_commands_fn: Callable[[], bool],
+        command_processor: "CommandProcessor",
         trigger_job_fn: Callable[[list["JobRecord"]], list["TriggerDecision"]],
     ) -> None:
         self.exec_ctx = exec_ctx
@@ -53,12 +65,17 @@ class DaemonRuntime:
         # Specialized Daemon Components
         self.state_monitor = daemon_state
         self.janitor = daemon_janitor
-        self.process_commands_fn = process_commands_fn
+        self.commands = command_processor
         self.trigger_job_fn = trigger_job_fn
 
         # Aliases for readability
         self.tasks = orchestrator.tasks
         self.signals = orchestrator.signals
+
+        # Register local handlers for system commands
+        self.commands.register_handler("STOP", self._handle_stop_command)
+        self.commands.register_handler("ADHOC_RUN", self._handle_adhoc_run)
+        self.commands.register_handler("RESUME", self._handle_resume)
 
         self.heartbeat = Heartbeat()
 
@@ -122,33 +139,105 @@ class DaemonRuntime:
         self.stop()
 
     def _check_external_signals(self) -> None:
-        """Handles daemon-specific signals like STOP.cmd and CommandProcessor calls."""
-        # 1. Process custom commands (e.g., RECOVER_ALL.cmd)
-        if self.process_commands_fn():
+        """Handles external signals and drains the CommandProcessor queue."""
+        # 1. Drain the command queue (e.g., ADHOC_RUN, STOP, RECOVER_ALL)
+        command_queue = self.commands.process_commands()
+        for handler, payload in command_queue:
+            handler(payload)
+
+        if command_queue:
             self.signals.notify()
 
-        # 2. Handle Shutdown Signals
-        stop_cmd = self.exec_ctx.signal_path / "STOP.cmd"
-        if stop_cmd.exists():
-            content = stop_cmd.read_text().strip().lower()
-            if content == "force":
-                LOG.warning("🛑 FORCE STOP detected. Terminating loop.")
-                self.exec_ctx.stop_at_ts = time.time()
-            else:
-                timeout = self.exec_ctx.drain_timeout_secs
-                stop_ts = time.time() + timeout
-                self.exec_ctx.stop_at_ts = stop_ts
-                deadline = (
-                    pendulum.from_timestamp(stop_ts)
-                    .in_tz(self.exec_ctx.timezone)
-                    .format("HH:mm:ss")
-                )
-                LOG.warning(
-                    f"⏳ DRAIN detected. (Deadline: {deadline}, Timeout: {timeout}s)"
-                )
+    def _handle_stop_command(self, payload: Any) -> None:
+        """Abstracted handler for the STOP.cmd signal."""
+        content = str(payload).lower() if payload else ""
 
-            stop_cmd.unlink()
-            self.signals.notify()
+        if content == "force":
+            LOG.warning("🛑 FORCE STOP detected. Terminating loop.")
+            self.exec_ctx.stop_at_ts = time.time()
+        else:
+            # Standard Graceful Drain
+            timeout = self.exec_ctx.drain_timeout_secs
+            stop_ts = time.time() + timeout
+            self.exec_ctx.stop_at_ts = stop_ts
+
+            deadline = (
+                pendulum.from_timestamp(stop_ts)
+                .in_tz(self.exec_ctx.timezone)
+                .format("HH:mm:ss")
+            )
+            LOG.warning(
+                f"⏳ DRAIN detected. (Deadline: {deadline}, Timeout: {timeout}s)"
+            )
+
+    def _handle_adhoc_run(self, payload: dict[str, Any] | None) -> None:
+        """Handles triggering an adhoc job from JSON payload."""
+        if not payload:
+            LOG.error("ADHOC_RUN command received with empty payload")
+            return
+
+        job_id = payload.get("job_id")
+        partition_date = payload.get("partition_date")
+        dataset_id = payload.get("dataset_id")  # Optional
+
+        if not job_id or not partition_date:
+            LOG.error("ADHOC_RUN missing required fields", payload=payload)
+            return
+
+        LOG.info("Triggering adhoc run via command", job_id=job_id, dataset=dataset_id)
+        # This will call _trigger_job which seeds the StateStore (IS_SCHEDULED=0)
+        self.orchestrator._trigger_job(
+            job_id=job_id,
+            dataset_id=dataset_id,
+            partition_date_str=partition_date,
+        )
+
+    def _handle_resume(self, payload: Any) -> None:
+        """Handles surgical recovery of a specific run."""
+        if not payload:
+            LOG.error("RESUME command received with empty payload")
+            return
+
+        try:
+            # Refactor: Convert raw dictionary to structured ResumePayload
+            data = msgspec.convert(payload, ResumePayload)
+        except msgspec.ValidationError as e:
+            LOG.error(f"RESUME payload validation failed: {e}")
+            return
+
+        run_id = data.run_id
+        from_stage = data.from_stage
+        overrides = data.overrides
+
+        if not run_id:
+            LOG.error("RESUME missing required field: run_id")
+            return
+
+        folder = self.orchestrator.state_store.resolve_task_path(run_id)
+        if not folder:
+            LOG.error("Resume failed: Run ID %s not found in FAILED/HOLD.", run_id)
+            return
+
+        # Apply "Rewind" or "Override" logic by modifying the on-disk context before recovery
+        if from_stage or overrides:
+            try:
+                # Explicitly cast to Path as resolve_task_path returns Path | None
+                task = Task.from_folder(cast("Path", folder), self.exec_ctx)
+                updates = {}
+                if from_stage:
+                    updates["current_stage"] = from_stage
+                if overrides:
+                    updates["custom_overrides"] = overrides
+
+                if updates:
+                    task.update_manifest(updates)
+            except Exception:
+                LOG.exception("Failed to apply overrides during resume for %s", run_id)
+
+        LOG.info(
+            "Resuming task: %s (Rewind to: %s)", run_id, from_stage or "Last Failure"
+        )
+        self.janitor.janitor.recover_task_by_path(folder)
 
     def _engine_loop(self) -> None:
         """Daemon-only loop that wakes up on resource changes or signals."""
@@ -241,6 +330,5 @@ class DaemonRuntime:
                 return
             self.orchestrator.state_store._flush_buffer_to_stream(force=True)
             self.tasks.recover_zombie_tasks()
-            self.janitor.recover_failed_tasks()
         except Exception:
             LOG.exception("Daemon maintenance sweep failed")

@@ -201,7 +201,7 @@ class Compute:
         # 0. Global System Safety Check
         vitals = get_system_vitals()
         if vitals.cpu_pct > CRITICAL_CPU_THRESHOLD or vitals.mem_pct > 85.0:
-            LOG.throttle(60).warning(
+            LOG.warning(
                 "System resources exhausted. Adaptive throttling engaged.",
                 cpu=f"{vitals.cpu_pct}%",
                 mem=f"{vitals.mem_pct}%",

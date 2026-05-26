@@ -201,7 +201,6 @@ class TaskManager:
                     stage=task_ref.stage,
                 )
 
-
     def _get_all_keys(self) -> list[str]:
         """
         Fetches a snapshot of all task keys from the cache.

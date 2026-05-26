@@ -11,9 +11,18 @@ LOG = logging.getLogger(__name__)
 
 
 class CSVHandler(FormatHandler):
-    def discover(self, input_path: Path | str) -> set[str]:
+    @property
+    def is_splittable(self) -> bool:
+        return True
+
+    def discover(self, input_path: Path | str, pattern: str | None = None) -> set[str]:
         """Expands a path into a list of CSV/Text files."""
-        path_str = str(input_path)
+        # Standardize the path by stripping the protocol if present
+        # so fsspec doesn't treat it as relative to CWD.
+        path_str = self.fs._strip_protocol(str(input_path))
+
+        if pattern:
+            path_str = f"{path_str.rstrip('/')}/{pattern.lstrip('/')}"
 
         # If the path already contains a wildcard, expand it directly
         if "*" in path_str:
@@ -24,10 +33,12 @@ class CSVHandler(FormatHandler):
             }
 
         if self.fs.isfile(path_str):
-            return {path_str}
+            return {str(self.fs.unstrip_protocol(path_str))}
 
         # Matches .csv, .txt, .tsv
-        pattern = f"{path_str.rstrip('/')}/**/*.[ct][sx][vt]"
+        pattern = (
+            f"{path_str.rstrip('/')}/**/*.[ct][sx][vt]" if not pattern else path_str
+        )
         print(f"Discovering files with pattern: {pattern}")
         return {
             str(self.fs.unstrip_protocol(str(p)))

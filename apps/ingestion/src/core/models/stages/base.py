@@ -32,7 +32,6 @@ class ExecutionStage(ABC):
             return EXEC_STAGES[idx + offset]
         raise ValueError(f"Invalid offset: {offset}")
 
-    # TODO: Trigger cleanup utility to remove old temporary task folders
     def pre_flight(self, task: "Task") -> None:
         """
         Performs node-specific connectivity and resource checks.
@@ -87,25 +86,8 @@ class ExecutionStage(ABC):
 
         # 1. SYMLINK (Pointer to immutable data)
         if data_folder:
-            active_link = task.folder / self.name
-            if active_link.exists() or active_link.is_symlink():
-                active_link.unlink()
-
-            # Pointer: active/job_id/run_id/stage -> ../../../data/stage/folder
-            relative_target = (
-                Path("..") / ".." / ".." / "data" / self.name / data_folder.name
-            )
-            active_link.symlink_to(relative_target)
-
-        # # Case 1: Connectivity/Circuit Breaker (Blocked)
-        # if isinstance(exception, (CircuitBreakerTripped, ClientCantConnect)):
-        #     error.update(
-        #         {
-        #             "service_name": task.context.extract.source_identifier,
-        #         }
-        #     )
+            task.workspace.create_stage_marker(self.name, data_folder)
 
         # Persist stage results and bitmask for intermediate stages
         new_mask = task.manifest.bitmask | self.bitmask
-        task.update_manifest({self.name: results, "bitmask": new_mask})
         task.update_manifest({self.name: results, "bitmask": new_mask})

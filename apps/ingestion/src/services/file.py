@@ -1,7 +1,7 @@
 import time
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import polars as pl
 from libs.auth.models import Secret
@@ -113,8 +113,39 @@ class BaseStorageService(Service):
 
 
 class StorageSource(BaseStorageService, Source):
+    def get_total_count(self, target: str, filter_condition: str | None = None) -> int:
+        """
+        Discovers files and aggregates row counts to assist with worker scaling.
+        For splittable formats (Parquet/CSV), uses metadata/newline scans.
+        For non-splittable (JSON/XML), estimates rows based on file size.
+        """
+        try:
+            handler = self._get_handler(target)
+            files = list(handler.discover(target, filter_condition))
+            if not files:
+                return 0
+
+            # 1. Precise Count for Splittable Formats
+            if handler.is_splittable:
+                total = 0
+                for f in files:
+                    # pl.len() on a LazyFrame (Scan) is metadata-only for Parquet
+                    count_df = handler.to_df(f).select(pl.len()).collect()
+                    total += cast("pl.DataFrame", count_df).item()
+                return total
+
+            # 2. Heuristic Estimate for Non-Splittable (JSON/XML)
+            # We avoid scanning these rows on the driver to prevent OOM.
+            # Estimate: 1 row per 1KB of raw data.
+            total_bytes = sum(self.client.fs.size(f) for f in files)
+            return max(len(files), int(total_bytes // 1024))
+        except Exception:
+            return 0
+
     @protect_service(breaker)
-    def get_work_units(self, target: str, num_workers: int) -> list[dict[str, Any]]:
+    def get_work_units(
+        self, target: str, num_workers: int, filter_condition: str | None = None
+    ) -> list[dict[str, Any]]:
         """
         Uses the internal client to split 50M rows.
         Works across S3, Azure, GCS, or Local.
@@ -129,37 +160,118 @@ class StorageSource(BaseStorageService, Source):
 
         # 2. Use Handler-specific discovery (e.g. CSVHandler
         # knows to find .csv and .txt)
-        files = list(handler.discover(target))
-        print(f"Discovered files: {files}")
-        LOG.debug(
-            "Generating work units",
-            target=target,
-            files_found=len(files),
-            partitions=num_workers,
+        files = list(handler.discover(target, filter_condition))
+        if not files:
+            return []
+
+        # --- SMALL FILE COALESCING LOGIC ---
+        # Heuristic: If files are tiny, don't waste Ray overhead on parallelism.
+        # However, we also check if the number of files is small.
+        # 50MB is a safe 'minimum' for a single Ray task in a 2GB environment.
+        MIN_BLOCK_SIZE_BYTES = 50 * 1024 * 1024
+
+        # Fast metadata check for total size
+        total_bytes = sum(self.client.fs.size(f) for f in files)
+
+        # If total volume is small (e.g. 5 files totaling 5MB),
+        # one worker is significantly more efficient than spinning up 5-10 Ray tasks.
+        if total_bytes < MIN_BLOCK_SIZE_BYTES:
+            LOG.info(
+                "Small dataset detected. Coalescing into a single work unit.",
+                total_kb=round(total_bytes / 1024, 2),
+                file_count=len(files),
+            )
+            return [{"files": files}]
+
+        # STRATEGY 1: File-level Parallelism (Standard)
+        # We use this if we have enough files, OR if the format is not splittable (JSON/XML)
+        if len(files) >= num_workers or num_workers == 1 or not handler.is_splittable:
+            active_workers = min(num_workers, len(files))
+            LOG.debug(
+                "Using file-level parallelism",
+                files=len(files),
+                workers=active_workers,
+                splittable=handler.is_splittable,
+            )
+            return [
+                {"files": files[i::active_workers]}
+                for i in range(active_workers)
+                if files[i::active_workers]
+            ]
+
+        # STRATEGY 2: Intra-file Parallelism (Overslicing)
+        # Use this when you have few large files and many workers.
+        LOG.info(
+            "Calculating intra-file slices for optimized parallelism",
+            files=len(files),
+            target_workers=num_workers,
         )
-        return [{"files": files[i::num_workers]} for i in range(num_workers)]
+
+        # We need row counts to calculate slice boundaries
+        # scan_*.select(pl.len()) is metadata-only and extremely fast
+        total_rows = 0
+        file_metadata = []
+        for f in files:
+            res = handler.to_df(f).select(pl.len()).collect()
+            count = cast("pl.DataFrame", res).item()
+            total_rows += count
+            file_metadata.append({"path": f, "rows": count})
+
+        rows_per_unit = total_rows // num_workers
+        work_units = []
+
+        for meta in file_metadata:
+            f_path = meta["path"]
+            f_rows = meta["rows"]
+
+            # Calculate how many units this specific file should be split into
+            units_for_file = max(1, round(f_rows / rows_per_unit))
+            actual_slice_size = f_rows // units_for_file
+
+            for i in range(units_for_file):
+                offset = i * actual_slice_size
+                # Ensure the last slice captures remaining rows due to rounding
+                length = (
+                    actual_slice_size if i < units_for_file - 1 else f_rows - offset
+                )
+
+                work_units.append(
+                    {"files": [f_path], "slice": {"offset": offset, "length": length}}
+                )
+
+        return work_units
 
     @protect_service(breaker)
-    def fetch_data(self, unit: list[str] | str) -> pl.DataFrame | pl.LazyFrame:
+    def fetch_data(
+        self, unit: dict[str, Any] | list[str] | str
+    ) -> pl.DataFrame | pl.LazyFrame:
         """
         Reads a list of files (the work unit) into a single Polars DataFrame.
         Supports Parquet, CSV, and JSON formats.
         """
-        if unit is None or len(unit) == 0:  # No Truthy values in Ray
-            return pl.DataFrame()
+        # Normalize the unit format
+        if isinstance(unit, dict):
+            paths = unit["files"]
+            slice_conf = unit.get("slice")
+        else:
+            paths = [unit] if isinstance(unit, str) else unit
+            slice_conf = None
 
-        # Handle both single path strings and lists of paths
-        paths = [unit] if isinstance(unit, str) else unit
-
-        # Resolve paths via the client (handles file:// vs s3:// etc)
-        resolved_paths = [self.client.resolve_path(p) for p in paths]
+        # Resolve paths via the client, but only if they don't already have a protocol.
+        resolved_paths = [
+            p if "://" in str(p) else self.client.resolve_path(p) for p in paths
+        ]
 
         # 1. Determine format from the first file
         handler = self._get_handler(resolved_paths[0])
 
-        # 2. Iterate and fetch individually (supports per-file repairs/cleaning)
-        # This aligns with the requirement that handlers accept a single Path.
-        lfs = [handler.to_df(p) for p in resolved_paths]
+        # 2. Convert to LazyFrames
+        lfs = []
+        for p in resolved_paths:
+            lf = handler.to_df(p)
+            if slice_conf:
+                lf = lf.slice(slice_conf["offset"], slice_conf["length"])
+            lfs.append(lf)
 
         if not lfs:
             return pl.DataFrame()

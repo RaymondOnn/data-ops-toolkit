@@ -1,4 +1,3 @@
-import time
 from typing import Any
 
 from apps.ingestion.src.core.models.states import ZombieState
@@ -36,7 +35,6 @@ class StrictAdmission(AdmissionPolicy):
         return True
 
 
-
 class ReactiveMaintenance(MaintenancePolicy):
     """Always-On: Performs proactive resource reclamation and zombie detection."""
 
@@ -52,7 +50,7 @@ class ReactiveMaintenance(MaintenancePolicy):
 
             meta = cache.get(key)
             if not meta or not ZombieState.is_applicable(
-                record=key,
+                cache_key=key,
                 meta=meta,
                 active_tasks=active_tasks,
                 exec_ctx=exec_ctx,
@@ -72,21 +70,11 @@ class ReactiveMaintenance(MaintenancePolicy):
                     cache.pop(key, None)
                 continue
 
-            if task.workspace.exists():
-                m_file = task.workspace.manifest_path
-                if m_file.exists() and (time.time() - m_file.stat().st_mtime < 300):
-                    meta.last_hb = time.time()
-                    with lock:
-                        cache[key] = meta
-                    continue
+            # Reclaim resources and trigger resurrection
+            for ref, active_key in list(active_tasks.items()):
+                if active_key == key:
+                    compute.reclaim_resources(ref)
+                    active_tasks.pop(ref)
 
-                for ref, active_key in list(active_tasks.items()):
-                    if active_key == key:
-                        compute.reclaim_resources(ref)
-                        active_tasks.pop(ref)
-
-                LOG.warning("Zombie task detected", key=key)
-                self._recover_task(key, cache, lock, active_tasks, compute, exec_ctx)
-
-
-
+            LOG.warning("Zombie task detected", key=key)
+            self._recover_task(key, cache, lock, active_tasks, compute, exec_ctx)
