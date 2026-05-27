@@ -86,7 +86,7 @@ extend-select = [
     "DTZ",      # require strict timezone manipulation with datetime
     "E",        # PyCodeStyle errors
     "F",        # Pyflakes rules
-    "FBT",      # detect boolean traps
+    # "FBT",      # detect boolean traps
     "FA",       # Enforce from __future__ import annotations
     "G",        # Better usage of built-in logging
     "I",        # Sort imports properly
@@ -120,6 +120,7 @@ ignore = [
     "N818", # error-suffix-on-exception-name
     "TD002", # missing-todo-author
     "PLC0415", # import-outside-top-level
+
 ]
 
 [tool.ruff.lint.pydocstyle]

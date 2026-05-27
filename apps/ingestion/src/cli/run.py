@@ -2,7 +2,7 @@ import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, cast
+from typing import Annotated
 
 import msgspec
 import typer
@@ -153,7 +153,8 @@ def run_adhoc(
         typer.Option(
             "--dataset",
             "-d",
-            help="Optional: Specific dataset ID within the job. If omitted, all datasets for the job will run.",
+            help="Optional: Specific dataset ID within the job. "
+            "If omitted, all datasets for the job will run.",
         ),
     ] = None,
     env: Annotated[
@@ -173,7 +174,8 @@ def run_adhoc(
         "dataset_id": dataset_id,
     }
 
-    # Generate a unique filename to avoid collisions and allow multiple adhoc runs to be queued
+    # Generate a unique filename to avoid collisions and 
+    # allow multiple adhoc runs to be queued
     timestamp = get_current_timestamp().strftime("%Y%m%d%H%M%S")
     unique_id = make_short_hash(6)
     cmd_filename = f"ADHOC_RUN_{timestamp}_{unique_id}.cmd"
@@ -183,7 +185,8 @@ def run_adhoc(
         with cmd_file_path.open("wb") as f:
             f.write(msgspec.json.encode(payload))
         logger.success(
-            f"Ad-hoc run command '{cmd_filename}' created successfully in {exec_ctx.signal_path}."
+            f"Ad-hoc run command '{cmd_filename}' created successfully "
+            f"in {exec_ctx.signal_path}."
         )
         logger.debug(f"Payload: {payload}")
     except Exception as e:
@@ -220,8 +223,9 @@ def run_resume(
         except (ValueError, KeyError):
             valid_stages = [s.label for s in StageName]
             raise typer.BadParameter(
-                f"Invalid stage '{from_stage}'. Valid stages are: {', '.join(valid_stages)}"
-            )
+                f"Invalid stage '{from_stage}'. "
+                f"Valid stages are: {', '.join(valid_stages)}"
+            ) from None
 
     # Process overrides if provided
     from apps.ingestion.src.core.contexts.builder import parse_set_options
@@ -260,7 +264,7 @@ def run_resume(
         # Apply Surgical Overrides to the quarantined config before recovery
         if from_stage or overrides:
             # Explicitly cast to Path as resolve_task_path returns Path | None
-            task = Task.from_folder(cast("Path", folder), exec_ctx)
+            task = Task.from_folder(folder, exec_ctx)
             updates = {}
             if from_stage:
                 updates["current_stage"] = from_stage

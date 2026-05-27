@@ -94,7 +94,7 @@ class DBClient(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def exists(self, identifier: str) -> bool:
+    def exists(self, fq_table: str) -> bool:
         """Checks if a table or artifact exists."""
         raise NotImplementedError()
 

@@ -13,9 +13,17 @@ from .manifest import (
 from .status import ExecutionStatus
 
 __all__ = [
+    "ArchivePayload",
+    "AuditPayload",
+    "ErrorPayload",
     "ExecutionStatus",
+    "ExtractPayload",
+    "PublishPayload",
     "Task",
     "TaskManifest",
     "TaskRef",
-    "TaskSignal",    
+    "TaskSignal",
+    "TransformPayload",
+    "WritePayload",
+    "create_task_folder"
 ]

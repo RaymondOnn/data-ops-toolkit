@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from libs.auth.provider import encrypt_local_secret
 
@@ -14,7 +15,7 @@ SECRETS = {
 
 encrypted_map = {k: encrypt_local_secret(v, MASTER_KEY) for k, v in SECRETS.items()}
 
-with open(".secrets.json", "w") as f:
+with Path("./.secrets.json").open("w") as f:
     json.dump(encrypted_map, f, indent=2)
 
 print("✅ .secrets.json generated successfully.")

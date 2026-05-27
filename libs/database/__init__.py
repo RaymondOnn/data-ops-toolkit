@@ -9,4 +9,5 @@ __all__ = [
     "DBClient",
     "OracleClient",
     "PostgresClient",
+    "TypeResolver",
 ]

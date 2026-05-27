@@ -1,9 +1,11 @@
 import logging
 from abc import ABC, abstractmethod
+from typing import Any
 
 import diskcache
 import ray
 
+LOG = logging.getLogger(__name__)
 
 class BaseRegistry(ABC):
     @abstractmethod
@@ -29,7 +31,7 @@ class LocalDiskRegistry(BaseRegistry):
 @ray.remote(num_cpus=0)
 class RayRegistryActor:
     def __init__(self) -> None:
-        self._data = {}
+        self._data: dict[str, Any] = {}
 
     def update(self, s, st) -> None:
         self._data[s] = st
@@ -61,7 +63,7 @@ def get_registry() -> BaseRegistry:
         try:
             return RemoteRayRegistry()
         except Exception as e:
-            logging.warning(
+            LOG.warning(
                 f"Failed to connect to Ray Actor, falling back to disk: {e}"
             )
             return LocalDiskRegistry()

@@ -5,8 +5,8 @@ from .file import FileIngest
 
 __all__ = [
     "DataReader",
+    "FileIngest",
     "Reader",
     "ReaderContext",
     "ReaderFactory",
-    # "FileIngest",
 ]

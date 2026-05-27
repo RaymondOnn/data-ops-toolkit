@@ -20,7 +20,7 @@ pkg_path = Path(__file__).parent / "custom"
 prefix = f"{__name__}.custom."
 
 if pkg_path.exists():
-    for _, modname, ispkg in pkgutil.walk_packages([str(pkg_path)], prefix):
+    for _, modname, _ in pkgutil.walk_packages([str(pkg_path)], prefix):
         try:
             importlib.import_module(modname)
         except Exception as e:

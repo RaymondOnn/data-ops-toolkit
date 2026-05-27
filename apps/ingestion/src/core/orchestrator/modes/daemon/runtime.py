@@ -3,7 +3,6 @@ import threading
 import time  # Moved time import here for consistency
 from collections.abc import Callable
 from contextlib import suppress
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from zoneinfo import ZoneInfo
 
@@ -19,6 +18,8 @@ from libs.resilience.heartbeat import Heartbeat
 from loguru import logger
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from apps.ingestion.src.core.orchestrator.common.orchestrator import Orchestrator
     from apps.ingestion.src.core.orchestrator.enums import JobRecord
 
@@ -218,7 +219,8 @@ class DaemonRuntime:
             LOG.error("Resume failed: Run ID %s not found in FAILED/HOLD.", run_id)
             return
 
-        # Apply "Rewind" or "Override" logic by modifying the on-disk context before recovery
+        # Apply "Rewind" or "Override" logic by modifying 
+        # the on-disk context before recovery
         if from_stage or overrides:
             try:
                 # Explicitly cast to Path as resolve_task_path returns Path | None

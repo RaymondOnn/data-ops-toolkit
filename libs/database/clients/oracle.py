@@ -28,7 +28,11 @@ class OracleClient(DBClient):
             conn = oracledb.connect(
                 user=self.config["user"],
                 password=self.config["password"],
-                dsn=f"{self.config['host']}:{self.config.get('port', 1521)}/{self.config['service']}",
+                dsn="{}:{}/{}".format(
+                    self.config["host"],
+                    self.config.get("port", 1521),
+                    self.config["service"],
+                ),
             )
             self._ping(conn)
             return conn
@@ -130,25 +134,6 @@ class OracleClient(DBClient):
 
             finally:
                 cursor.close()
-
-    # def write_table(
-    #     self, lf: pl.LazyFrame, table_name: str, batch_size: int = 100_000
-    # ) -> None:
-    #     """
-    #     Streams LazyFrame in chunks and uses executemany for batch binds.
-    #     """
-    #     # 1. Get column names and build the INSERT statement
-    #     columns = lf.columns
-    #     placeholders = ", ".join([f":{i + 1}" for i in range(len(columns))])
-    #     sql = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})"
-
-    #     # 2. Iterate through the LazyFrame in batches
-    #     # .iter_slices() prevents the 50M rows from hitting RAM at once
-    #     for batch_df in lf.collect().iter_slices(n_rows=batch_size):
-    #         data = batch_df.to_dicts()  # Convert small chunk to list of dicts/tuples
-    #         cursor = self.connect().cursor()
-    #         cursor.executemany(sql, [tuple(d.values()) for d in data])
-    #         self.connect().commit()
 
     def get_schema(self, fq_table: str) -> pl.DataFrame:
         schema, table_name = fq_table.split(".")

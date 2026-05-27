@@ -15,16 +15,16 @@ from apps.ingestion.src.core.models.states import (
     SuccessState,
 )
 from apps.ingestion.src.core.models.task import ExecutionStatus, Task, TaskSignal
+from apps.ingestion.src.core.orchestrator.common.session import TaskSession
 from apps.ingestion.src.core.orchestrator.enums import TaskMetadata, TaskRef
 from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.services.registry import ServiceRegistry
+from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE
 from apps.ingestion.src.utils.exceptions import RetryTask, RewindTask
 from filelock import FileLock
 from libs.cache.utils import get_cache
 from libs.utils.exceptions import TransientError, install_exception_hooks
 from loguru import logger
-
-from .session import TaskSession
 
 if TYPE_CHECKING:
     from loguru import Logger
@@ -61,7 +61,16 @@ class Executor:
     ):
         """Handles atomic cache updates during task state transitions."""
         meta = self.cache.pop(old_key, None)
-        if not meta:
+
+        # ROBUSTNESS: If the specific status-key is missing (e.g. status changed during dispatch lag),
+        # attempt to find any key matching the Run ID using the authoritative namespace.
+        if meta is None:
+            run_id = TaskRef.from_str(old_key).run_id
+            for k in list(self.cache.iterkeys(pattern=f"{CACHE_TASK_NAMESPACE}:*:*:*:*:*:{run_id}")):
+                meta = self.cache.pop(k, None)
+                if meta: break
+
+        if meta is None:
             return None
         meta.status = new_status
         if next_stage:

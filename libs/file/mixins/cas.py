@@ -17,7 +17,7 @@ LOG = logging.getLogger(__name__)
 def calculate_sha256(local_path: str) -> str:
 
     sha256_hash = hashlib.sha256()
-    with open(local_path, "rb") as f:
+    with UPath(local_path).open("rb") as f:
         for byte_block in iter(lambda: f.read(65536), b""):  # 64KB chunks
             sha256_hash.update(byte_block)
     return sha256_hash.hexdigest()
@@ -86,7 +86,7 @@ class CASArchiveMixin:
             job_id, file_hash, str(vault_path), metadata
         )
 
-        return vault_path, manifest_path
+        return str(vault_path), str(manifest_path)
 
     def _atomic_vault_upload(
         self, local_path: str, vault_path: str, vault_dir: str

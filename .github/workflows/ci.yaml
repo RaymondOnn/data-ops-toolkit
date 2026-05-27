@@ -14,8 +14,14 @@ jobs:
   lint-and-format:
     name: Static Analysis & Build Check
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Crucial: checkout must use a ref or fetch-depth: 0 to push back easily
+          fetch-depth: 0 
 
       - name: Initialize Environment
         uses: ./.github/actions/setup-uv
