@@ -1,9 +1,17 @@
+"""
+Daemon Mode Runtime Orchestrator.
+
+This module manages the 'Always-On' lifecycle of the ingestion engine,
+handling background scheduling, signal processing, and surgical
+task recovery (resumes).
+"""
+
 import sys
 import threading
 import time  # Moved time import here for consistency
 from collections.abc import Callable
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import msgspec
@@ -15,13 +23,12 @@ from apscheduler.events import EVENT_JOB_ERROR, JobExecutionEvent
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 from libs.resilience.heartbeat import Heartbeat
+from libs.utils.dates import get_current_timestamp
 from loguru import logger
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from apps.ingestion.src.core.orchestrator.common.orchestrator import Orchestrator
-    from apps.ingestion.src.core.orchestrator.enums import JobRecord
+    from apps.ingestion.src.core.orchestrator.enums import JobRecord, TaskMetadata
 
     from .commands import CommandProcessor
     from .janitor import DaemonJanitor
@@ -47,8 +54,12 @@ class ResumePayload(msgspec.Struct):
 
 
 class DaemonRuntime:
-    """
-    Always-On: Manages background threads, schedulers, and a reactive polling loop.
+    """Always-On manager for background threads and reactive polling loops.
+
+    Decision: Reactive Polling.
+    The daemon uses a combination of time-based polling (DB) and
+    event-driven notification (Signals) to minimize latency while
+    ensuring the authoritative state in ClickHouse is always respected.
     """
 
     def __init__(
@@ -60,6 +71,16 @@ class DaemonRuntime:
         command_processor: "CommandProcessor",
         trigger_job_fn: Callable[[list["JobRecord"]], list["TriggerDecision"]],
     ) -> None:
+        """Initializes the Daemon components and registers system commands.
+
+        Args:
+            exec_ctx: The global execution context.
+            orchestrator: The primary engine orchestrator.
+            daemon_state: Observer for DB state synchronization.
+            daemon_janitor: Facility manager for cleanup and recovery.
+            command_processor: Parser for filesystem-based command signals.
+            trigger_job_fn: Strategy for evaluating job start conditions.
+        """
         self.exec_ctx = exec_ctx
         self.orchestrator = orchestrator
 
@@ -81,6 +102,13 @@ class DaemonRuntime:
         self.heartbeat = Heartbeat()
 
     def run(self, overrides: dict[str, Any] | None = None) -> None:
+        """Bootstraps background jobs and starts the engine reactive loop.
+
+        Decision: Multi-threaded Isolation.
+        The Scheduler runs on its own thread to ensure heartbeats and
+        polling continue even if the Engine Loop is blocked by Ray
+        GCS initialization or heavy metadata processing.
+        """
         self.orchestrator._perform_platform_preflight()
 
         # 1. Scheduler Initialization
@@ -140,7 +168,13 @@ class DaemonRuntime:
         self.stop()
 
     def _check_external_signals(self) -> None:
-        """Handles external signals and drains the CommandProcessor queue."""
+        """Handles external signals and drains the CommandProcessor queue.
+
+        Decision: Sequential Processing.
+        Commands are processed before the Engine Tick to ensure that 'STOP'
+        or 'RESUME' signals take effect before the next batch of tasks
+        is dispatched.
+        """
         # 1. Drain the command queue (e.g., ADHOC_RUN, STOP, RECOVER_ALL)
         command_queue = self.commands.process_commands()
         for handler, payload in command_queue:
@@ -150,7 +184,13 @@ class DaemonRuntime:
             self.signals.notify()
 
     def _handle_stop_command(self, payload: Any) -> None:
-        """Abstracted handler for the STOP.cmd signal."""
+        """Abstracted handler for the STOP.cmd signal.
+
+        Decision: Graceful Draining (ADR 014).
+        Instead of immediate termination, 'STOP' sets a future timestamp.
+        The engine continues to process active Ray tasks but stops
+        dispatching new ones, preventing data corruption during shutdown.
+        """
         content = str(payload).lower() if payload else ""
 
         if content == "force":
@@ -172,7 +212,13 @@ class DaemonRuntime:
             )
 
     def _handle_adhoc_run(self, payload: dict[str, Any] | None) -> None:
-        """Handles triggering an adhoc job from JSON payload."""
+        """Handles triggering an adhoc job from JSON payload.
+
+        Decision: Ad-hoc Seeding.
+        Ad-hoc runs are treated as manually triggered jobs. They bypass the
+        standard trigger evaluation but still use the StateStore to
+        establish a RUN_ID for lineage tracking.
+        """
         if not payload:
             LOG.error("ADHOC_RUN command received with empty payload")
             return
@@ -208,7 +254,7 @@ class DaemonRuntime:
 
         run_id = data.run_id
         from_stage = data.from_stage
-        overrides = data.overrides
+        # overrides = data.overrides
 
         if not run_id:
             LOG.error("RESUME missing required field: run_id")
@@ -219,22 +265,47 @@ class DaemonRuntime:
             LOG.error("Resume failed: Run ID %s not found in FAILED/HOLD.", run_id)
             return
 
-        # Apply "Rewind" or "Override" logic by modifying 
-        # the on-disk context before recovery
-        if from_stage or overrides:
-            try:
-                # Explicitly cast to Path as resolve_task_path returns Path | None
-                task = Task.from_folder(cast("Path", folder), self.exec_ctx)
-                updates = {}
-                if from_stage:
-                    updates["current_stage"] = from_stage
-                if overrides:
-                    updates["custom_overrides"] = overrides
+        try:
+            # 1. Lookup in Hot Cache
+            # We find the metadata to check history and update it
+            cache_keys = list(self.tasks.cache.iterkeys(pattern=f"*:*:{run_id}"))
+            if not cache_keys:
+                LOG.error(f"Resume rejected: Run {run_id} has no active cache entry.")
+                return
 
-                if updates:
-                    task.update_manifest(updates)
-            except Exception:
-                LOG.exception("Failed to apply overrides during resume for %s", run_id)
+            key = cache_keys[0]
+            meta: TaskMetadata = self.tasks.cache.get(key)
+
+            # 2. Reset Runtime Slate
+            # Decision: Human-Driven Reset.
+            # A manual RESUME command implies human intervention. We clear the
+            # rewind_history and reset retry counts in the hot cache to allow
+            # the new attempt to proceed with a clean slate.
+            meta.rewind_history = {}
+            meta.retry_count = 0
+            if from_stage:
+                meta.current_stage = from_stage
+
+            self.tasks.cache[key] = meta
+
+            # 3. Apply Overrides to Manifest (Physical)
+            task = Task.from_folder(folder, self.exec_ctx)
+            updates = {"current_stage": from_stage} if from_stage else {}
+            # if overrides:
+            #     updates["custom_overrides"] = overrides
+            if updates:
+                task.update_manifest(updates)
+
+            # 4. Update Cache (Logical)
+            if from_stage:
+                meta.rewind_history[from_stage] = get_current_timestamp().isoformat()
+                meta.current_stage = from_stage
+
+            self.tasks.cache[key] = meta
+
+        except Exception:
+            LOG.exception("Failed to apply overrides during resume for %s", run_id)
+            return
 
         LOG.info(
             "Resuming task: %s (Rewind to: %s)", run_id, from_stage or "Last Failure"
@@ -242,7 +313,13 @@ class DaemonRuntime:
         self.janitor.janitor.recover_task_by_path(folder)
 
     def _engine_loop(self) -> None:
-        """Daemon-only loop that wakes up on resource changes or signals."""
+        """Daemon-only loop that wakes up on resource changes or signals.
+
+        Decision: Ray-Optimized Waiting.
+        We use ray.wait with a short timeout to wake up the loop as soon
+        as a single task completes, rather than polling at fixed intervals.
+        This significantly improves throughput for short-lived tasks.
+        """
         last_drain_log = 0
         while True:
             if self.exec_ctx.stop_at_ts is not None:  # Use self.exec_ctx
@@ -276,6 +353,7 @@ class DaemonRuntime:
                 time.sleep(1)
 
     def stop(self) -> None:
+        """Gracefully shuts down background services and Ray handles."""
         LOG.info("Shutting down Orchestrator services...")
         with suppress(Exception):
             self.orchestrator.state_store.close()

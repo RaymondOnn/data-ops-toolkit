@@ -1,5 +1,5 @@
 
--- This table defines the job schedules for data ingestion tasks. 
+-- This table defines the job schedules for data ingestion tasks.
 -- It includes details about the job, its scheduling, and execution parameters.
 -- Each row is an update to a job's schedule, allowing us to maintain a history of changes over time.
 

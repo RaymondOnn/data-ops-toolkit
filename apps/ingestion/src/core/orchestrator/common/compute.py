@@ -46,10 +46,20 @@ STAGE_WORKLOAD_MAP: dict[StageName, WorkloadType] = {
 
 
 def get_limits(cpu_limit_pct: float = 0.8, mem_limit_pct: float = 0.7):
-    """
-    Detects hardware and defines the logical resource pool.
-    :param cpu_limit_pct: Percentage of physical cores to reserve (0.0 to 1.0)
-    :param mem_limit_pct: Percentage of total RAM to reserve (0.0 to 1.0)
+    """Detects hardware and defines the logical resource pool.
+
+    Args:
+        cpu_limit_pct: Percentage of physical cores to reserve (0.0 to 1.0).
+        mem_limit_pct: Percentage of total RAM to reserve (0.0 to 1.0).
+
+    Returns:
+        tuple: (logical_cores, total_io_slots, logical_mem_gb).
+
+    Decision: Integer Resource Mapping.
+    Ray requires static resource capacities to be integers for custom
+    resources like 'IO'. We calculate an IO budget (slots) based on
+    physical core count to ensure a balanced ratio between computation
+    and network/disk I/O.
     """
     cores = psutil.cpu_count(logical=False) or 2  # Physical cores
     # Ensure logical cores is an integer to satisfy Ray requirements for static node capacity
@@ -69,6 +79,16 @@ class Compute:
         self,
         exec_ctx: ExecutionContext,
     ):
+        """Initializes the Compute manager and hooks into the Ray mesh.
+
+        Args:
+            exec_ctx: The global execution context for the run.
+
+        Decision: Safe Default Capping.
+        We default to 80% CPU and 70% RAM reservation. This ensures the
+        system is resilient to 'Noisy Neighbor' scenarios on shared nodes
+        and leaves headroom for OS-level operations.
+        """
         self.exec_ctx = exec_ctx
 
         # Use 80% of cores and 70% of RAM by default as a safe cap
@@ -99,7 +119,12 @@ class Compute:
 
     @property
     def remote_executor(self) -> Any:
-        """Lazy-loaded Ray actor class to minimize GCS overhead."""
+        """Lazy-loaded Ray actor class to minimize GCS overhead.
+
+        Decision: Worker Isolation.
+        By using ray.remote on a standalone function (process_stage_task),
+        we ensure that every task runs in its own clean process space.
+        """
         if self._remote_executor is None:
             from .executor import process_stage_task
 
@@ -113,27 +138,20 @@ class Compute:
         address: str | None = None,
         runtime_env: dict[str, Any] | None = None,
     ) -> str:
-        """
-        Initializes the Ray cluster with custom resource definitions.
+        """Initializes the Ray cluster with custom resource definitions.
 
-        Example `runtime_env` config for production (passed via ExecutionContext):
-        ```python
-        # Assuming PEX files (e.g., 'ingestion.pex', 'deps.pex') are in the project root
-        # or a subdirectory that 'working_dir' covers.
-        runtime_env = {
-            # Zips and uploads the current directory to workers.
-            # This is how your application code and PEX files get to workers.
-            "working_dir": ".",
-            # Ensures core dependencies are present.
-            # Can be omitted if deps.pex covers all.
-            "pip": ["psutil", "loguru", "polars", "msgspec"],
-            "env_vars": {
-                "PYTHONPATH": ".", # Ensures Python can find modules in the working_dir
-                # # If you want to explicitly use deps.pex for the worker's own env
-                # "PEX_PATH": "./deps.pex"
-            }
-        }
-        ```
+        Args:
+            ray_mode: LOCAL or CLUSTER mode.
+            limits: Physical capacity constraints.
+            address: Optional remote cluster address.
+            runtime_env: Ray environment configuration.
+
+        Returns:
+            str: Initialization status.
+
+        Decision: Protocol-Aware Init.
+        local_mode is incompatible with explicit addresses. We detect if an
+        address is provided to automatically switch from local to cluster.
         """
         local_mode = ray_mode == RayMode.LOCAL
         dashboard_url = "N/A"
@@ -179,21 +197,35 @@ class Compute:
         return "already_initialized"
 
     def refresh_resources(self) -> None:
-        """
-        Snapshots the current cluster resources.
-        Should be called at the start of a processing tick.
+        """Snapshots the current cluster resources.
+
+        Decision: Temporal Consistency.
+        Resources are snapshotted once per Tick. This ensures the
+        TaskManager makes all dispatch decisions for a batch using
+        consistent telemetry, preventing race conditions where tasks compete
+        for the same last core.
         """
         self._available_resources = ray.available_resources()
         self.check_system_saturation(self._available_resources)
 
     def get_cost(self, stage: StageName) -> dict[str, float]:
-        """Returns the resource cost for a given stage."""
+        """Returns the logical resource cost for a specific execution stage."""
         workload = STAGE_WORKLOAD_MAP.get(stage, WorkloadType.DEFAULT)
         return WORKLOAD_COSTS[workload]
 
     def _can_fit(self, stage: StageName) -> bool:
-        """
-        Checks both physical Ray availability and logical resource capping.
+        """Checks both physical Ray availability and logical resource capping.
+
+        Args:
+            stage: The stage requesting dispatch.
+
+        Returns:
+            bool: True if the stage can be dispatched immediately.
+
+        Decision: Adaptive Backpressure.
+        We check global system vitals before Ray resources. If the server
+        is already under heavy pressure (90% CPU), we halt dispatch even
+         if Ray 'thinks' there are slots, preventing system-wide instability.
         """
         cost = self.get_cost(stage)
         current_usage = self._get_logical_usage()
@@ -262,30 +294,44 @@ class Compute:
         return True
 
     def check_system_saturation(self, available: dict[str, float]) -> None:
-        """Detects if specific hardware resources are near exhaustion."""
+        """Detects if specific hardware resources are near exhaustion.
+
+        Decision: Variable Shadowing Prevention.
+        We use 'effective_val' to process telemetry adjustments without
+        overwriting the loop iterator 'val', preventing static analysis
+        warnings and logic errors.
+        """
         for res, val in available.items():
             if res not in ["CPU", "IO", "memory"]:
                 continue
 
-            # Special handling for Ray's internal 'memory' key (usually in bytes)
+            effective_val = val
             threshold = 0.5
             if res == "memory":
                 # If available memory is less than 10% of our logical limit, warn
                 limit_bytes = self._resource_limits.get("MEM", 0) * (1024**3)
                 if val < (limit_bytes * 0.1):
-                    val = 0.0  # Force saturation
+                    effective_val = 0.0  # Force saturation signal
 
-            if val < 0.5:  # Threshold for resource saturation
+            if effective_val < threshold:  # Threshold for resource saturation
                 if res not in self._saturated_resources:
-                    LOG.warning(f"Resource {res} is now SATURATED (Available: {val})")
+                    LOG.warning(
+                        f"Resource {res} is now SATURATED (Available: {effective_val})"
+                    )
                     self._saturated_resources.add(res)
             elif res in self._saturated_resources:
-                LOG.info(f"Resource {res} saturation cleared (Available: {val})")
+                LOG.info(
+                    f"Resource {res} saturation cleared (Available: {effective_val})"
+                )
                 self._saturated_resources.remove(res)
 
     def _get_logical_usage(self) -> dict[str, float]:
-        """
-        Calculates current resource usage based on active stage counts.
+        """Calculates current resource usage based on active stage counts.
+
+        Decision: Logical Accounting.
+        We track resources logically (what we 'expect' a task to use)
+        rather than just physically. This provides more deterministic
+        scheduling than relying on raw pids which might have spikey usage.
         """
         usage = defaultdict(float)
         for stage, actor_ids in self._stage_counts.items():
@@ -296,8 +342,19 @@ class Compute:
         return usage
 
     def spawn_worker(self, stage: StageName, key: str) -> ray.ObjectRef | None:
-        """
-        Creates a worker and increments internal resource tracking.
+        """Creates a worker and increments internal resource tracking.
+
+        Args:
+            stage: The execution stage to spawn.
+            key: The unique cache key for the task.
+
+        Returns:
+            ray.ObjectRef | None: The Ray handle, or None if backpressured.
+
+        Decision: Resource Tagging.
+        We pass precise resource requirements to Ray .options. This ensures
+        Ray's scheduler places 'CPU' tasks on compute nodes and 'IO' tasks
+        on nodes with faster networking/PVC mounts.
         """
         if not self._can_fit(stage):
             return None
@@ -326,9 +383,7 @@ class Compute:
         return ref
 
     def reclaim_resources(self, ref: ray.ObjectRef | None) -> None:
-        """
-        Terminates the worker and removes its identity from the logical resource budget.
-        """
+        """Reclaims logical resource capacity once a worker completes."""
         if not ref:
             return
 
@@ -347,9 +402,7 @@ class Compute:
         self.refresh_resources()
 
     def reconcile_counts(self) -> None:
-        """
-        Synchronizes internal stage counts with actual running Ray Tasks.
-        """
+        """Synchronizes internal stage counts with actual running Ray Tasks."""
         try:
             # 1. List all physically RUNNING tasks in this namespace
             all_tasks = ray.util.state.list_tasks(filters=[("state", "=", "RUNNING")])
@@ -364,9 +417,12 @@ class Compute:
             LOG.error("Failed to reconcile task counts", error=str(e))
 
     def purge_leaked_tasks(self) -> None:
-        """
-        Terminates any RUNNING tasks from previous sessions matching our naming
-        convention to ensure a clean resource budget on startup.
+        """Terminates RUNNING tasks from previous sessions on startup.
+
+        Decision: Logical Budget Reset.
+        Ray workers can survive an orchestrator crash (Zombie workers). We
+        purge any active tasks matching our namespace convention to ensure
+        the logical resource budget is 100% accurate on cold start.
         """
         try:
             if not ray.is_initialized():

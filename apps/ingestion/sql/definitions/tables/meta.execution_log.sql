@@ -15,8 +15,8 @@ CREATE TABLE META.EXECUTION_LOG (
     , WATCH_FILE_PATH       Nullable(String)
     , RUNTIME_OVERRIDES     Nullable(String) -- JSON representation
     , RETRY_ATTEMPTS        UInt8
-    , SOURCE_ROW_COUNT      Nullable(UInt64) 
-    , FINAL_ROW_COUNT       Nullable(UInt64) 
+    , SOURCE_ROW_COUNT      Nullable(UInt64)
+    , FINAL_ROW_COUNT       Nullable(UInt64)
     , FINAL_MANIFEST        Nullable(String) -- JSON representation
     , REMARKS               Nullable(String)
 )

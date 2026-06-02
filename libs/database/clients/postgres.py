@@ -40,7 +40,7 @@ class PostgresClient(DBClient):
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
 
-    def get_load_strategy(
+    def partition_load(
         self,
         table_name: str,
         num_workers: int = 10,
@@ -50,8 +50,8 @@ class PostgresClient(DBClient):
         filter_sql = filter_sql.replace("WHERE", "") if filter_sql else ""
         return {
             f"""
-            SELECT * FROM {table_name} 
-            WHERE {filter_sql} 
+            SELECT * FROM {table_name}
+            WHERE {filter_sql}
             AND abs(hashint4(ctid::text::hashint4)) % {num_workers} = {i}
             """
             for i in range(num_workers)
@@ -65,10 +65,12 @@ class PostgresClient(DBClient):
         audit_values: dict[str, Any] | None = None,
     ) -> None:
         def pg_stream(dataset, target_columns, audit_values):
-            for batch in dataset.to_batches():
+            for raw_batch in dataset.to_batches():
                 # Inject constants
                 for col, val in audit_values.items():
-                    batch = batch.append_column(col, pa.array([val] * batch.num_rows))
+                    batch = raw_batch.append_column(
+                        col, pa.array([val] * raw_batch.num_rows)
+                    )
 
                 # KEY STEP: Reorder columns to match the DB schema exactly
                 # This prevents "column mismatch" errors if Parquet order differs from DB
@@ -114,15 +116,15 @@ class PostgresClient(DBClient):
     def get_schema(self, fq_table: str) -> pl.DataFrame:
         schema, table_name = fq_table.split(".")
         query = f"""
-            SELECT 
-                column_name, 
-                data_type, 
+            SELECT
+                column_name,
+                data_type,
                 is_nullable,
                 character_maximum_length AS data_length,
                 numeric_precision,
                 numeric_scale
             FROM information_schema.columns
-            WHERE table_schema = '{schema}' 
+            WHERE table_schema = '{schema}'
             AND table_name = '{table_name}'
             ORDER BY ordinal_position;
         """
@@ -132,8 +134,8 @@ class PostgresClient(DBClient):
         """Checks information_schema for table existence."""
         schema, table = fq_table.split(".") if "." in fq_table else ("public", fq_table)
         query = f"""
-            SELECT 1 FROM information_schema.tables 
-            WHERE table_schema = '{schema}' 
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = '{schema}'
             AND table_name = '{table}'
         """
         return len(self.sql(query)) > 0

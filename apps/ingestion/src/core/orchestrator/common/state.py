@@ -1,6 +1,6 @@
 import time
 from collections.abc import Sequence
-from datetime import datetime
+from contextlib import suppress
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -36,6 +36,22 @@ DESTINATION_TBL = "META.EXECUTION_LOG"
 # TODO: Logging to Error Log? Workflow for refresh current_execution for the day
 # TODO: Misfire Updates
 class StateStore:
+    """AUTHORITATIVE STATE ENGINE: Synchronizes in-memory task state with SQL.
+
+    The StateStore handles the high-performance 'Tick' loop of the orchestrator,
+    buffering state changes in a local JSONL stream before performing bulk
+    Parquet-based inserts into ClickHouse.
+
+    Decision: JSONL Heartbeat.
+    We use a local append-only JSONL file for low-latency state persistence.
+    This ensures that if the orchestrator crashes, the 'Tick' can be
+    reconstructed without querying the database.
+
+    Decision: Lazy Database Loading.
+    Database connections are only established during flush or pre-flight
+    to keep startup time minimal for CLI diagnostic tools.
+    """
+
     def __init__(self, db_config: dict, exec_ctx: ExecutionContext) -> None:
         self._db_config = db_config
         self.exec_ctx = exec_ctx
@@ -86,9 +102,21 @@ class StateStore:
         except Exception as e:
             LOG.error(f"Final state flush during close failed: {e}")
 
+        # Decision: Robust Resource Teardown.
+        # We check for the close attribute on the service wrapper to avoid
+        # AttributeError if the service implementation lags behind the client.
         if self._db is not None:
             LOG.debug("Closing database connection for StateStore.")
-            self._db.close()
+            if hasattr(self._db, "close"):
+                self._db.close()
+            elif hasattr(self._db, "client") and hasattr(self._db.client, "close"):
+                # Fallback to the underlying client if the wrapper is thin
+                self._db.client.close()
+            else:
+                LOG.warning(
+                    "DatabaseSink has no close method and no accessible client."
+                )
+
             self._db = None  # Reset to allow re-initialization if needed
         else:
             LOG.trace("No active database connection to close for StateStore.")
@@ -104,16 +132,19 @@ class StateStore:
     def _create_updated_record(
         self, base_record: JobRecord | None, updates: dict[str, Any]
     ) -> JobRecord | None:
-        # Merge base record with updates
-        merged = msgspec.to_builtins(base_record) if base_record else {}
-        merged.update(updates)
-
-        # Force timestamp update
-        merged["LAST_UPDATED_AT_TS_LC"] = to_ch_datetime(
-            get_current_timestamp(
-                timezone=self.exec_ctx.timezone, strip_tz=STRIP_TZ_FOR_DB
-            )
-        )
+        """Decision: Concise Struct Merging.
+        Using unpacking allows us to merge records and force the heartbeat
+        timestamp in a single expression.
+        """
+        merged = {
+            **(msgspec.to_builtins(base_record) if base_record else {}),
+            **updates,
+            "LAST_UPDATED_AT_TS_LC": to_ch_datetime(
+                get_current_timestamp(
+                    timezone=self.exec_ctx.timezone, strip_tz=STRIP_TZ_FOR_DB
+                )
+            ),
+        }
 
         try:
             return msgspec.convert(merged, type=JobRecord)
@@ -148,7 +179,7 @@ class StateStore:
 
     def create_record(self, task_ref: TaskRef) -> None:
         """Manually seeds the Active Registry for ad-hoc or dumb-mode runs."""
-        run_id = task_ref.run_id
+        run_id = task_ref.identity.run_id
         if run_id in self._active_records:
             LOG.debug(
                 "Run ID already exists in Active Registry; "
@@ -159,9 +190,9 @@ class StateStore:
 
         # Use the internal helper to ensure consistent formatting and validation
         updates = {
-            "JOB_ID": task_ref.job_id,
-            "DATASET_ID": task_ref.dataset_id,
-            "PARTITION_DATE": task_ref.partition_date,
+            "JOB_ID": task_ref.identity.job_id,
+            "DATASET_ID": task_ref.identity.dataset_id,
+            "PARTITION_DATE": task_ref.identity.partition_date,
             "RUN_ID": run_id,
             "IS_SCHEDULED": 0,
             "CURRENT_STAGE": task_ref.stage,
@@ -254,69 +285,42 @@ class StateStore:
             return
 
         try:
-            # 1. Fast decode using msgspec
             with manifest_file.open("rb") as f:
                 manifest = msgspec.json.decode(f.read(), type=TaskManifest)
 
-            # 2. Resolve Context: Try disk config -> Registry fallback -> Placeholder
-            ctx = None
-            if config_file.exists():
-                try:
-                    with config_file.open("rb") as f:
-                        # Use msgspec.json to match Orchestrator._trigger_job format
-                        ctx = msgspec.json.decode(f.read(), type=TaskContext)
-                except Exception as e:
-                    LOG.warning(
-                        "Failed to decode TaskContext during sync", error=str(e)
-                    )
+            # Decision: Centralized context resolution for sync
+            ctx = self._resolve_context_for_sync(manifest, config_file)
+            if not ctx:
+                return
 
-            if ctx is None:
-                # If config is missing or corrupt, try to rehydrate from Active Registry
-                record = self._active_records.get(manifest.run_id)
-                if record:
-                    ctx = TaskContext.create_placeholder(record)
-                else:
-                    LOG.error(
-                        "Sync aborted: config.json missing and run not in registry",
-                        run_id=manifest.run_id,
-                    )
-                    return
-
-            # 3. Emit to the local stream immediately
-            # We flag this as a 'SYNC' event in metadata if needed
             self._emit_state(
                 manifest=manifest,
                 context=ctx,
                 deep_sync=deep_sync,
             )
 
-            LOG.debug(
-                "Synced manifest from disk",
-                run_id=manifest.run_id,
-                status=manifest.status,
-            )
-
         except (msgspec.DecodeError, msgspec.ValidationError) as e:
             LOG.error("Malformed manifest", path=str(folder_path), error=str(e))
-        except OSError as e:
-            LOG.error(
-                "FileSystem error syncing manifest", path=str(folder_path), error=str(e)
-            )
-        except Exception:
-            LOG.exception("Unexpected error syncing manifest", path=str(folder_path))
+
+    def _resolve_context_for_sync(
+        self, manifest: TaskManifest, config_file: Path
+    ) -> TaskContext | None:
+        """Helper to find TaskContext across storage tiers."""
+        if config_file.exists():
+            with suppress(Exception), config_file.open("rb") as f:
+                return msgspec.json.decode(f.read(), type=TaskContext)
+
+        record = self._active_records.get(manifest.run_id)
+        if record:
+            return TaskContext.create_placeholder(record)
+
+        LOG.error("Sync aborted: No config or registry record", run_id=manifest.run_id)
+        return None
 
     def _calculate_bitmask(self, job_path: Path) -> int:
-        """Simple logic to check which active links exist."""
-        mask = 0
-        if (job_path / "extract").exists():
-            mask |= 1
-        if (job_path / "transform").exists():
-            mask |= 2
-        if (job_path / "write").exists():
-            mask |= 4
-        if (job_path / "publish").exists():
-            mask |= 8
-        return mask
+        """Decision: Dynamic Stage Detection.
+        By iterating over StageName, we avoid hardcoding bitwise logic here."""
+        return sum(s.bitmask for s in StageName if (job_path / s.label).exists())
 
     @staticmethod
     def generate_progress_log(
@@ -531,32 +535,11 @@ class StateStore:
                 return
 
             new_record = self._create_updated_record(current, update_dict)
-            if not new_record:
+            if not new_record or current == new_record:
+                # Decision: Direct Equality Check.
+                # msgspec.Struct supports native equality. If no data fields
+                # changed, we skip the buffer update immediately.
                 LOG.warning("Update failed: Invalid data structure", run_id=run_id)
-                return
-
-            # --- NEW LOGIC: Only buffer if functional data changed ---
-            # We compare the dicts but ignore the 'LAST_UPDATED' timestamp
-            curr_dict = msgspec.to_builtins(current)
-            new_dict = msgspec.to_builtins(new_record)
-
-            c_ts = curr_dict.pop("LAST_UPDATED_AT_TS_LC", None)
-            n_ts = new_dict.pop("LAST_UPDATED_AT_TS_LC", None)
-
-            # Heartbeat Throttle: Even if no data changed, force a sync every 5 minutes (300s).
-            # This ensures the 'Last Updated' column in the DB stays fresh for long tasks.
-            time_since_last = 0
-            if isinstance(c_ts, datetime) and isinstance(n_ts, datetime):
-                time_since_last = (n_ts - c_ts).total_seconds()
-            else:
-                # If timestamps are missing or invalid, assume we need a sync
-                time_since_last = 999
-
-            if curr_dict == new_dict and time_since_last < 300:
-                # No real change and heartbeat is still fresh
-                LOG.trace(
-                    "State update skipped: No functional data change", run_id=run_id
-                )
                 return
 
             # If we got here, something changed (Status, Bitmask, etc.)

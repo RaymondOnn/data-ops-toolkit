@@ -17,6 +17,15 @@ LOG = logger
 class ClickHouseService(DatabaseSource, DatabaseSink):
     @cached_property
     def client(self) -> ClickhouseClient:
+        """
+        Lazily initializes the ClickhouseClient.
+
+        Resolves the password from a `Secret` object if present in the config,
+        otherwise uses the plaintext password.
+
+        Returns:
+            ClickhouseClient: An initialized ClickhouseClient instance.
+        """
         # 1. Resolve Password safely
         # If 'secret_key' was used, 'password' is a Secret object.
         # If 'password' was a string in YAML, it stays a string.
@@ -27,18 +36,35 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             else str(raw_password)
         )
         return ClickhouseClient(
-            host=self._config.get("host", "localhost"),
+            host=self._config.get("host"),
             port=self._config.get("port", 8123),
-            user=self._config.get("user", "default"),
+            user=self._config.get("user"),
             password=resolved_password,
-            database=self._config.get("database", "default"),
+            database=self._config.get("database"),
         )
 
     def close(self) -> None:
-        """Closes the underlying ClickhouseClient connection."""
-        if hasattr(self, "_client") and self._client is not None:
-            self._client.close()
-            del self._client  # Clear the cached property
+        """
+        Closes the underlying ClickhouseClient connection and clears the cache.
+
+        This ensures that on next access, the client property will re-initialize
+        the connection, which is useful for handling stale connections.
+        """
+        # The cached_property stores the client in self.__dict__
+        if "client" in self.__dict__:
+            client_instance = self.__dict__["client"]
+            if client_instance:
+                try:
+                    client_instance.close()
+                    LOG.info("Closed ClickHouse client connection", service=self.name)
+                except Exception as e:
+                    LOG.warning(
+                        "Error closing ClickHouse client connection",
+                        service=self.name,
+                        error=str(e),
+                    )
+            del self.__dict__["client"]  # Clear the cached property
+            LOG.debug("Cleared cached ClickHouse client for re-initialization.")
 
     def get_total_count(self, target: str, filter_condition: str | None = None) -> int:
         """Implementation required for resource-aware scaling in ExtractStage."""
@@ -52,7 +78,20 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         file_ext: str = "parquet",
         audit_values: dict[str, Any] | None = None,
     ) -> tuple[str, int]:
+        """
+        Stages data from local files into a temporary ClickHouse table.
 
+        Args:
+            source_dir: Local directory containing files to load.
+            target_table: The final destination table name.
+            expected_count: The number of rows expected to be staged.
+            file_ext: The format of the source files (e.g., 'parquet').
+            audit_values: Dictionary of audit columns and their values to inject.
+
+        Returns:
+            tuple[str, int]: The name of the temporary staging table and the
+                number of rows successfully staged.
+        """
         # Extract database and table names to fully qualify the staging table
         parts = target_table.split(".", 1)
         db_name = parts[0] if len(parts) > 1 else None
@@ -69,10 +108,10 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         try:
             # Different stages use separate sessions.
             # Hence, TEMP Table approach not feasible.
-            tmp_sql = f"""CREATE OR REPLACE TABLE {staging_table} 
-                    ENGINE = MergeTree() 
+            tmp_sql = f"""CREATE OR REPLACE TABLE {staging_table}
+                    ENGINE = MergeTree()
                     ORDER BY tuple()
-                    AS {target_table} 
+                    AS {target_table}
                 """
             LOG.debug(
                 "Creating staging table from target",
@@ -125,6 +164,23 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         partition_val: str,
         expected_count: int,
     ) -> None:
+        """
+        Promotes data from a staging table to the final target table.
+
+        Performs a schema audit, deletes existing partitions in the target,
+        inserts data from the staging table, and verifies row counts.
+        The staging table is dropped upon successful promotion.
+
+        Args:
+            staging_table: The temporary table containing staged data.
+            target_table: The destination production table.
+            partition_col: The column used for partitioning in the target table.
+            partition_val: The specific partition value to promote.
+            expected_count: The number of rows expected to be promoted.
+
+        Raises:
+            ValueError: If schema or row count mismatches are detected.
+        """
         """
         Atomic metadata swap.
         ClickHouse moves the actual data parts on disk
@@ -228,6 +284,22 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         exclude_columns: set[str] | None = None,
     ) -> bool:
         """
+        Compares two ClickHouse tables for data equality.
+
+        Uses a tiered validation approach:
+        1. Row Counts (fastest)
+        2. Checksum (high-speed hash fingerprint)
+        3. Set-Difference (full deterministic check using `EXCEPT`)
+
+        Args:
+            reference: The baseline table name.
+            other: The candidate table name.
+            exclude_columns: Optional set of columns to exclude from comparison.
+
+        Returns:
+            bool: True if the tables are identical, False otherwise.
+        """
+        """
         Identity check using a tiered validation pyramid.
         """
         # Tier 1: Row Counts (Near-instant)
@@ -244,6 +316,18 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
     def minus(
         self, reference: str, other: str, exclude_columns: set[str] | None = None
     ) -> int:
+        """
+        Calculates the count of rows in the reference table that do not exist
+        in the other table.
+
+        Args:
+            reference: The baseline table name.
+            other: The table to compare against.
+            exclude_columns: Optional set of columns to exclude from comparison.
+
+        Returns:
+            int: The count of rows unique to the reference table.
+        """
         """Calculates the count of rows in reference that are missing from other."""
         exclude_columns = exclude_columns or set()
 
@@ -276,9 +360,16 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         return int(res[0][0]) if res else 0
 
     def clone(self, reference: str, other: str) -> None:
+        """
+        Clones the schema of a ClickHouse table to a new table.
+
+        Args:
+            reference: The source table to clone from.
+            other: The destination table to create.
+        """
         sql = f"""
-            CREATE TABLE IF NOT EXISTS {other} 
-            ENGINE = MergeTree() AS 
+            CREATE TABLE IF NOT EXISTS {other}
+            ENGINE = MergeTree() AS
                 SELECT * FROM {reference}
                 WHERE 1 = 0
         """
@@ -286,6 +377,19 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         self.client.sql(sql)
 
     def get_checksum(self, identifier: str, columns: list[str] | None = None) -> str:
+        """
+        Generates a unique, order-independent fingerprint for the data in a table.
+
+        Uses ClickHouse's `cityHash64` for hashing and `groupBitXor` for
+        aggregating hashes in an order-independent manner.
+
+        Args:
+            identifier: The table name.
+            columns: Optional list of columns to include in the checksum.
+
+        Returns:
+            str: A hexadecimal string representing the checksum.
+        """
         """
         Generates a 64-bit table fingerprint.
         Uses cityHash64 for speed and groupBitXor for order-independence.
@@ -301,11 +405,27 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             return "ERROR"
 
     def drop(self, identifier: str) -> None:
+        """
+        Physically removes a table from ClickHouse.
+
+        Args:
+            identifier: The name of the table to drop.
+        """
         sql = f"DROP TABLE IF EXISTS {identifier}"
         LOG.warning("Dropping table from ClickHouse", table=identifier)
         self.client.sql(sql)
 
     def get_row_count(self, target: str, filter_condition: str | None = None) -> int:
+        """
+        Returns the total number of rows for a target table, optionally filtered.
+
+        Args:
+            target: The table name to count rows from.
+            filter_condition: Optional WHERE clause to apply.
+
+        Returns:
+            int: The total number of rows.
+        """
         # 1. Clean the where clause (Case-Insensitive)
         clean_where = "1=1"
         if filter_condition and filter_condition.strip():
@@ -327,5 +447,14 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             return 0
 
     def fetch(self, query: str) -> list[Sequence[Any]]:
+        """
+        Executes a query and returns results as raw tuples.
+
+        Args:
+            query: The SQL query string.
+
+        Returns:
+            list[Sequence[Any]]: A list of row tuples.
+        """
         """Proxy to the client's sql method for standard DB access."""
         return self.client.sql(query)

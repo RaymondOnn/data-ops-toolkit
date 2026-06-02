@@ -1,5 +1,3 @@
-import os
-import socket
 from typing import TYPE_CHECKING
 
 import msgspec
@@ -24,12 +22,14 @@ class StartStage(ExecutionStage):
 
     def execute(self, task: "Task") -> str:
         # persist job-start metadata using engine helper
-        start_timestamp = get_current_timestamp(strip_tz=STRIP_TZ_FOR_DB).isoformat(sep=" ")
-        
+        start_timestamp = get_current_timestamp(strip_tz=STRIP_TZ_FOR_DB).isoformat(
+            sep=" "
+        )
+
         try:
             # 3. Gather System Metadata
             commit_hash = self._get_commit_hash()  # Use the helper above
-            worker_id = f"{socket.gethostname()}-{os.getpid()}"
+            # worker_id = f"{socket.gethostname()}-{os.getpid()}"
 
             # 4. Create Payload
             payload = BasePayload(

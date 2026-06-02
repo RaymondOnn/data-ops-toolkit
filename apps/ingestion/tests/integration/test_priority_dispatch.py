@@ -7,7 +7,8 @@ def test_stage_priority_ordering(runtime):
     """
     GIVEN multiple tasks in the cache with different stages
     WHEN the compute resources only allow one task to be dispatched
-    THEN the TaskManager should pick the task with the higher priority stage (e.g. ARCHIVE > EXTRACT).
+    THEN the TaskManager should pick the task with the higher priority stage
+    (e.g. ARCHIVE > EXTRACT).
     """
     # 1. Setup: Seed the cache with two tasks
     # Task A: In EXTRACT (Priority 20)

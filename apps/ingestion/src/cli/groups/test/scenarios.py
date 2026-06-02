@@ -4,7 +4,6 @@ import platform
 import subprocess
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -28,6 +27,7 @@ from apps.ingestion.src.utils.constants import (
     DISK_THRESHOLD_HALT,
     MANIFEST_FILENAME,
 )
+from libs.utils.dates import get_current_timestamp
 from libs.utils.system import get_disk_usage
 
 from .harness import ScenarioType
@@ -39,6 +39,14 @@ class SimulationEngine:
     """
 
     def __init__(self, runtime: Any, env: str = "local"):
+        """Initializes the simulation engine with a runtime context.
+
+        Args:
+            runtime: The Runtime instance (Trigger or Daemon) to interact
+                with the orchestrator.
+            env: The target environment for configuration resolution.
+                Defaults to "local".
+        """
         self.runtime = runtime
         self.orchestrator = runtime.orchestrator
         self.env = env
@@ -50,7 +58,23 @@ class SimulationEngine:
         dataset: str | None,
         automated_input: bool = False,
     ) -> tuple[bool | None, str | None]:
-        """Dispatches to the specific simulation logic based on type."""
+        """Dispatches a resilience scenario to its corresponding handler.
+
+        Args:
+            scenario: The type of chaos or resilience test to perform.
+            job_id: Target job ID for the simulation.
+            dataset: Target dataset ID for the simulation.
+            automated_input: If True, bypasses interactive prompts.
+
+        Returns:
+            tuple: (success_status, error_reason). success_status can be
+                None if the test was skipped.
+
+        Decision: Dynamic Dispatch.
+        Using getattr to route scenarios to private methods allows the
+        engine to be easily extended with new chaos types without creating
+        a massive if-elif chain in the public entry point.
+        """
         # Scenarios that do NOT require a specific job/dataset target
         standalone_scenarios = {
             ScenarioType.STRESS,
@@ -61,13 +85,12 @@ class SimulationEngine:
 
         # Most simulations (including SCHEMA_DRIFT) require a target unit
         # to resolve paths or trigger a specific pipeline run.
-        if scenario not in standalone_scenarios:
-            if not job_id or not dataset:
-                typer.secho(
-                    f"❌ Error: Scenario '{scenario}' requires --job-id and --dataset.",
-                    fg="red",
-                )
-                return None, "Missing --job-id or --dataset"
+        if scenario not in standalone_scenarios and (not job_id or not dataset):
+            typer.secho(
+                f"❌ Error: Scenario '{scenario}' requires --job-id and --dataset.",
+                fg="red",
+            )
+            return None, "Missing --job-id or --dataset"
 
         method_name = f"_sim_{scenario.value}"
         handler = getattr(self, method_name, None)
@@ -91,10 +114,18 @@ class SimulationEngine:
             return False, str(e)
 
     def _sim_block(self, job_id: str, dataset: str, *args):
+        """Simulates a service outage using a signal file.
+
+        Decision: Signal Injection.
+        Creating a specific '.outage' file tests the Orchestrator's ability
+        to react to environment signals and transition tasks to BLOCKED.
+        This verifies the decoupling between the core engine and individual
+        service connectivity states.
+        """
         target_service = "clickhouse_db"
         typer.echo(f"🚧 Simulating outage for service: {target_service}")
         signal_file = (
-            self.orchestrator.exec_ctx.signal_path / f"{target_service}.source_down"
+            self.orchestrator.exec_ctx.signal_path / f"{target_service}.outage"
         )
         signal_file.touch()
         typer.secho(f"✅ Created signal: {signal_file.name}", fg="yellow")
@@ -102,6 +133,13 @@ class SimulationEngine:
         return True, None
 
     def _sim_concurrency(self, job_id: str, dataset: str, *args):
+        """Floods the task manager with multiple concurrent job requests.
+
+        Decision: High-Volume Pressure.
+        Rapidly injecting many tasks verifies the TaskManager's ability to
+        queue and throttle without leaking resources or crashing the driver
+        node during a thundering herd event.
+        """
         count = 15
         typer.echo(f"🌀 Stressing TaskManager with {count} concurrent requests...")
         for i in range(count):
@@ -121,6 +159,13 @@ class SimulationEngine:
         return True, None
 
     def _sim_stress(self, *args):
+        """Triggers every configured job simultaneously.
+
+        Decision: Cross-Job Contention.
+        Triggering all jobs simultaneously tests global resource pool
+        enforcement and priority handling across different logical job
+        boundaries, ensuring fair-share scheduling works as intended.
+        """
         typer.echo("🔥 Executing STRESS simulation: Cross-job contention...")
         job_dirs = [
             d.name
@@ -138,6 +183,13 @@ class SimulationEngine:
         return True, None
 
     def _sim_zombie(self, job_id: str, dataset: str, *args):
+        """Kills a running Ray task to verify zombie cleanup.
+
+        Decision: Forced Termination.
+        By cancelling the Ray task directly, we simulate worker SIGKILLs,
+        allowing us to verify the recovery logic's ability to identify
+        'ghost' tasks that are marked as RUNNING but lack a physical process.
+        """
         run_ids = self.orchestrator._trigger_job(job_id, dataset)
         target_run = next(iter(run_ids))
         typer.echo(f"Waiting for {target_run} to enter RUNNING state...")
@@ -164,6 +216,13 @@ class SimulationEngine:
         return True, None
 
     def _sim_throttling(self, job_id: str, dataset: str, *args):
+        """Consumes system CPU to trigger adaptive backpressure.
+
+        Decision: Adaptive Backpressure.
+        Spawning local CPU burners allows us to verify that the Compute
+        manager correctly detects system-wide saturation and halts
+        dispatch even if Ray believes it has internal capacity.
+        """
         typer.echo("📉 Executing THROTTLING simulation: Adaptive Backpressure...")
 
         def cpu_burner():
@@ -193,10 +252,17 @@ class SimulationEngine:
         return True, None
 
     def _sim_flapping(self, job_id: str, dataset: str, *args):
+        """Rapidly toggles service availability.
+
+        Decision: Intermittent Failure.
+        Toggling the outage signal tests the resilience of the circuit
+        breaker and the engine's ability to transition tasks between
+        BLOCKED and PENDING without corrupting the run state.
+        """
         target_service = "clickhouse_db"
         typer.echo(f"📳 Simulating flapping connectivity for: {target_service}")
         signal_file = (
-            self.orchestrator.exec_ctx.signal_path / f"{target_service}.source_down"
+            self.orchestrator.exec_ctx.signal_path / f"{target_service}.outage"
         )
         self.orchestrator._trigger_job(job_id, dataset, partition_date_str="2024-02-01")
         for i in range(3):
@@ -210,6 +276,13 @@ class SimulationEngine:
         return True, None
 
     def _sim_disk_full(self, job_id: str, dataset: str, automated_input: bool):
+        """Fills the workspace partition to verify halt logic.
+
+        Decision: Storage Exhaustion.
+        Using 'fallocate' or 'truncate' provides a high-fidelity
+        simulation of disk pressure, verifying the DISK_THRESHOLD_HALT
+        safety interlock and preventing data corruption during write operations.
+        """
         usage = get_disk_usage(self.orchestrator.exec_ctx.workspace_dir)
         target_pct = DISK_THRESHOLD_HALT + 2
         bytes_needed = int((usage.total * (target_pct / 100)) - usage.used)
@@ -237,6 +310,13 @@ class SimulationEngine:
         return True, None
 
     def _sim_schema_drift(self, job_id: str, dataset: str, *args):
+        """Injects inconsistent Parquet schemas into the landing zone.
+
+        Decision: Data Inconsistency.
+        Injecting mismatched files tests the Extract stage's schema
+        unioning logic and ensures that the final merged manifest is
+        valid for downstream transformation.
+        """
         source_dir = Path("sim_data") / "drift_test"
         source_dir.mkdir(parents=True, exist_ok=True)
         pl.DataFrame({"id": [1], "val": [100]}).write_parquet(
@@ -257,6 +337,13 @@ class SimulationEngine:
         return True, None
 
     def _sim_data_loss(self, job_id: str, dataset: str, *args):
+        """Corrupts task manifest metadata.
+
+        Decision: Manifest Corruption.
+        Manually patching the manifest with invalid row counts or bitmasks
+        tests the system's ability to detect state corruption during
+        rehydration and provides a path for testing integrity audits.
+        """
         run_ids = self.orchestrator._trigger_job(job_id, dataset)
         target_run = next(iter(run_ids))
 
@@ -285,6 +372,13 @@ class SimulationEngine:
         return True, None
 
     def _sim_memory(self, job_id: str, dataset: str, *args):
+        """Restricts task memory to verify OOM handling.
+
+        Decision: Resource Capping.
+        Setting a restrictive memory_gb verifies that Ray correctly
+        enforces the task-level memory ceiling and that the orchestrator
+        captures the resulting OOM/Failure gracefully.
+        """
         typer.echo("🧠 Simulating memory pressure (100MB ceiling)...")
         overrides = {"_global": {"compute": {"memory_gb": 0.1}}}
         self.orchestrator._trigger_job(job_id, dataset, overrides=overrides)
@@ -292,6 +386,13 @@ class SimulationEngine:
         return True, None
 
     def _sim_recovery(self, *args):
+        """Seeds multiple synthetic failure folders for mass recovery testing.
+
+        Decision: Synthetic Failure.
+        Mocking failure folders allows for testing the RECOVER_ALL logic
+        without having to wait for natural job crashes, verifying the
+        Janitor's ability to rebuild the active queue from the FAILED/ root.
+        """
         typer.echo("🚑 Simulating mass-failure recovery event...")
         for i in range(5):
             mock_run_id = f"fail-test-{i}-{int(time.time())}"
@@ -313,7 +414,7 @@ class SimulationEngine:
                 DATASET_ID="sim_ds",
                 RUN_ID=mock_run_id,
                 JOB_STATUS=ExecutionStatus.FAILED.value,
-                SCHEDULED_TIMESTAMP_LC=datetime.now(),
+                SCHEDULED_TIMESTAMP_LC=get_current_timestamp(strip_tz=True),
             )
             placeholder_ctx = TaskContext.create_placeholder(record)
             (mock_path / CONFIG_FILENAME).write_bytes(
@@ -327,6 +428,15 @@ class SimulationEngine:
         return True, None
 
     def _sim_kill_daemon(self, *args):
+        """Kills the background orchestrator process to test lock recovery.
+
+        Decision: Process Takeover.
+        Killing the daemon process and attempting a restart verifies that
+        the system can recover from a primary orchestrator crash and
+        acquire the stale lock safely, while also checking if 'zombie'
+        tasks left over from the crash are correctly identified by the
+        new process.
+        """
         typer.echo("💀 Executing KILL_DAEMON simulation...")
 
         def find_daemon():
@@ -385,6 +495,12 @@ class SimulationEngine:
         return True, None
 
     def _sim_latency(self, job_id: str, dataset: str, automated_input: bool):
+        """Shapes network traffic to simulate slow connections.
+
+        Decision: Network Shaping.
+        Using tc (Linux Traffic Control) allows for testing how the
+        orchestrator handles slow I/O and potential timeout propagation
+        through the distributed cluster."""
         if platform.system() != "Linux":
             return None, "The 'latency' scenario requires Linux 'tc'"
 
@@ -416,11 +532,18 @@ class SimulationEngine:
             subprocess.run(
                 ["sudo", "tc", "qdisc", "del", "dev", interface, "root"],
                 capture_output=True,
+                check=False,
             )
             typer.secho("✅ Network latency removed.", fg="green")
         return True, None
 
     def _sim_retention(self, *args):
+        """Seeds tasks beyond their TTL to test the Janitor's reaper.
+
+        Decision: TTL Verification.
+        Seeding old tasks allows us to verify the Janitor's reaper logic
+        for data retention, ensuring the local disk does not saturate
+        over time with abandoned run artifacts."""
         typer.echo("扫 Simulating RETENTION: Seeding expired tasks...")
         for i in range(3):
             mock_run_id = f"expired-run-{i}"

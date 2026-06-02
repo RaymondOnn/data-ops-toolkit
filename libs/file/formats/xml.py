@@ -13,8 +13,24 @@ LOG = logging.getLogger(__name__)
 
 
 class XMLHandler(FormatHandler):
+    """
+    Handles reading and writing data in XML format.
+
+    Includes self-healing logic to strip illegal ASCII control characters
+    that frequently appear in legacy XML exports and cause parsing failures.
+    """
+
     def discover(self, input_path: Path | str, pattern: str | None = None) -> set[str]:
-        """Expands a path into a list of XML files."""
+        """
+        Expands a path into a list of XML files.
+
+        Args:
+            input_path: The base path or directory to search.
+            pattern: Optional glob pattern to filter discovered files.
+
+        Returns:
+            set[str]: A set of fully qualified paths to discovered XML files.
+        """
         # Standardize the path by stripping the protocol if present
         # so fsspec doesn't treat it as relative to CWD.
         path_str = self.fs._strip_protocol(str(input_path))
@@ -41,6 +57,16 @@ class XMLHandler(FormatHandler):
         }
 
     def _sanitize(self, path: str, **kwargs: Any):
+        """
+        Internal helper to strip illegal XML characters from a file.
+
+        Args:
+            path: The path to the file to sanitize.
+            **kwargs: Additional options, including 'encoding' (default 'utf-8').
+
+        Returns:
+            bytes: The sanitized XML content encoded as UTF-8.
+        """
         encoding = kwargs.get("encoding", "utf-8")
         with self.fs.open(path, "rb") as f:
             raw = f.read().decode(encoding, errors="ignore")
@@ -53,7 +79,19 @@ class XMLHandler(FormatHandler):
             return clean.encode("utf-8")
 
     def read(self, input_path: Path | str, **kwargs: Any) -> io.BytesIO:
-        """Removes illegal ASCII control characters."""
+        """
+        Reads raw XML bytes and removes illegal control characters.
+
+        Filters out ASCII characters 0-31 (except tab, newline, and carriage
+        return) to prevent 'xml.parsers.expat.ExpatError'.
+
+        Args:
+            input_path: The path to the file(s) to read.
+            **kwargs: Additional options passed to the sanitizer.
+
+        Returns:
+            io.BytesIO: An in-memory buffer containing sanitized XML bytes.
+        """
         paths = self.discover(input_path)
         if not paths:
             LOG.warning(f"No files discovered for path: {input_path}")
@@ -65,7 +103,19 @@ class XMLHandler(FormatHandler):
         return io.BytesIO(combined)
 
     def to_df(self, input_path: Path | str, **kwargs: Any) -> pl.LazyFrame:
-        """Reads XML files into a unified LazyFrame."""
+        """
+        Reads XML files into a unified Polars LazyFrame.
+
+        Uses xmltodict to bridge XML into a dictionary before loading into
+        a Polars DataFrame. Note that this process is currently eager.
+
+        Args:
+            input_path: The path to the file(s) or directory to read.
+            **kwargs: Additional reading and sanitization options.
+
+        Returns:
+            pl.LazyFrame: A Polars LazyFrame representing the combined data.
+        """
         paths = self.discover(input_path)
         if not paths:
             LOG.warning(f"No files discovered for path: {input_path}")
@@ -87,9 +137,26 @@ class XMLHandler(FormatHandler):
         return pl.concat(lfs) if lfs else pl.LazyFrame()
 
     def from_df(self, df: pl.LazyFrame | pl.DataFrame, output_path: Path | str) -> None:
+        """
+        Writes data to XML format.
+
+        Args:
+            df: The Polars DataFrame or LazyFrame to write.
+            output_path: The destination path for the file.
+
+        Raises:
+            NotImplementedError: Currently not supported by Polars natively.
+        """
         raise NotImplementedError("Streaming XML write is not supported by Polars.")
 
     def write(self, data: bytes, output_path: Path | str):
+        """
+        Writes raw bytes directly to the specified output path.
+
+        Args:
+            data: The bytes object to write.
+            output_path: The destination path for the file.
+        """
         with self.fs.open(output_path, "wb") as f:
             # Cast f to an IO[bytes] so Ty knows .write() accepts bytes
             cast("IO[bytes]", f).write(data)

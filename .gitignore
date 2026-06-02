@@ -9,11 +9,12 @@ logs/
 sim_data/
 __pycache__
 *.py[cod]
-.DS_STORE     
+.DS_STORE
 .cache
 *.egg-info/
 **/.secrets.json
 **/.env
+mock_data/test_large_job.zip
 
 # Infrastructure temporary files
 **/infra/**/.tmp/

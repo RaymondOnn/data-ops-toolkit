@@ -8,7 +8,8 @@ def test_streaming_memory_safety_limit(runtime, tmp_path):
     """
     GIVEN a dataset of 5 million rows (~1GB raw)
     WHEN the task is executed with a strict 200MB memory limit override
-    THEN the Polars streaming engine should process data in chunks and finish successfully.
+    THEN the Polars streaming engine should process data in chunks
+    and finish successfully.
     """
     # 1. Setup: Create a large source file
     # 5M rows is enough to exceed a small 200MB limit if loaded eagerly

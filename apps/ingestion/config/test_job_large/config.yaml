@@ -4,19 +4,21 @@ default:
       num_workers: 10
     load:
       service_ref: clickhouse
-  
-  
+
+
   datasets:
     sim_data:
       partition_date:
           offset:
             days: -1
       extract:
-        load_mode: "snapshot"  
-        service_ref: "file"  
+        load_mode: "snapshot"
+        service_ref: "file"
         source_params:
           type: file
-          file_pattern: ./mock_data/test_large_job/part_*.parquet
+          file_pattern:
+             archive: "./mock_data/test_large_job.zip"
+             glob: "part_*.parquet"
         schema_file: schema.csv
       transform:
         type: default

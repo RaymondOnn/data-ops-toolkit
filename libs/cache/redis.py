@@ -8,7 +8,10 @@ from .base import KeyValueCache
 
 
 class RedisCache(KeyValueCache):
-    """Wraps redis.Redis to adhere to CacheService interface with msgspec serialization."""
+    """
+    Wraps redis.Redis to adhere to CacheService interface with
+    msgspec serialization.
+    """
 
     def __init__(self, host: str, port: int, db: int = 0, **kwargs):
         import redis

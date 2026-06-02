@@ -11,7 +11,6 @@ def test_orchestrator_backpressure_holding(runtime):
     """
     # 1. Mock Ray to report 0 available CPUs
     with patch("ray.available_resources", return_value={"CPU": 0}):
-
         # 2. Trigger a job
         run_ids = runtime.orchestrator._trigger_job("test_job", "test_dataset")
         run_id = next(iter(run_ids))
@@ -48,8 +47,5 @@ def test_zero_row_extraction_graceful_exit(runtime, tmp_path):
 
         # Verify completion
         record = runtime.orchestrator.state_store.active_registry.get(run_id)
-        assert (
-            record.JOB_STATUS == ExecutionStatus.SUCCESS
-            or record.JOB_STATUS == "SUCCESS"
-        )
+        assert record.JOB_STATUS in (ExecutionStatus.SUCCESS, "SUCCESS")
         assert record.SOURCE_ROW_COUNT == 0

@@ -37,16 +37,17 @@ class TransformStage(ExecutionStage):
 
         # 2. Gate: The extraction marker/folder must exist.
         # If the symlink is broken or missing, the dependency is lost.
-        extract_path = task.folder / StageName.EXTRACT.label
+        extract_path = task.workspace.run_path / StageName.EXTRACT.label
         if not extract_path.exists():
             raise RewindTask(StageName.EXTRACT.label, "Extraction data marker missing.")
 
         # 3. Gate: If we expect data, verify physical artifacts are non-zero.
-        if meta.file_count > 0:
-            if not any(f.stat().st_size > 0 for f in extract_path.glob("*.parquet")):
-                raise RewindTask(
-                    StageName.EXTRACT.label, "Physical artifacts missing or empty."
-                )
+        if meta.file_count > 0 and (
+            not any(f.stat().st_size > 0 for f in extract_path.glob("*.parquet"))
+        ):
+            raise RewindTask(
+                StageName.EXTRACT.label, "Physical artifacts missing or empty."
+            )
 
         # 3. Gate: Validate Transformer Registration
         try:
@@ -100,14 +101,14 @@ class TransformStage(ExecutionStage):
                 return str(self._transit(task))
 
             # 1. Setup Context and Data Store
-            extract_path = (task.folder / StageName.EXTRACT.label).resolve()
+            extract_path = (task.workspace.run_path / StageName.EXTRACT.label).resolve()
             # Get the deterministic physical folder from the workspace
             data_store = task.workspace.clear_stage_data(self.name)
 
             ctx = TransformContext(
                 options=task.context.transform.transform_params,
                 source_dir=(extract_path / "part_*.parquet").resolve(),
-                destination_dir=task.folder / "transform",
+                destination_dir=data_store,
                 output_format=APP_TRANSFORM_OUTPUT_EXT,
                 type=task.context.transform.transform_type,
             )

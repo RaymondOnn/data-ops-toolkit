@@ -1,3 +1,11 @@
+"""
+Task Execution Engine.
+
+This module defines the Executor responsible for running individual task
+stages. It manages process isolation, state transitions in the hot cache,
+and authoritative finalization of task outcomes.
+"""
+
 import os
 import subprocess
 import time
@@ -22,7 +30,7 @@ from apps.ingestion.src.services.registry import ServiceRegistry
 from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE
 from apps.ingestion.src.utils.exceptions import RetryTask, RewindTask
 from filelock import FileLock
-from libs.cache.utils import get_cache
+from libs.cache.factory import get_cache
 from libs.utils.exceptions import TransientError, install_exception_hooks
 from loguru import logger
 
@@ -32,7 +40,27 @@ if TYPE_CHECKING:
 
 # @ray.remote(max_restarts=3, max_task_retries=1)
 class Executor:
+    """Compute executor responsible for running specific task stages.
+
+    The Executor acts as the bridge between the Orchestrator's queue and the
+    physical execution logic. It manages the task lifecycle on a worker node,
+    including state transitions in the hot cache, PEX-based execution,
+    and authoritative result finalization.
+
+    Decision: Shared State.
+    The Executor shares the same DiskCache configuration as the Orchestrator.
+    This allows Ray workers to communicate state changes (heartbeats, blocking
+    signals) back to the control plane without a centralized message broker.
+    """
+
     def __init__(self, worker_id: str, exec_ctx: ExecutionContext):
+        """Initializes the executor and connects to the shared state bus.
+
+        Decision: Worker-Local Registry.
+        We configure the ServiceRegistry and SecretProvider locally on
+        initialization. This ensures that Ray workers maintain their own
+        connection pools and credential caches, preventing cross-node leakage.
+        """
         self.worker_id = worker_id
         self.exec_ctx = exec_ctx
 
@@ -55,24 +83,48 @@ class Executor:
     def _transition_task(
         self,
         old_key: str,
-        new_status: str,
+        new_status: ExecutionStatus,
         next_stage: str | None = None,
         last_hb_offset: float = 0,
+        meta_override: TaskMetadata | None = None,
     ):
-        """Handles atomic cache updates during task state transitions."""
-        meta = self.cache.pop(old_key, None)
+        """Handles atomic cache updates during task state transitions.
 
-        # ROBUSTNESS: If the specific status-key is missing (e.g. status changed during dispatch lag),
-        # attempt to find any key matching the Run ID using the authoritative namespace.
+        Args:
+            old_key: The current cache key representing the task.
+            new_status: The status being transitioned to.
+            next_stage: Optional label for the next execution stage.
+            last_hb_offset: Future offset for the next heartbeat (for retries).
+            meta_override: An already-updated TaskMetadata object to persist.
+
+        Decision: State Persistence.
+        By allowing a 'meta_override', we ensure that metadata updated during
+        the stage execution (like 'rewind_history') is preserved during
+        the transition even though the cache uses serialized copies.
+        """
+        # Use the override if provided, otherwise pop from cache
+        meta = meta_override or self.cache.pop(old_key, None)
+
+        # If using an override, we still must clear the old key from cache
+        if meta_override:
+            self.cache.pop(old_key, None)
+
+        # If the specific status-key is missing,
+        # attempt to find any key matching the Run ID via cache.
         if meta is None:
-            run_id = TaskRef.from_str(old_key).run_id
-            for k in list(self.cache.iterkeys(pattern=f"{CACHE_TASK_NAMESPACE}:*:*:*:*:*:{run_id}")):
+            run_id = TaskRef.from_str(old_key).identity.run_id
+            for k in list(
+                self.cache.iterkeys(
+                    pattern=f"{CACHE_TASK_NAMESPACE}:*:*:*:*:*:{run_id}"
+                )
+            ):
                 meta = self.cache.pop(k, None)
-                if meta: break
+                if meta:
+                    break
 
         if meta is None:
             return None
-        meta.status = new_status
+        meta.status = new_status.value
         if next_stage:
             meta.current_stage = next_stage
         meta.last_hb = time.time() + last_hb_offset
@@ -85,25 +137,32 @@ class Executor:
         return meta
 
     def process_stage(self, key: str) -> None:
-        # Key Format: {CACHE_TASK_NAMESPACE}:{status}:{stage}:{job}:{dataset}:{date}:{run_id}
+        """Entry point for executing a single stage of a task.
+
+        Decision: Contextual Logging.
+        We use loguru's contextualize to inject worker_id and run_id
+        into every log line produced during the stage, significantly
+        improving troubleshooting in high-concurrency environments.
+        """
         task_ref = TaskRef.from_str(key)
         current_stage = task_ref.stage
-        run_id = task_ref.run_id
+        run_id = task_ref.identity.run_id
 
         log = logger.bind(worker_id=self.worker_id, stage=current_stage, run_id=run_id)
 
         # 1. Atomic Check-in: Move from WAITING/DISPATCHED to RUNNING in cache
-        meta = self._transition_task(key, ExecutionStatus.RUNNING.value)
+        meta = self._transition_task(key, ExecutionStatus.RUNNING)
         if not meta:
             log.error("Executor failed to rehydrate task: key missing", key=key)
             return
 
         try:
-            with logger.contextualize(run_id=run_id):
-                # Use class-based context manager to automate check-in/finalize
-                with TaskSession(self, task_ref, log) as task:
-                    self.is_busy = True
-                    self._run_task_payload(task, meta)
+            with (
+                logger.contextualize(run_id=run_id),
+                TaskSession(self, task_ref, log) as task,
+            ):
+                self.is_busy = True
+                self._run_task_payload(task, meta)
 
         except RewindTask as rw:
             if self.exec_ctx.disable_self_healing:
@@ -116,13 +175,22 @@ class Executor:
                 self.finalize_task_execution(task, runtime_exception=rw)
                 return
 
-            self._handle_rewind_task(task, rw, log)
+            # Decision: State Mirroring.
+            # We pass 'meta' (the cache object) to the handler to ensure the
+            # rewind history is synchronized between the disk and the hot cache.
+            self._handle_rewind_task(task, rw, log, meta)
         except Exception:
             # Errors are handled by the TaskSession.__exit__ unless raised here
             raise
 
     def _run_task_payload(self, task: Task, meta: TaskMetadata) -> None:
-        """Decides between subprocess (PEX) or internal execution."""
+        """Decides between subprocess (PEX) or internal execution.
+
+        Decision: PEX Isolation (ADR 009).
+        If a PEX path is provided, we execute via subprocess. This provides
+        the strongest level of memory isolation and allows for shadow-running
+        different versions of the engine logic on the same worker node.
+        """
         if self.exec_ctx.code_pex_path and self.exec_ctx.code_pex_path.exists():
             env = os.environ.copy()
             if self.exec_ctx.deps_pex_path:
@@ -145,8 +213,46 @@ class Executor:
             task.stage.pre_flight(task)
             task.execute()
 
-    def _handle_rewind_task(self, task: Task, rw: RewindTask, log: "Logger"):
-        log.warning("Task signaled REWIND", to_stage=rw.target_stage)
+    def _handle_rewind_task(
+        self, task: Task, rw: RewindTask, log: "Logger", meta: TaskMetadata
+    ):
+        """Handles logical rewinds with a strict 'Max 1' attempt policy.
+
+        Args:
+            task: The task instance being rewound.
+            rw: The rewind exception containing the target stage.
+            log: The logger for the current execution.
+            meta: The TaskMetadata object from the hot cache.
+
+        Decision: Attempt-Scoped Self-Healing Gate.
+        Rewinds are treated as 'controlled failures'. To prevent infinite loops
+        (e.g., oscillating between Write and Transform), we limit rewinds to
+        exactly one attempt per target stage within a single attempt lifecycle.
+        This slate is reset if the task is manually resumed by an operator.
+        """
+        # 1. AUTHORITATIVE CACHE CHECK
+        # Decision: Runtime Isolation.
+        # We check the 'meta' object (the Hot Cache). This ensures the
+        # constraint is enforced without polluting the manifest on disk.
+        if rw.target_stage in meta.rewind_history:
+            log.error(
+                "Maximum rewind limit (1) reached for stage. Converting to failure.",
+                target=rw.target_stage,
+                previous_attempt=meta.rewind_history[rw.target_stage],
+            )
+            self.finalize_task_execution(task, runtime_exception=rw)
+            return
+
+        # 2. Increment and Execute Rewind
+        from libs.utils.dates import get_current_timestamp
+
+        log.warning(
+            "Task signaled REWIND",
+            to_stage=rw.target_stage,
+        )
+        # Update the Hot Cache only
+        meta.rewind_history[rw.target_stage] = get_current_timestamp().isoformat()
+
         task.update_manifest(
             {
                 "status": ExecutionStatus.WAITING.value,
@@ -156,8 +262,9 @@ class Executor:
         )
         self._transition_task(
             task.task_ref.build(),
-            new_status=ExecutionStatus.WAITING.value,
+            new_status=ExecutionStatus.WAITING,
             next_stage=rw.target_stage,
+            meta_override=meta,
         )
 
     def finalize_task_execution(
@@ -182,8 +289,8 @@ class Executor:
             policy = ProgressState
 
         # 2. Apply updates sequentially based on policy fields
-        new_status = policy.target_status.value
-        payload: dict[str, Any] = {"status": new_status}
+        target_status = policy.target_status
+        payload: dict[str, Any] = {"status": target_status.value}
         next_stage = None
 
         if runtime_exception and policy == FailedState:
@@ -196,8 +303,8 @@ class Executor:
         if policy == ProgressState:
             next_stage = StageName.next(task.task_ref.stage or task.stage.name)
             payload["current_stage"] = next_stage
-            # For progress, the cache needs to return to WAITING to be picked up for the next stage
-            new_status = ExecutionStatus.WAITING.value
+            # state=WAITING needed for task to be picked up for the next stage
+            target_status = ExecutionStatus.WAITING
 
         # 3. Persist the state change structurally down to the JSON manifest file
         task.update_manifest(payload)
@@ -207,12 +314,12 @@ class Executor:
 
         # 4. Synchronize Orchestrator Cache (Hot Cache)
         # If successful completion, we pop. Otherwise, we transition.
-        cache_key = task.task_ref.build(status=ExecutionStatus.RUNNING.value)
+        cache_key = task.task_ref.build(status=ExecutionStatus.RUNNING)
         if policy == SuccessState:
             self.cache.pop(cache_key, None)
         else:
             self._transition_task(
-                cache_key, new_status=new_status, next_stage=next_stage
+                cache_key, new_status=target_status, next_stage=next_stage
             )
 
     def _handle_retry_finalization(
@@ -224,7 +331,7 @@ class Executor:
         message = str(exc)
 
         if service_name:
-            # Circuit breaker / lockouts write a .blocked file for external recovery checks
+            # Circuit breakern write a .blocked file for external recovery checks
             wait_secs = 0
             task.workspace.touch_marker(".blocked")
             task.workspace.remove_marker(".retrying")
@@ -266,8 +373,8 @@ class Executor:
 
         # Update Hot Cache to reflect backoff
         self._transition_task(
-            task.task_ref.build(status=ExecutionStatus.RUNNING.value),
-            new_status=target_status.value,
+            task.task_ref.build(status=ExecutionStatus.RUNNING),
+            new_status=target_status,
             last_hb_offset=wait_secs,
         )
 

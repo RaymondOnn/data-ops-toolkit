@@ -1,11 +1,17 @@
-from collections.abc import Iterable
+from __future__ import annotations
+
 from enum import StrEnum
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 from apps.ingestion.src.utils.constants import APP_TIMEZONE_LC
 from loguru import logger
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from pathlib import Path
+
+    from apps.ingestion.src.core.models.task.enums import TaskIdentity
 
 LOG = logger
 
@@ -107,46 +113,54 @@ class ExecutionContext(msgspec.Struct):
     def is_prod(self) -> bool:
         return self.env == Env.PROD
 
-    def get_task_identifier(
-        self, job_id: str, dataset_id: str, partition_date: str
-    ) -> str:
-        """Standard format for parent folder names and cache keys."""
-        return f"{job_id}:{dataset_id}:{partition_date}"
-
     def get_run_path(
         self,
-        job_id: str,
-        dataset_id: str,
-        partition_date: str,
-        run_id: str,
+        identity: TaskIdentity,
         category: str = "active",
     ) -> Path:
         """
         Standardizes the nested folder structure:
         {workspace}/{category}/{job_id}:{dataset}:{date}/{run_id}
+
+        Args:
+            identity: The task identity object.
+            category: The directory category (e.g., 'active', 'FAILED').
+
+        Returns:
+            Path: The resolved absolute path to the task run directory.
         """
-        identifier = self.get_task_identifier(job_id, dataset_id, partition_date)
-        return self.workspace_dir / category / identifier / run_id
+        return self.workspace_dir / category / identity.identifier / identity.run_id
 
     def get_signal_name(
         self,
-        job_id: str,
-        dataset_id: str,
-        partition_date: str,
-        run_id: str,
+        identity: TaskIdentity,
         extension: str,
     ) -> str:
-        """Generates the standardized signal filename."""
-        identifier = self.get_task_identifier(job_id, dataset_id, partition_date)
-        return f"{identifier}:{run_id}{extension}"
+        """
+        Generates the standardized signal filename for a task.
 
-    def parse_identifier(self, full_string: str) -> tuple[str, str, str, str]:
-        """Parses a full colon-delimited string back into components."""
-        parts = full_string.split(":")
-        if len(parts) != 4:
-            raise ValueError(f"Malformed identifier string: {full_string}")
-        # Returns: job_id, dataset_id, partition_date, run_id
-        return parts[0], parts[1], parts[2], parts[3]
+        Args:
+            identity: The task identity.
+            extension: File extension including the dot (e.g., '.sync').
+
+        Returns:
+            str: The formatted filename.
+        """
+        return f"{identity.identifier}:{identity.run_id}{extension}"
+
+    def get_task_id(self, full_string: str) -> TaskIdentity:
+        """
+        Parses a full colon-delimited string back into a TaskIdentity.
+
+        Args:
+            full_string: The string to parse (e.g. from a signal filename).
+
+        Returns:
+            TaskIdentity: The reconstructed identity object.
+        """
+        from apps.ingestion.src.core.models.task.enums import TaskIdentity
+
+        return TaskIdentity.from_signal_stem(full_string)
 
     def check_serializability(self) -> bool:
         """

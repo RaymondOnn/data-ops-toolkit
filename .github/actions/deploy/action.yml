@@ -19,7 +19,7 @@ runs:
       run: |
         ssh ${{ inputs.ssh_user }}@${{ inputs.ssh_host }} "mkdir -p $RELEASE_DIR"
         rsync -av --delete ${{ inputs.dist_path }}/ ${{ inputs.ssh_user }}@${{ inputs.ssh_host }}:$RELEASE_DIR
-        
+
         # Optimization for Slow Networks:
         # -z: Compress data during transfer
         # --link-dest: Hard-link unchanged files on the server (huge time saver if deps.pex is the same)

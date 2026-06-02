@@ -1,4 +1,5 @@
 from enum import Enum
+from typing import ClassVar
 
 import polars as pl
 
@@ -60,7 +61,7 @@ POLARS_OUT_MAP = {
 
 class TypeResolver:
     # Registries as defined in your dtypes.py
-    _MAPS = {
+    _MAPS: ClassVar[dict[str, dict[str, TypeGroup]]] = {
         "postgres": POSTGRES_MAP,
         "oracle": ORACLE_MAP,
         "clickhouse": CLICKHOUSE_MAP,
@@ -86,8 +87,7 @@ class TypeResolver:
         Maps a LogicalGroup to the canonical Polars type for normalization.
         """
         return POLARS_OUT_MAP.get(group, pl.Utf8)
-    
+
     @classmethod
     def resolve_to_polars(cls, db_type: str, raw_type: str) -> pl.DataType:
         return cls.group_to_polars(cls.resolve_to_group(db_type, raw_type))
-    

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import msgspec
+from apps.ingestion.src.core.contexts.task import SchemaRow
 from apps.ingestion.src.services.base import Source
 
 
@@ -15,14 +16,14 @@ class ReaderContext(msgspec.Struct, frozen=True):
 
     source_type: str
     source_identifier: str | None = None
-    num_workers: int = 10
+    num_workers: int | None = None
     run_id: str | None = None
     partition_date: str | None = None
     job_id: str | None = None
     # For any source-specific extras (e.g., API keys, custom filters)
     workspace_dir: str | None = None
     options: dict[str, Any] = {}
-    schema_items: list[dict[str, Any]] = []
+    schema_items: list[SchemaRow] = []
 
     # mode: Literal["single_shot", "partitioned"]
     # work_units: List[List[str]]  # List of file groups to process

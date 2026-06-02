@@ -12,6 +12,6 @@ CREATE TABLE IF NOT EXISTS META.EXECUTION_HISTORY (
     , FINAL_ROW_COUNT       UInt64
     , FINAL_MANIFEST        String
     , REMARKS               Nullable(String)
-) 
+)
 ENGINE = MergeTree()
 ORDER BY (JOB_ID, DATASET_ID, RUN_ID);

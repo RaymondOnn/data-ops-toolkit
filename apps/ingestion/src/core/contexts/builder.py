@@ -1,19 +1,19 @@
+import contextlib
 import os
 import re
 from collections import ChainMap
-from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 import msgspec
+import pendulum
 from apps.ingestion.src.core.contexts.execution import ExecutionContext, ExecutionMode
-from apps.ingestion.src.core.contexts.task import TaskContext
+from apps.ingestion.src.core.contexts.task import SchemaRow, TaskContext
 from apps.ingestion.src.utils.constants import (
     APP_CONFIG_ROOT,
     APP_CURRENT_ENV,
     DEFAULT_PARTITION_COL,
 )
-from dateutil.relativedelta import relativedelta
 from dynaconf import Dynaconf
 from libs.utils.dates import get_current_timestamp
 from loguru import logger
@@ -85,13 +85,13 @@ def parse_set_options(settings: list[str] | None) -> dict[str, Any]:
         key_val = item.split("=", 1)
         raw_key, value = key_val[0].strip(), key_val[1].strip()
 
-        # Simple Type Inference
-        if value.isdigit():
+        # Decision: Concise Type Inference.
+        # Using a mapping for literals and isdigit() check reduces branching.
+        type_map = {"true": True, "false": False, "none": None}
+        if value.lower() in type_map:
+            value = type_map[value.lower()]
+        elif value.isdigit():
             value = int(value)
-        elif value.lower() == "true":
-            value = True
-        elif value.lower() == "false":
-            value = False
 
         # Check for scoping (dataset:key)
         if ":" in raw_key:
@@ -140,9 +140,21 @@ class TaskContextBuilder:
         spec: dict[str, Any],
         partition_date_str: str | None = None,
     ) -> str | None:
-        """Resolves T-x logic into a formatted string."""
+        """Resolves T-x relative date logic into a formatted string.
+
+        Args:
+            spec: The partition date specification from YAML.
+            partition_date_str: An optional override (CLI).
+
+        Returns:
+            str | None: The formatted YYYY-MM-DD string.
+
+        Decision: Timezone Continuity.
+        We use the app-level timezone for calculation but return naive ISO
+        strings to keep database partitions simple and human-readable.
+        """
         if partition_date_str:
-            date_val = datetime.strptime(partition_date_str, "%Y-%m-%d")
+            date_val = pendulum.from_format(partition_date_str, "YYYY-MM-DD")
         elif spec:
             # Use app-level timezone or default to Asia/Singapore
             tz_name = self.app_settings.get("timezone", "Asia/Singapore")
@@ -151,8 +163,9 @@ class TaskContextBuilder:
             # Support multi-unit offsets (years, months, days)
             offset = spec.get("offset", {})
 
-            # We merge with the legacy 'offset_days' for backward compatibility
-            date_val = base_date + relativedelta(
+            # Decision: Use Pendulum for fluent date math.
+            # We merge with the legacy 'offset_days' for backward compatibility.
+            date_val = pendulum.instance(base_date).add(
                 years=offset.get("years", 0),
                 months=offset.get("months", 0),
                 days=offset.get("days", spec.get("offset_days", 0)),
@@ -169,7 +182,14 @@ class TaskContextBuilder:
     def get_execution_context(
         self, mode: ExecutionMode = ExecutionMode.NORMAL
     ) -> ExecutionContext:
-        """Resolves the global app settings into a typed context."""
+        """Resolves global app settings into a typed ExecutionContext.
+
+        Args:
+            mode: The execution mode (NORMAL, DEBUG, DRY_RUN).
+
+        Returns:
+            ExecutionContext: The authoritative runtime environment object.
+        """
         workspace = Path(self.app_settings.get("workspace_dir")).expanduser().resolve()
 
         # Ensure the base workspace directory exists so lock files
@@ -189,7 +209,19 @@ class TaskContextBuilder:
     def _get_val(
         self, settings: Dynaconf, dataset_id: str, path: str, default: Any = None
     ) -> Any:
-        """Hierarchical lookup: Dataset (Env > Default) > Job (Env > Default) > App (Env > Default)."""
+        """Hierarchical lookup for configuration values.
+
+        Args:
+            settings: The job-level Dynaconf instance.
+            dataset_id: The specific dataset ID.
+            path: The dot-notation path to the setting.
+            default: Fallback if not found.
+
+        Decision: Configuration Inheritance.
+        Priority: Dataset(Env) > Dataset(Default) > Job(Env) > Job(Default)
+        > App(Env) > App(Default). This allows massive reuse of service
+        definitions while allowing surgical overrides.
+        """
         search_paths = [f"datasets.{dataset_id}.{path}", f"job.{path}"]
         for p in search_paths:
             for env in [None, "default"]:
@@ -207,7 +239,17 @@ class TaskContextBuilder:
     def _resolve_service(
         self, settings: Dynaconf, ref_key: str, dataset_id: str
     ) -> dict:
-        """Resolves a service definition by reference or inline config."""
+        """Resolves a service definition by reference or inline config.
+
+        Args:
+            settings: Job settings instance.
+            ref_key: The configuration key (extract, load, archive).
+            dataset_id: Target dataset.
+
+        Decision: Decoupled Services.
+        Services are defined once globally (e.g. 'clickhouse_prod') and
+        referenced by name in job configs, separating infrastructure from logic.
+        """
         ref = self._get_val(settings, dataset_id, f"{ref_key}.service_ref")
         if ref:
             # Search hierarchy for the 'services.{ref}' definition
@@ -260,7 +302,48 @@ class TaskContextBuilder:
         LOG.debug("Loading schema from file", path=str(schema_path))
         with schema_path.open(encoding="utf-8") as f:
             reader = csv.DictReader(f)
-            return list(reader)
+
+            # Decision: Dynamic Coercion via SchemaRow Annotations.
+            # By leveraging typing.get_type_hints, we make the CSV loader
+            # responsive to changes in the SchemaRow definition without
+            # hardcoding attribute names.
+            hints = get_type_hints(SchemaRow)
+            items = []
+
+            for row in reader:
+                for col, val in row.items():
+                    if col not in hints:
+                        continue
+
+                    target_type = hints[col]
+
+                    # 1. Dynamic Boolean Detection
+                    if target_type is bool:
+                        row[col] = str(val).lower().strip() in (
+                            "true",
+                            "1",
+                            "t",
+                            "yes",
+                            "y",
+                        )
+
+                    # 2. Dynamic Null/Empty Handling
+                    elif val == "" or str(val).lower() == "none":
+                        row[col] = None
+
+                    # 3. Dynamic Numeric Coercion
+                    # If the type is not explicitly a string (e.g. Any, int, or float)
+                    # we attempt to cast to a number to satisfy msgspec.
+                    else:
+                        is_str = target_type is str or (
+                            get_origin(target_type) is Union
+                            and str in get_args(target_type)
+                        )
+                        if not is_str:
+                            with contextlib.suppress(ValueError, TypeError):
+                                row[col] = int(float(val))
+                items.append(row)
+            return items
 
     def build(
         self,
@@ -315,8 +398,7 @@ class TaskContextBuilder:
             )
         )
 
-        # 4. Get the Task-level defaults and the Dataset-level specifics
-        job_defaults = settings.get("job", {})
+        # 4. Get the Dataset-level specifics
         all_datasets = settings.get("datasets", {})
 
         # Filter if a specific dataset was requested via CLI
@@ -327,8 +409,6 @@ class TaskContextBuilder:
             if ds_id not in all_datasets:
                 LOG.warning(f"Dataset '{ds_id}' not found in job '{job_id}'. Skipping.")
                 continue
-
-            ds_cfg = all_datasets[ds_id]
 
             # 5. Build the context using the resolution: Dataset Spec > Task Default
             ctx = self._create_task_context(
@@ -363,20 +443,15 @@ class TaskContextBuilder:
         if schema_file:
             schema_items = self._load_schema_file(job_id, schema_file)
 
-        def resolve_full_config(key: str, fallback_path: str):
-            svc = self._resolve_service(settings, key, dataset_id)
-            stype = svc.pop("type", get_val(fallback_path))
-            return stype, svc
-
-        source_type, source_svc = resolve_full_config("extract", "extract.source_type")
-        sink_type, sink_svc = resolve_full_config("load", "load.sink_type")
+        # Decision: Uniform Service Resolution.
+        # Mapping the resolution logic reduces repetitive calls and variable
+        # management in the main context dictionary construction.
+        res = {
+            k: self._resolve_service(settings, k, dataset_id)
+            for k in ["extract", "load", "archive"]
+        }
 
         enable_archival = get_val("archive.enable_archival")
-        archive_type, archive_svc = (
-            resolve_full_config("archive", "archive.archive_type")
-            if enable_archival
-            else (None, {})
-        )
 
         ctx_data = {
             "job_id": job_id,
@@ -384,12 +459,14 @@ class TaskContextBuilder:
             "partition_date": partition_date,
             "output_path": f"storage/active/{job_id}/{dataset_id}",
             "extract": {
-                "source_type": source_type,
+                "source_type": res["extract"].get(
+                    "type", get_val("extract.source_type")
+                ),
                 "source_identifier": get_val("extract.source_identifier")
                 or get_val("source_identifier"),
                 "num_workers": get_val("extract.num_workers"),
                 "load_mode": get_val("extract.load_mode"),
-                "source_config": source_svc,
+                "source_config": res["extract"],
                 "source_params": get_val("extract.source_params", {}),
                 "schema_items": schema_items,
             },
@@ -398,11 +475,11 @@ class TaskContextBuilder:
                 "transform_params": get_val("transform.options", {}),
             },
             "load": {
-                "sink_type": sink_type,
+                "sink_type": res["load"].get("type", get_val("load.sink_type")),
                 "sink_identifier": get_val("load.sink_identifier")
                 or get_val("load.identifier")
                 or get_val("target_destination"),
-                "sink_config": sink_svc,
+                "sink_config": res["load"],
                 "partition_col": get_val("load.partition_col", DEFAULT_PARTITION_COL),
                 "partition_value": get_val("load.partition_value", partition_date),
                 "load_params": get_val("load.load_params", {}),
@@ -413,8 +490,8 @@ class TaskContextBuilder:
                     get_val("archive.retention_days") if enable_archival else None
                 ),
                 "base_path": get_val("archive.base_path") if enable_archival else None,
-                "type": archive_type,
-                "config": archive_svc,
+                "type": res["archive"].get("type", get_val("archive.archive_type")),
+                "config": res["archive"],
             },
             "feature_flags": get_val("feature_flags", {}),
         }
@@ -424,11 +501,17 @@ class TaskContextBuilder:
             active_overrides = ChainMap(
                 overrides.get(dataset_id, {}), overrides.get("_global", {})
             )
+            # Decision: Accumulate overrides in a typed dictionary to avoid
+            # subscripting ambiguity on the mixed-type ctx_data map.
+            custom_overrides: dict[str, Any] = {}
             for key, value in active_overrides.items():
                 if key in ctx_data:
                     ctx_data[key] = value
                 else:
-                    ctx_data.setdefault("custom_overrides", {})[key] = value
+                    custom_overrides[key] = value
+
+            if custom_overrides:
+                ctx_data["custom_overrides"] = custom_overrides
 
         # Perform type-safe conversion and validation from dict to Struct
         return msgspec.convert(ctx_data, type=TaskContext)

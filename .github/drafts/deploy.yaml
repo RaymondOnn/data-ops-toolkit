@@ -72,17 +72,17 @@ jobs:
         run: |
           RELEASE_DIR="$BASE_PATH/releases/$RELEASE_ID"
           CURRENT_LINK="$BASE_PATH/current"
-          
+
           echo "🚀 Deploying to $RELEASE_DIR"
-          
+
           # 1. Upload new version
           ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "mkdir -p $BASE_PATH/releases"
           rsync -av --delete ./dist/ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:$RELEASE_DIR
-          
+
           # 2. Atomic Switch (Symlink update)
           echo "🔗 Switching symlink..."
           ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "ln -sfn $RELEASE_DIR $CURRENT_LINK"
-          
+
           echo "✅ Deployed successfully to $RELEASE_ID"
 
       - name: Cleanup Old Releases

@@ -7,7 +7,8 @@ def test_command_priority_sorting(runtime, tmp_path):
     """
     GIVEN a signal directory with a low-priority ADHOC_RUN and a high-priority STOP
     WHEN process_commands is invoked
-    THEN the high-priority STOP should be at the front of the queue regardless of file time.
+    THEN the high-priority STOP should be at the front of the queue
+    regardless of file time.
     """
     sig_path = runtime.exec_ctx.signal_path
     sig_path.mkdir(parents=True, exist_ok=True)

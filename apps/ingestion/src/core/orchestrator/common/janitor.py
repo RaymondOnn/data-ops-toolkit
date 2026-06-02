@@ -8,7 +8,6 @@ import pendulum
 from apps.ingestion.src.core.contexts import ExecutionContext
 from apps.ingestion.src.core.contexts.task import load_task_context
 from apps.ingestion.src.core.models.stages.enums import StageName
-from apps.ingestion.src.core.models.states import ExpiredState
 from apps.ingestion.src.core.models.task import (
     ExecutionStatus,
     Task,
@@ -136,7 +135,7 @@ class Janitor:
         # SAFETY: Check if the task is currently active in Ray
         # We check the TaskManager's active registry to prevent deleting folders under a running worker
         active_run_ids = {
-            TaskRef.from_str(v).run_id for v in self.active_tasks_fn().values()
+            TaskRef.from_str(v).identity.run_id for v in self.active_tasks_fn().values()
         }
         if folder.name in active_run_ids:
             LOG.debug(f"Skipping purge for active task: {folder.name}")
@@ -148,10 +147,9 @@ class Janitor:
 
             # Trigger state machine if this is an expiry-related purge
             if "Expired" in reason and task.manifest.status != ExecutionStatus.EXPIRED:
-                task.update_manifest({
-                    "status": ExecutionStatus.EXPIRED,
-                    "remarks": f"{reason}"
-                })
+                task.update_manifest(
+                    {"status": ExecutionStatus.EXPIRED, "remarks": f"{reason}"}
+                )
 
             self.cleanup_task(task)
             return True
@@ -196,9 +194,10 @@ class Janitor:
         """Locates and purges a specific run_id across active and quarantined zones."""
         count = 0
         for folder in self._discover_task_folders(self._get_search_roots()):
-            if folder.name == run_id:
-                if self._purge_task_by_folder(folder, "Targeted Cleanup", dry_run):
-                    count += 1
+            if folder.name == run_id and self._purge_task_by_folder(
+                folder, "Targeted Cleanup", dry_run
+            ):
+                count += 1
         if not count:
             LOG.warning(f"Run ID {run_id} not found in managed zones.")
 
@@ -206,11 +205,10 @@ class Janitor:
         """Purges any task folder older than X days, regardless of manifest TTL."""
         cutoff, count = time.time() - (days * 86400), 0
         for folder in self._discover_task_folders(self._get_search_roots()):
-            if folder.stat().st_mtime < cutoff:
-                if self._purge_task_by_folder(
-                    folder, f"Older than {days} days", dry_run
-                ):
-                    count += 1
+            if folder.stat().st_mtime < cutoff and self._purge_task_by_folder(
+                folder, f"Older than {days} days", dry_run
+            ):
+                count += 1
         LOG.info(f"Age sweep done. Purged: {count}")
 
     def quarantine_task(self, folder_path: Path, category: str) -> None:
@@ -278,17 +276,16 @@ class Janitor:
 
             # Create a new TaskRef instance with updated stage and status
             updated_ref = TaskRef(
+                identity=task.task_ref.identity,
                 namespace=task.task_ref.namespace,
-                status=ExecutionStatus.PENDING.value,
+                status=ExecutionStatus.PENDING,
                 stage=resume_stage,
-                job_id=task.task_ref.job_id,
-                dataset_id=task.task_ref.dataset_id,
-                partition_date=task.task_ref.partition_date,
-                run_id=task.task_ref.run_id,
             )
 
             # Use the queue function which must be available on common Janitor
-            self.queue_task_fn(updated_ref, str(task.folder / CONFIG_FILENAME))
+            self.queue_task_fn(
+                updated_ref, str(task.workspace.run_path / CONFIG_FILENAME)
+            )
             task.request_status_sync(TaskSignal.SYNC)
 
         except Exception:

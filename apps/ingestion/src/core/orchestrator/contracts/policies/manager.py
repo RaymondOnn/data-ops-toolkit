@@ -1,6 +1,5 @@
 import time
-from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import ray
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
@@ -20,20 +19,46 @@ from loguru import logger
 LOG = logger
 
 
-class AdmissionPolicy(ABC):
-    """Strategy for admitting tasks into the engine cache."""
+@runtime_checkable
+class AdmissionPolicy(Protocol):
+    """
+    Defines the contract for admitting tasks into the engine's active cache.
 
-    @abstractmethod
+    Implementations determine if a task is allowed to proceed based on
+    concurrency rules, deduplication, or priority.
+    """
+
     def validate_and_queue(
-        self, cache: Any, lock: Any, task_ref: TaskRef, meta: TaskMetadata
+        self,
+        cache: Any,
+        lock: Any,
+        task_ref: TaskRef,
+        meta: TaskMetadata,
     ) -> bool:
-        pass
+        """
+        Validates if a task can be admitted and adds it to the cache.
+
+        Args:
+            cache: The thread-safe storage for task metadata.
+            lock: A reentrant lock for atomic cache operations.
+            task_ref: The identity and routing handle for the task.
+            meta: The initial metadata to be stored.
+
+        Returns:
+            bool: True if the task was successfully admitted, False otherwise.
+        """
+        ...
 
 
-class MaintenancePolicy(ABC):
-    """Strategy for background system health and recovery."""
+@runtime_checkable
+class MaintenancePolicy(Protocol):
+    """
+    Defines the contract for background system health and recovery.
 
-    @abstractmethod
+    Handles resource reclamation, zombie task detection, and automated
+    resurrection of stalled runs.
+    """
+
     def run(
         self,
         cache: Any,
@@ -42,7 +67,17 @@ class MaintenancePolicy(ABC):
         compute: Compute,
         exec_ctx: ExecutionContext,
     ) -> None:
-        pass
+        """
+        Executes a maintenance cycle to reconcile system state and resources.
+
+        Args:
+            cache: The active task registry.
+            lock: Lock for safe registry modifications.
+            active_tasks: Mapping of Ray ObjectRefs to cache keys.
+            compute: The resource manager for capacity tracking.
+            exec_ctx: The global execution context.
+        """
+        ...
 
     def _recover_task(
         self,
@@ -54,7 +89,15 @@ class MaintenancePolicy(ABC):
         exec_ctx: ExecutionContext,
     ) -> None:
         """
-        Recovers a stalled task by checking its physical progress.
+        Internal helper to resurrect a stalled task by checking physical state.
+
+        Args:
+            key: The cache key of the zombie task.
+            cache: The task registry.
+            lock: Lock for safe transition.
+            active_tasks: Mapping of active Ray handles.
+            compute: Compute engine for resource reclamation.
+            exec_ctx: Global settings and path resolver.
         """
         task_ref = TaskRef.from_str(key)
         task_meta = cache.get(key)
@@ -67,10 +110,11 @@ class MaintenancePolicy(ABC):
         )
 
         # 1. Clean up markers and force Engine re-evaluation
-        (task.folder / ".retrying").unlink(missing_ok=True)
-        (task.folder / ".blocked").unlink(missing_ok=True)
+        (task.workspace.run_path / ".retrying").unlink(missing_ok=True)
+        (task.workspace.run_path / ".blocked").unlink(missing_ok=True)
 
-        # Determine resume point: if current_stage is None, the engine defaults to StageName.first()
+        # Determine resume point:
+        # if current_stage is None, the engine defaults to StageName.first()
         resume_stage = task.context.from_stage or StageName.first().label
 
         task.update_manifest(
@@ -94,7 +138,7 @@ class MaintenancePolicy(ABC):
                     break
 
             new_key = task_ref.with_updates(
-                status=task_meta.status, stage=resume_stage
+                status=ExecutionStatus(task_meta.status), stage=resume_stage
             ).build()
             cache[new_key] = task_meta
             task.request_status_sync(TaskSignal.SYNC)
@@ -102,6 +146,13 @@ class MaintenancePolicy(ABC):
     def _cleanup_finished_tasks(
         self, active_tasks: dict[ray.ObjectRef, str], compute: Compute
     ) -> None:
+        """
+        Non-blocking sweep to reclaim capacity from completed tasks.
+
+        Args:
+            active_tasks: The local tracking map of Ray ObjectRefs.
+            compute: The compute manager to notify of freed resources.
+        """
         if not active_tasks:
             return
         ready_refs, _ = ray.wait(list(active_tasks.keys()), timeout=0)

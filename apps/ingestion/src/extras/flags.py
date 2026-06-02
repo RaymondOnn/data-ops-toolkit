@@ -30,7 +30,7 @@ class FeatureFlags(msgspec.Struct, kw_only=True):
     migration_mode: bool = False
     # Toggle for Audits: compare against Target instead of Legacy Source
     read_from_target: bool = False
-    
+
     # # --- Simulation & Environment ---
     # shadow_write_enabled: bool = False # If True, WriteStage emits data to both primary and experimental sinks
 
@@ -42,7 +42,6 @@ class FeatureFlags(msgspec.Struct, kw_only=True):
     # archive_first: bool = False     # Toggle order: Archive -> Load vs default Load -> Archive
     # dry_run: bool = False           # Process everything but skip terminal DB/S3 commits
     # bypass_audit: bool = False      # Skip the Audit stage for high-priority emergency runs
-
 
 
 @contextmanager

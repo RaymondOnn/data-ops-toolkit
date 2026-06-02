@@ -1,14 +1,16 @@
-
 from typing import Any
 
 from apps.ingestion.src.core.models.task import TaskRef
+from apps.ingestion.src.core.orchestrator.contracts.policies import (
+    AdmissionPolicy,
+    MaintenancePolicy,
+)
 from apps.ingestion.src.core.orchestrator.enums import TaskMetadata
 from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE
 from loguru import logger
 
-from ...contracts.policies import AdmissionPolicy, MaintenancePolicy
-
 LOG = logger
+
 
 class ForceAdmission(AdmissionPolicy):
     """Trigger Mode: Evict existing partition state to ensure a clean manual run."""

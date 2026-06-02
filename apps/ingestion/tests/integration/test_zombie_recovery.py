@@ -45,7 +45,7 @@ def test_zombie_resurrection_on_worker_death(runtime, tmp_path):
 
     # Remove from the local registry to simulate Ray losing track of the ref
     # but the Hot Cache still thinks it's running.
-    active_key = runtime.orchestrator.tasks._active_tasks.pop(found_ref)
+    runtime.orchestrator.tasks._active_tasks.pop(found_ref)
 
     # 4. Maintenance: Trigger the zombie detection logic
     # This is what the background daemon runs every 5 minutes

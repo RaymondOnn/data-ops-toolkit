@@ -3,7 +3,7 @@ name = "cache"
 version = "0.1.0"
 dependencies = [
     "diskcache",
-    "redis", 
+    "redis",
 ]
 requires-python = ">=3.11"
 

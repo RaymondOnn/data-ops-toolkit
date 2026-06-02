@@ -12,7 +12,7 @@ LOG = logger
 
 # 1. Discover CORE transformers (bitmask, default, etc.)
 # These are located in src.core.strategies.transform.transform
-import apps.ingestion.src.core.strategies.transform.transform
+import apps.ingestion.src.core.strategies.transform.transform  # noqa
 
 # 2. Dynamically Discover CUSTOM/SHARED transformers
 # We walk the 'custom' subdirectory recursively

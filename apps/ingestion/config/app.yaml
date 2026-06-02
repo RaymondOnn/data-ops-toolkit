@@ -112,7 +112,7 @@ local:
         <<: *localstack_base
         anon: false
     s3_cas:
-      <<: *s3_cas_base 
+      <<: *s3_cas_base
       url: "s3://cas-vault"
       client: *localstack_client
       storage_options:
@@ -169,4 +169,3 @@ prod:
       <<: *s3_cas_base
       url: "s3://prod-cas-vault"
       client: *aws_prod_client
-      

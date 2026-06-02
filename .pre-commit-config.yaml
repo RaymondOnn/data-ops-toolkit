@@ -1,0 +1,54 @@
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0 # Use the latest stable version
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        exclude: job\.yaml$
+      - id: check-toml
+      - id: check-added-large-files
+        args: ['--maxkb=500'] # Max file size 500KB
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.4 # Use the latest stable version of Ruff
+    hooks:
+      - id: ruff
+        # This will auto-fix linting issues and fail the commit if any fixes were applied.
+        # You'll need to `git add .` and re-commit after it fixes things.
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+        # This will auto-format your code.
+        args: []
+
+  # - repo: https://github.com/jendrikseipp/vulture
+  #   rev: v2.14  # Use the latest version available
+  #   hooks:
+  #     - id: vulture
+  #       # Decision: Project-Wide Static Analysis.
+  #       # Vulture works best when it can see the entire codebase to detect
+  #       # unused code accurately. We point it to our source roots and
+  #       # disable pre-commit's file passing to avoid 'no file' errors.
+  #       args: ["apps/ingestion/src", "libs"]
+  #       pass_filenames: false
+
+  # - repo: local
+  #   hooks:
+  #     - id: ty-check
+  #       name: Type Check with Ty
+  #       # Run the specific sub-command for type verification
+  #       entry: ty check
+  #       language: python
+  #       # Ensure filenames are not appended to 'ty check'
+  #       pass_filenames: false
+  #       # Ensure ty is available inside this hook's isolated environment
+  #       additional_dependencies: ["ty"]
+  #       # Explicitly configure files to watch so the hook only triggers when needed
+  #       files: |
+  #         (?x)^(
+  #             pyproject\.toml|
+  #             apps/ingestion/src/.*\.py|
+  #             libs/.*\.py
+  #         )$

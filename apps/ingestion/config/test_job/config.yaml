@@ -13,7 +13,7 @@ default:
     archive:
       enable_archival: true
       service_ref: "s3_archive"
-    
+
     # Job-level feature flag overrides
     feature_flags:
       archive_first: true  # Use case: Archive to S3 before loading to DB
@@ -29,7 +29,7 @@ default:
         offset:
           days: -1
       extract:
-        load_mode: "snapshot"    
+        load_mode: "snapshot"
         source_params:
           type: file
           file_pattern: ./mock_data/sample_orders.csv
@@ -43,7 +43,7 @@ default:
       archive:
         enable_archival: true    # per-dataset archival override
         service_ref: "s3_archive"
-      
+
       # Dataset-level override for cost comparison
       feature_flags:
         benchmark_mode: true

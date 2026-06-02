@@ -15,24 +15,24 @@
 #         - Ordering: ORDER BY created_at.
 #         """
 #         now = datetime.now(UTC)
-        
+
 #         # 1. Atomic Claim with SKIP LOCKED
 #         # available_at <= now ensures we don't pick up retries too early (backoff)
 #         # or jobs currently being processed by others (visibility timeout)
 #         find_query = text("""
-#             SELECT id FROM jobs 
+#             SELECT id FROM jobs
 #             WHERE status = 'pending' AND available_at <= :now
-#             ORDER BY created_at ASC 
+#             ORDER BY created_at ASC
 #             LIMIT 1 FOR UPDATE SKIP LOCKED
 #         """)
 
 #         # 2. Update state immediately (The "Lease")
 #         update_query = text("""
-#             UPDATE jobs 
-#             SET status = 'pending', 
+#             UPDATE jobs
+#             SET status = 'pending',
 #                 available_at = :next_visibility,
 #                 retry_count = retry_count + 1
-#             WHERE id = :id 
+#             WHERE id = :id
 #             RETURNING *
 #         """)
 
@@ -42,7 +42,7 @@
 #             row = conn.execute(find_query, {"now": now}).fetchone()
 #             if row:
 #                 return conn.execute(update_query, {
-#                     "id": row.id, 
+#                     "id": row.id,
 #                     "next_visibility": next_visibility
 #                 }).fetchone()
 #         return None
@@ -54,17 +54,17 @@
 #         # Backoff: 2^retry_count * 10 seconds (e.g., 10s, 20s, 40s...)
 #         backoff_seconds = (2 ** retry_count) * 10
 #         next_available = datetime.now(UTC) + timedelta(seconds=backoff_seconds)
-        
+
 #         status = "pending" if retry_count < self.max_retries else "dlq"
-        
+
 #         query = text("""
-#             UPDATE jobs 
-#             SET status = :status, available_at = :available_at 
+#             UPDATE jobs
+#             SET status = :status, available_at = :available_at
 #             WHERE id = :id
 #         """)
 #         with self.engine.begin() as conn:
 #             conn.execute(query, {
-#                 "status": status, 
-#                 "available_at": next_available, 
+#                 "status": status,
+#                 "available_at": next_available,
 #                 "id": job_id
 #             })

@@ -80,9 +80,9 @@ class PostgresService(DatabaseSource, DatabaseSink):
         # Transactional Swap
         sql = f"""
         BEGIN;
-        DELETE FROM {target_table} 
+        DELETE FROM {target_table}
             WHERE {partition_col} = '{partition_val}';
-        INSERT INTO {target_table} 
+        INSERT INTO {target_table}
             SELECT * FROM {staging_table};
         COMMIT;
         DROP TABLE {staging_table};
@@ -157,7 +157,7 @@ class PostgresService(DatabaseSource, DatabaseSink):
             )
 
         # Explicitly sort columns to ensure positional equality in EXCEPT
-        col_selection = ", ".join(sorted(list(compare_cols)))
+        col_selection = ", ".join(sorted(compare_cols))
 
         sql = f"""
             SELECT {col_selection} FROM {ref_table}
@@ -170,8 +170,8 @@ class PostgresService(DatabaseSource, DatabaseSink):
     def clone(self, reference: str, other: str) -> None:
         # Ensure it is a persistent table, not temporary, for regression testing
         sql = f"""
-            CREATE TABLE {other} AS 
-            SELECT * FROM {reference} 
+            CREATE TABLE {other} AS
+            SELECT * FROM {reference}
             WHERE 1 = 0
         """
         LOG.info("Cloning table structure", source=reference, destination=other)

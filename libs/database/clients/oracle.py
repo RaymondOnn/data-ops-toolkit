@@ -42,7 +42,7 @@ class OracleClient(DBClient):
     def _ping(self, conn: Connection) -> None:
         conn.ping()
 
-    def get_load_strategy(
+    def partition_load(
         self,
         table_name: str,
         num_workers: int = 10,
@@ -56,8 +56,8 @@ class OracleClient(DBClient):
         for i in range(num_workers):
             # ORA_HASH(rowid, N) creates N buckets based on physical location
             sql = f"""
-                SELECT * FROM {table_name} 
-                WHERE {filter_sql} 
+                SELECT * FROM {table_name}
+                WHERE {filter_sql}
                 AND ORA_HASH(rowid, {num_workers - 1}) = {i}
             """
             queries.append(sql)
@@ -70,7 +70,6 @@ class OracleClient(DBClient):
         file_ext: str = "parquet",
         audit_values: dict[str, Any] | None = None,
     ) -> None:
-
         audit_values = audit_values or {}
 
         with self.get_connection() as conn, conn.cursor() as cur:
@@ -87,7 +86,7 @@ class OracleClient(DBClient):
             )
 
             sql = f"""
-                INSERT INTO {table.upper()} ({", ".join(db_cols)}) 
+                INSERT INTO {table.upper()} ({", ".join(db_cols)})
                     VALUES ({placeholders}, {audit_fragments})
             """
 
@@ -138,15 +137,15 @@ class OracleClient(DBClient):
     def get_schema(self, fq_table: str) -> pl.DataFrame:
         schema, table_name = fq_table.split(".")
         query = f"""
-            SELECT 
-                column_name, 
-                data_type, 
+            SELECT
+                column_name,
+                data_type,
                 nullable,
                 data_length,
                 data_precision,
                 data_scale
             FROM all_tab_columns
-            WHERE owner = UPPER('{schema}') 
+            WHERE owner = UPPER('{schema}')
             AND table_name = UPPER('{table_name}')
             ORDER BY column_id;
         """

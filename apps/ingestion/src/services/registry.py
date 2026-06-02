@@ -6,7 +6,7 @@ from typing import Any, ClassVar
 
 from apps.ingestion.src.utils.constants import DISKCACHE_FILE_PATH
 from libs.cache.base import KeyValueCache
-from libs.cache.utils import get_cache
+from libs.cache.factory import get_cache
 from libs.resilience.circuit_breaker import (
     CircuitBreaker,
     CircuitBreakerState,
@@ -15,9 +15,19 @@ from libs.resilience.circuit_breaker import (
 from loguru import logger
 
 LOG = logger
-REGISTRY_CACHE_NAMESPACE = 'svc'
+REGISTRY_CACHE_NAMESPACE = "svc"
+
 
 class ServiceRegistry:
+    """Global registry for tracking the health and status of external services.
+
+    Decision: Shared State Mesh.
+    We use a Key-Value cache (typically DiskCache) to maintain a consistent
+    view of service health across all distributed Ray workers. This allows
+    a failure detected by one worker to "trip" the circuit breaker for all
+    others, preventing unnecessary connection attempts to unreachable hosts.
+    """
+
     _NS: ClassVar[str] = REGISTRY_CACHE_NAMESPACE
     _cache: ClassVar[KeyValueCache | None] = None
     _signal_path: ClassVar[Path | None] = None
@@ -25,15 +35,22 @@ class ServiceRegistry:
 
     @classmethod
     def configure(
-        cls, workspace_dir: Any, cache_config: dict[str, Any] | None = None
+        cls, workspace_dir: Path, cache_config: dict[str, Any] | None = None
     ) -> None:
-        """
-        Must be called once at startup (e.g., in Worker.__init__) before any
-        service calls are made. Points the shared diskcache at the correct path.
+        """Initializes the registry and sets the global signal path.
+
+        Args:
+            workspace_dir: The root directory for task state and signals.
+            cache_config: Optional configuration for the KeyValueCache backend.
+
+        Decision: Centralized Initialization.
+        This must be called once at process startup. By pointing to a shared
+        filesystem path, we ensure that the local DiskCache instance used by
+        the Orchestrator is the same one used by remote Ray workers.
         """
         if cls._cache is None:
-            # Initialize signal path for automated .source_down markers
-            cls._signal_path = Path(workspace_dir) / "signals"
+            # Initialize signal path for automated .outage markers
+            cls._signal_path = workspace_dir / "signals"
 
             # Use the utility factory to get a normalized cache provider
             config = cache_config or {
@@ -44,6 +61,14 @@ class ServiceRegistry:
 
     @classmethod
     def _get_cache(cls) -> KeyValueCache:
+        """Internal helper to retrieve the active cache instance.
+
+        Returns:
+            KeyValueCache: The configured cache backend.
+
+        Raises:
+            RuntimeError: If the registry has not been configured.
+        """
         if cls._cache is None:
             raise RuntimeError(
                 "ServiceRegistry has not been configured. "
@@ -53,21 +78,42 @@ class ServiceRegistry:
 
     @classmethod
     def get_status(cls, name: str) -> str:
+        """Retrieves the current status of a service from the shared cache.
+
+        Args:
+            name: The unique identifier of the service.
+
+        Returns:
+            str: The service status (e.g., 'CLOSED', 'OPEN', 'HALF_OPEN').
+        """
         return str(cls._get_cache().get(f"{cls._NS}:status:{name}", "CLOSED"))
 
     @classmethod
     def is_healthy(cls, name: str) -> bool:
-        """Checks if the service is CLOSED and no .down signal exists."""
+        """Checks if a service is healthy (Circuit Breaker is CLOSED).
+
+        Args:
+            name: The service name.
+
+        Returns:
+            bool: True if the service status is 'CLOSED', False otherwise.
+        """
         return cls.get_status(name) == "CLOSED"
 
     @classmethod
     def probe(cls, name: str, probe_fn: Callable[[], bool]) -> bool:
-        """
-        Attempts to verify if a service is back online.
-        If successful, resets the circuit breaker.
+        """Attempts to verify if a service is back online.
 
-        Use this in the Orchestrator or Janitor to verify recovery
-        before re-queuing blocked tasks.
+        Args:
+            name: The service name.
+            probe_fn: A callable that returns True if the service is reachable.
+
+        Returns:
+            bool: True if the probe succeeded and metrics were reset.
+
+        Decision: Active Recovery.
+        Instead of waiting for a passive TTL to expire, we allow the system
+        to actively verify recovery, reducing 'Time-to-Resume' for blocked jobs.
         """
         try:
             if probe_fn():
@@ -80,40 +126,76 @@ class ServiceRegistry:
 
     @classmethod
     def update_status(cls, name: str, status: str) -> None:
+        """Updates the global service status and manages physical signal files.
+
+        Args:
+            name: The service name.
+            status: The new status string.
+
+        Decision: Observability Markers.
+        When a service trips to 'OPEN', we drop a physical .outage file. This
+        allows DevOps engineers to see system health via a simple 'ls' command.
+        """
         cls._get_cache().set(f"{cls._NS}:status:{name}", status, expire=3600)
 
-        # Automatically manage the {service_name}.source_down signal file
+        # Automatically manage the {service_name}.outage signal file
         if cls._signal_path:
-            signal_file = cls._signal_path / f"{name.lower()}.source_down"
-            if status == "OPEN":
+            signal_file = cls._signal_path / f"{name.lower()}.outage"
+            if status == CircuitBreakerState.OPEN:
                 signal_file.touch(exist_ok=True)
-            elif status == "CLOSED":
+            elif status == CircuitBreakerState.CLOSED:
                 signal_file.unlink(missing_ok=True)
 
     @classmethod
     def get_last_failure_time(cls, name: str) -> float:
+        """Retrieves the timestamp of the last recorded failure.
+
+        Args:
+            name: The service name.
+
+        Returns:
+            float: Unix timestamp of the last failure.
+        """
         val = cls._get_cache().get(f"{cls._NS}:last_fail:{name}") or 0
         return float(val) if val is not None else 0.0
 
     @classmethod
     def set_last_failure_time(cls, name: str, timestamp: float) -> None:
-        cls._get_cache().set(f"{cls._NS}:last_fail:{name}", timestamp)
+        """Sets the global last failure timestamp for a service.
 
-    # @classmethod
-    # def get_retry_attempts(cls, name: str) -> int:
-    #     """Tracks consecutive recovery failures for exponential backoff."""
-    #     return int(cls._get_cache().get(f"retries:{name}", 0))
+        Args:
+            name: The service name.
+            timestamp: The Unix timestamp to record.
+        """
+        cls._get_cache().set(f"{cls._NS}:last_fail:{name}", timestamp)
 
     @classmethod
     def get_failure_count(cls, name: str) -> int:
-        """Retrieves the current consecutive failure count for a service."""
+        """Retrieves the current consecutive failure count for a service.
+
+        Args:
+            name: The service name.
+
+        Returns:
+            int: The number of recent failures.
+        """
         return int(cls._get_cache().get(f"{cls._NS}:fails:{name}", 0))
 
     @classmethod
     def increment_failure(cls, name: str, window_seconds: int = 5) -> int:
-        """
-        Increments and returns the failure count atomically.
-        Dampens increments: multiple failures within the window count as one.
+        """Increments and returns the failure count atomically.
+
+        Args:
+            name: The service name.
+            window_seconds: Duration to treat multiple failures as one event.
+
+        Returns:
+            int: The new total failure count.
+
+        Decision: Error Dampening (Debounce).
+        To prevent a 'Thundering Herd' of workers from instantly tripping
+        a breaker, we ignore increments that occur within a small temporal
+        window of the last reported error.
         """
         now = time.time()
         cache = cls._get_cache()
@@ -151,7 +233,15 @@ class ServiceRegistry:
 
     @classmethod
     def reset(cls, name: str) -> None:
-        """Clears all failure metrics upon a successful call."""
+        """Clears all failure metrics for a service.
+
+        Args:
+            name: The service name.
+
+        Decision: Idempotency.
+        We perform a bulk deletion of all metadata keys to ensure a clean
+        state transition back to 'CLOSED'.
+        """
         cache = cls._get_cache()
         with cache.transact():
             # Check if it was previously open to avoid log spam
@@ -174,30 +264,21 @@ class ServiceRegistry:
 def protect_service(
     breaker: CircuitBreaker,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """
-    Enhanced decorator that uses the CircuitBreaker logic
-    backed by the global ServiceRegistry.
+    """Decorator for synchronizing local breakers with the global registry.
+
+    Args:
+        breaker: A CircuitBreaker instance.
+
+    Returns:
+        Callable: A decorator for service methods.
+
+    Decision: Transparent Resilience.
+    By wrapping service methods, we ensure that every connection attempt
+    is preceded by a health check and followed by a state sync, without
+    requiring the service developer to manually manage the registry.
     """
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-        """
-        Decorator that wraps a function with CircuitBreaker logic
-        backed by the global ServiceRegistry.
-
-        It fetches the global state from the ServiceRegistry,
-        syncs the breaker instance with the global state,
-        checks for a tripped breaker before calling the function,
-        executes the function, and then updates the global state
-        based on the breaker's state.
-
-        If the breaker is tripped, it will raise a CircuitBreakerTripped
-        exception. If the function execution raises an exception,
-        it will update the global state accordingly.
-
-        :param func: The function to be wrapped
-        :return: The wrapped function
-        """
-
         @functools.wraps(func)
         def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
             # 1. FETCH GLOBAL STATE

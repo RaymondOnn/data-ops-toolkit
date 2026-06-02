@@ -7,7 +7,6 @@ import msgspec
 import polars as pl
 import ray
 from apps.ingestion.src.services.base import Source
-from apps.ingestion.src.services.database import DatabaseSource
 from loguru import logger
 
 from .base import Reader, ReaderContext
@@ -15,11 +14,18 @@ from .factory import ReaderFactory
 
 LOG = logger
 
+DEFAULT_COMPRESSION = "snappy"
+BATCH_FORMAT_ARROW = "pyarrow"
+PART_FILENAME_PATTERN = "part_{i:04d}.parquet"
+
 
 class DataReader(Reader):
-    """
-    Base Strategy class.
-    Subclasses implement _get_data_generator to handle source-specific logic.
+    """Base strategy for distributed data acquisition via Ray.
+
+    Decision: Worker Isolation.
+    By serializing the configuration and recreating service handles on
+    Ray workers, we ensure that a failure in one worker (OOM) does not
+    leak memory or state back to the Orchestrator.
     """
 
     def __init__(self) -> None:
@@ -30,7 +36,12 @@ class DataReader(Reader):
     def fetch(
         self, service: Source, context: ReaderContext, target_folder: Path
     ) -> Generator[dict[str, Any], None, None]:
-        """Emits metadata for each file artifact as it is created."""
+        """Emits metadata for each file artifact as it is persisted.
+
+        Decision: Continuous Checkpointing.
+        By yielding metadata incrementally, the Stage can update the
+        manifest in real-time, providing observability into long-running jobs.
+        """
         df_generator = self._get_ray_generator(service, context)
         yield from self.to_parquet(df_generator, target_folder)
 
@@ -39,7 +50,12 @@ class DataReader(Reader):
         service: Source,
         context: ReaderContext,
     ) -> Generator[pl.DataFrame, None, None]:
-        # 1. Slice the work into parts (e.g., ORA_HASH queries)
+        """Initializes the Ray dataset and yields batches back to the caller.
+
+        Decision: Backpressure Management.
+        Ray iter_batches handles flow control; data is only pulled from
+        workers as the local disk-writer (to_parquet) is ready to consume it.
+        """
         work_units = self.get_work_units(service, context)
 
         # If units contain file lists (Standard for StorageSource),
@@ -144,7 +160,7 @@ class DataReader(Reader):
         target_batch_size = context.options.get("batch_size")
 
         for batch in ray_dataset.iter_batches(
-            batch_format="pyarrow", batch_size=target_batch_size
+            batch_format=BATCH_FORMAT_ARROW, batch_size=target_batch_size
         ):
             res = pl.from_arrow(batch)
             # Ensure we yield a DataFrame to satisfy the Generator type hint
@@ -153,9 +169,16 @@ class DataReader(Reader):
     def to_parquet(
         self, generator: Generator[pl.DataFrame, None, None], destination: Path
     ) -> Generator[dict[str, Any], None, None]:
-        """
-        Consumes the stream and saves each chunk as a unique parquet file.
-        Yields metadata immediately for real-time progress tracking.
+        """Consumes the stream and saves each chunk as a unique parquet file.
+
+        Args:
+            generator: A stream of Polars DataFrames from Ray workers.
+            destination: Physical directory to save Parquet artifacts.
+
+        Decision: Zero-Copy Format.
+        We write to Parquet immediately after extraction to ensure subsequent
+        stages (Transform/Write) benefit from columnar compression and
+        predicate pushdown.
         """
         destination.mkdir(parents=True, exist_ok=True)
 
@@ -168,52 +191,109 @@ class DataReader(Reader):
             # and use .height for unambiguous row counting
             row_count = df.height
 
-            file_path = destination / f"part_{i:04d}.parquet"
+            file_path = destination / PART_FILENAME_PATTERN.format(i=i)
 
             # Write with snappy compression for a good balance of speed/size
-            df.write_parquet(file_path, compression="snappy")
+            df.write_parquet(file_path, compression=DEFAULT_COMPRESSION)
             LOG.info("Exported parquet chunk", path=str(file_path), rows=row_count)
 
             # Yield metadata back to the Stage for checkpointing
             yield {"path": file_path, "rows": row_count, "schema": df.schema}
 
     @abstractmethod
-    def get_work_units(self, client: Any, context: ReaderContext) -> set[Any]:
+    def get_work_units(self, service: Source, context: ReaderContext) -> set[Any]:
+        """Calculates parallel work units for distributed execution.
+
+        Args:
+            service: The data source service instance.
+            context: The reader context containing ingestion parameters.
+
+        Returns:
+            set[Any]: A set of work unit definitions.
+        """
         pass
 
 
 @ReaderFactory.register("flat_file")
 class FileDataReader(DataReader):
-    def get_work_units(self, client: Any, context: ReaderContext) -> set[Any]:
-        source_path = context.source_identifier or context.options.get(
-            "file_pattern", ""
-        )
-        print("source_path", source_path)
-        if not source_path:
-            raise ValueError(
-                "source_identifier or file_pattern is required for FileDataReader"
-            )
+    def _resolve_target_params(
+        self, target: str, file_pattern: str | dict[str, str] | None
+    ) -> tuple[str, str | None]:
+        """Normalizes structured path configurations into physical parameters.
 
-        return client.get_work_units(source_path, context.num_workers)
+        Args:
+            target: The primary path or identifier.
+            file_pattern: Optional glob string or structured dict.
+
+        Returns:
+            tuple: (physical_target_path, optional_archive_container_path).
+
+        Decision: Strategy-Side Normalization.
+        The interpretation of `{archive, glob}` is a business rule of the
+        ingestion app. Moving this to the Strategy layer keeps our
+        generic Storage Services focused strictly on filesystem operations.
+        """
+        archive_path = None
+        target_path = target
+
+        if isinstance(file_pattern, dict):
+            archive_path = file_pattern.get("archive")
+            target_path = file_pattern.get("glob", target_path)
+        elif file_pattern and not target:
+            target_path = file_pattern
+
+        return target_path, archive_path
+
+    def get_work_units(self, service: Source, context: ReaderContext) -> set[Any]:
+        """Resolves parallel work units by normalizing ingestion parameters.
+
+        Decision: Pre-flight Resolution.
+        We resolve the physical path and archive container here. This ensures
+        that the Service layer (StorageSource) receives explicit parameters
+        rather than having to guess the structure of 'options'.
+        """
+        target_path, archive_path = self._resolve_target_params(
+            target=context.source_identifier or "",
+            file_pattern=context.options.get("file_pattern"),
+        )
+
+        if not target_path and not archive_path:
+            raise ValueError("A source identifier or file_pattern is required.")
+
+        return service.parallelize(
+            target=target_path,
+            num_workers=context.num_workers,
+            filter_condition=context.options.get("filter_condition"),
+            archive_path=archive_path,
+        )
 
 
 @ReaderFactory.register("database")
 class DBDataReader(DataReader):
-    def __init__(self) -> None:
-        super().__init__()
+    def get_work_units(self, service: Source, context: ReaderContext) -> set[Any]:
+        """Resolves the database work units via the service layer.
 
-    def get_work_units(
-        self, client: DatabaseSource, context: ReaderContext
-    ) -> set[Any]:
-        # Uses ORA_HASH for Oracle or ctid for Postgres
-        # to generate N unique queries for the 50M rows
+        Args:
+            service: The DatabaseSource instance.
+            context: The reader context containing target table and workers.
+
+        Decision: Delegated Optimization.
+        The optimization logic based on cell-count is implemented in the
+        Service Layer. This allows the Service to decide between standard
+        partitioning or intra-table slicing based on the table's width.
+        """
         if not context.source_identifier:
             raise ValueError("target_table is required for DBDataReader")
 
         condition = context.options.get("filter_condition") or context.options.get(
             "filter_sql"
         )
-        units = client.get_work_units(
-            context.source_identifier, context.num_workers, condition
+        # Passing kwargs allows the Service to access 'schema_items'
+        # for cell-count calculations if needed.
+        units = service.parallelize(
+            context.source_identifier,
+            context.num_workers,
+            condition,
+            schema_items=context.schema_items,
         )
         return {str(unit) for unit in units}

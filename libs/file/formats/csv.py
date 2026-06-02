@@ -11,12 +11,38 @@ LOG = logging.getLogger(__name__)
 
 
 class CSVHandler(FormatHandler):
+    """
+    Handles reading and writing data in CSV (Comma Separated Values) format.
+
+    This handler supports various CSV-like files, including TSV and generic
+    text files. It provides self-healing capabilities like BOM stripping
+    and encoding normalization.
+    """
+
     @property
     def is_splittable(self) -> bool:
+        """
+        Indicates that CSV is a splittable format.
+
+        Splittable formats allow for efficient parallel processing and
+        lazy metadata reading.
+
+        Returns:
+            bool: Always True for CSV.
+        """
         return True
 
     def discover(self, input_path: Path | str, pattern: str | None = None) -> set[str]:
-        """Expands a path into a list of CSV/Text files."""
+        """
+        Expands a path into a list of CSV/Text files.
+
+        Args:
+            input_path: The base path or directory to search.
+            pattern: Optional glob pattern to filter discovered files.
+
+        Returns:
+            set[str]: A set of fully qualified paths to discovered files.
+        """
         # Standardize the path by stripping the protocol if present
         # so fsspec doesn't treat it as relative to CWD.
         path_str = self.fs._strip_protocol(str(input_path))
@@ -47,7 +73,20 @@ class CSVHandler(FormatHandler):
         }
 
     def read(self, input_path: Path | str, **kwargs: Any) -> io.BytesIO:
-        """Strips BOM and handles encoding-safe reading."""
+        """
+        Reads raw bytes from the given path into an in-memory buffer.
+
+        This method includes self-healing logic to strip Byte Order Marks (BOM)
+        and normalize encoding to UTF-8, ensuring consistent data processing.
+
+        Args:
+            input_path: The path to the file(s) to read.
+            **kwargs: Additional options, including 'encoding' (default 'utf-8').
+
+        Returns:
+            io.BytesIO: An in-memory buffer containing the combined,
+                sanitized bytes of the discovered files.
+        """
         encoding = kwargs.get("encoding", "utf-8")
         paths = self.discover(input_path)
         if not paths:
@@ -75,7 +114,21 @@ class CSVHandler(FormatHandler):
         return io.BytesIO(combined)
 
     def to_df(self, input_path: Path | str, **kwargs: Any) -> pl.LazyFrame:
-        """Reads one or more CSV files into a unified LazyFrame."""
+        """
+        Reads one or more CSV files into a unified Polars LazyFrame.
+
+        Optimizes reading for large files by using `pl.scan_csv` for files
+        exceeding a certain size threshold, otherwise uses `pl.read_csv`
+        with self-healing for smaller files.
+
+        Args:
+            input_path: The path to the file(s) or directory to read.
+            **kwargs: Additional format-specific reading options,
+                including 'encoding' and 'force_repair'.
+
+        Returns:
+            pl.LazyFrame: A Polars LazyFrame representing the combined data.
+        """
         paths = self.discover(input_path)
         if not paths:
             LOG.warning(f"No files discovered for path: {input_path}")
@@ -103,13 +156,30 @@ class CSVHandler(FormatHandler):
         return pl.concat(lfs) if lfs else pl.LazyFrame()
 
     def from_df(self, df: pl.LazyFrame | pl.DataFrame, output_path: Path | str) -> None:
-        """Streaming write for 50M rows."""
+        """
+        Writes a Polars DataFrame or LazyFrame to the specified output path
+        in CSV format.
+
+        Utilizes Polars' streaming write capabilities for LazyFrames
+        (`sink_csv`) and direct write for DataFrames (`write_csv`).
+
+        Args:
+            df: The Polars DataFrame or LazyFrame to write.
+            output_path: The destination path for the output CSV file.
+        """
         if isinstance(df, pl.LazyFrame):
             df.sink_csv(output_path)
         else:
             df.write_csv(output_path)
 
     def write(self, data: bytes, output_path: Path | str) -> None:
+        """
+        Writes raw bytes directly to the specified output path.
+
+        Args:
+            data: The bytes object to write.
+            output_path: The destination path for the file.
+        """
         with self.fs.open(output_path, "wb") as f:
             # Cast f to an IO[bytes] so Ty knows .write() accepts bytes
             cast("IO[bytes]", f).write(data)

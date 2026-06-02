@@ -11,6 +11,15 @@ _MASK_STRINGS: set[str] = set()
 
 
 def _mask_sensitive_data(record):
+    """Patch function for Loguru to redact sensitive strings from log messages.
+
+    Args:
+        record: The Loguru record dictionary containing the message.
+
+    Decision: Post-Processing Redaction.
+    By using a patcher, we ensure that secrets are masked at the very last
+    moment before writing to any sink, regardless of which library logged them.
+    """
     msg = record["message"]
     for secret in _MASK_STRINGS:
         if secret and secret in msg:
@@ -19,9 +28,21 @@ def _mask_sensitive_data(record):
 
 
 def create_console_formatter(highlight_keys: set[str]) -> Callable[[Any], str]:
-    """
-    Creates a Loguru formatter that highlights specific keys in the prefix
-    and appends others as context extras.
+    """Creates a Loguru formatter for high-visibility CLI output.
+
+    Args:
+        highlight_keys: Keys to prominently display in the log prefix.
+
+    Returns:
+        Callable[[Any], str]: A formatter function compatible with Loguru.
+
+    Decision: Log Skimming.
+    To help SREs identify issues in high-concurrency environments, we move
+    pivotal keys (like run_id) into a magenta prefix.
+
+    Decision: Query Truncation.
+    SQL queries can be massive. We truncate them to 100 characters in the
+    console to prevent "Wall of Text" errors while keeping full SQL in JSONL.
     """
 
     def formatter(record: Any) -> str:
@@ -29,7 +50,12 @@ def create_console_formatter(highlight_keys: set[str]) -> Callable[[Any], str]:
         name = record["name"].replace("<", "\\<").replace(">", "\\>")
         function = record["function"].replace("<", "\\<").replace(">", "\\>")
 
-        fmt = f"<green>{{time:YYYY-MM-DD HH:mm:ss}}</green> | <level>{{level: <8}}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{{line}}</cyan> - <level>{{message}}</level>"
+        fmt = (
+            f"<green>{{time:YYYY-MM-DD HH:mm:ss}}</green> | "
+            f"<level>{{level: <8}}</level> | "
+            f"<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{{line}}</cyan> - "
+            f"<level>{{message}}</level>"
+        )
 
         prefixes = []
         extras_list = []
@@ -68,12 +94,16 @@ def create_console_formatter(highlight_keys: set[str]) -> Callable[[Any], str]:
 
 
 class InterceptHandler(logging.Handler):
-    """
-    Standard python logging handler interceptor to redirect
-    library logs (apscheduler, ray, etc) to loguru.
+    """Interceptor to redirect standard logging to Loguru.
+
+    Decision: Unified Stream.
+    External libraries (Ray, APScheduler) use the standard 'logging' module.
+    We intercept these to provide a single, searchable JSONL log for the
+    entire application runtime.
     """
 
     def emit(self, record):
+        """Intercepts and redirects a standard LogRecord."""
         # Get corresponding Loguru level if it exists
         try:
             level = logger.level(record.levelname).name
@@ -107,6 +137,20 @@ def setup_logging(
     enqueue: bool = False,
     highlight_keys: set[str] | None = None,
 ):
+    """Initializes the global logging system with dual sinks.
+
+    Args:
+        log_dir: Directory where log files will be stored.
+        is_prod: If True, optimizes sinks for production environments.
+        is_debug: If True, enables verbose diagnostics.
+        filename: The name of the primary JSONL log file.
+        enqueue: If True, uses non-blocking background logging.
+        highlight_keys: Keys to extract from 'extra' into the log prefix.
+
+    Decision: JSONL for Files.
+    Always use serialize=True for file sinks to ensure logs are machine-readable
+    by ClickHouse or ELK stacks.
+    """
     # Ensure the log directory exists before initializing handlers
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / filename
@@ -162,17 +206,27 @@ def setup_logging(
 def register_log_masking(secrets: str | list[str]) -> None:
     """
     Public API to add new sensitive values to the global redact list.
-    """
-    if isinstance(secrets, str):
-        secrets = [secrets]
 
-    for s in secrets:
-        if s:
-            _MASK_STRINGS.add(str(s))
+    This ensures that any subsequent log messages containing these strings
+    will have them replaced with a mask token.
+
+    Args:
+        secrets: A single string or a list of strings to protect.
+    """
+    # Decision: Concise Set Update.
+    # Normalizing to a list and using update() removes the need for manual loops.
+    secret_list = [secrets] if isinstance(secrets, str) else secrets
+    _MASK_STRINGS.update({str(s) for s in secret_list if s})
 
 
 def is_masked(secret: str) -> bool:
     """
     Returns True if the given string is registered in the global redact list.
+
+    Args:
+        secret: The string to check against the mask registry.
+
+    Returns:
+        bool: True if the string is currently protected, False otherwise.
     """
     return secret in _MASK_STRINGS

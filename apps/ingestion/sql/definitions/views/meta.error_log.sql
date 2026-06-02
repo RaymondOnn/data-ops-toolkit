@@ -11,10 +11,10 @@ WITH run_summaries AS (
         argMax(FINAL_MANIFEST, multiIf(JOB_STATUS = 'FAILED', LAST_UPDATED_AT_TS_LC, NULL)) AS ERROR_DETAILS
     FROM META.EXECUTION_LOG
     -- Include all identifying columns in the GROUP BY to make them available in the scope
-    GROUP BY 
-        RUN_ID, 
-        JOB_ID, 
-        DATASET_ID, 
+    GROUP BY
+        RUN_ID,
+        JOB_ID,
+        DATASET_ID,
         PARTITION_DATE
 )
 SELECT

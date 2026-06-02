@@ -35,12 +35,14 @@ def test_write_pre_flight_missing_marker(write_stage, mock_task, mock_sink):
     THEN it should raise a RewindTask to the TRANSFORM stage
     """
     # folder / 'transform' does not exist in tmp_path
-    with patch(
-        "apps.ingestion.src.services.factory.ServiceFactory.get_sink",
-        return_value=mock_sink,
+    with (
+        patch(
+            "apps.ingestion.src.services.factory.ServiceFactory.get_sink",
+            return_value=mock_sink,
+        ),
+        pytest.raises(RewindTask, match="Transformation data marker missing"),
     ):
-        with pytest.raises(RewindTask, match="Transformation data marker missing"):
-            write_stage.pre_flight(mock_task)
+        write_stage.pre_flight(mock_task)
 
 
 def test_write_pre_flight_empty_artifacts(write_stage, mock_task, mock_sink):
@@ -53,12 +55,14 @@ def test_write_pre_flight_empty_artifacts(write_stage, mock_task, mock_sink):
     transform_dir.mkdir()
     mock_task.manifest.transform.output_row_count = 100
 
-    with patch(
-        "apps.ingestion.src.services.factory.ServiceFactory.get_sink",
-        return_value=mock_sink,
+    with (
+        patch(
+            "apps.ingestion.src.services.factory.ServiceFactory.get_sink",
+            return_value=mock_sink,
+        ),
+        pytest.raises(RewindTask, match="Transformed physical artifacts missing"),
     ):
-        with pytest.raises(RewindTask, match="Transformed physical artifacts missing"):
-            write_stage.pre_flight(mock_task)
+        write_stage.pre_flight(mock_task)
 
 
 def test_write_execute_success(write_stage, mock_task):
@@ -93,7 +97,7 @@ def test_write_execute_success(write_stage, mock_task):
         mock_task.finalize.assert_called_once()
 
         # Verify payload contains staging info
-        args, kwargs = mock_task.finalize.call_args
+        _, kwargs = mock_task.finalize.call_args
         results = kwargs["results"]
         assert results["staging_artifact"] == "stg_table_123"
         assert results["rows_inserted"] == 10
@@ -119,5 +123,5 @@ def test_write_execute_failure(write_stage, mock_task):
             write_stage.execute(mock_task)
 
         # Verify finalize was called with the exception to update manifest error block
-        args, kwargs = mock_task.finalize.call_args
+        _, kwargs = mock_task.finalize.call_args
         assert isinstance(kwargs["exception"], RuntimeError)

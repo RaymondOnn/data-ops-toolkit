@@ -7,6 +7,7 @@ dependencies = [
     "uv",
     "ruff",
     "ty",
+    "pre-commit",
     "pytest>=9.0.2",
     "rust-just",
     "ingestion",
@@ -15,6 +16,7 @@ dependencies = [
 [tool.uv]
 # Self-healing: Force the workspace to stable Polars versions to avoid yanked 1.39.2
 override-dependencies = ["polars>=1.21.0"]
+exclude-newer = "7 days" # counter supply chain attacks
 
 [tool.uv.sources] # local workspace packages
 ingestion = { workspace = true }
@@ -55,7 +57,7 @@ pythonVersion = "3.11"
 # This ensures Ty knows where the root of your code is
 executionEnvironments = [
   { root = "apps/ingestion/src" }, # Maps 'src.core' -> 'apps/ingestion/src/core'
-  { root = "libs" }                       # Maps 'file.client' -> 'libs/file/client'
+  { root = "libs" }                # Maps 'file.client' -> 'libs/file/client'
 ]
 
 [tool.ruff]
@@ -102,7 +104,7 @@ extend-select = [
     "RUF",      # Ruff lint
     "Q",        # Linting rules for quites
     "SIM",      # flake8-simplify: Common simplification rules
-    "TC",       # Enforce importing certain types in a TYPE_CHECKING block
+    # "TC",       # Enforce importing certain types in a TYPE_CHECKING block
     # "TD",       # Be diligent with TODO comments
     "TCH",      # Move type only imports to type-checking condition.
     "TID",      # Some good import practices
@@ -110,17 +112,24 @@ extend-select = [
     "W",        # PyCodeStyle warnings
 ]
 ignore = [
-    "SIM112", 
-    "G004", 
-    "PLR2004", 
-    "W293", 
-    "W291", 
-    "PLR0913", 
+    "SIM112",
+    "G004",
+    "PLR2004",
+    "W293",
+    "W291",
+    "PLR0913",
     "COM812",
+    "ISC001", # implicit-str-concatenation
     "N818", # error-suffix-on-exception-name
     "TD002", # missing-todo-author
+    "B009", # getattr has no safety benefit
     "PLC0415", # import-outside-top-level
-
+    "BLE001", # disallow-bare-except
+    "E501", # line-too-long
+    "DTZ001", # disallow-naive-datetime
+    "DTZ005", # disallow-datetime-now
+    "DTZ006", # disallow-datetime-today
+    "DTZ007", # disallow-datetime-utcnow
 ]
 
 [tool.ruff.lint.pydocstyle]

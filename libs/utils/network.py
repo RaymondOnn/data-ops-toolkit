@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import psutil
 from libs.utils.dates import get_current_timestamp
-from pypac import resolver
+from pypac.api import collect_pac_urls
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -21,8 +21,7 @@ LOG = logging.getLogger(__name__)
 
 
 class NetworkDoctor:
-    """
-    A comprehensive network diagnostic suite designed for unprivileged user spaces.
+    """A comprehensive network diagnostic suite designed for unprivileged user spaces.
     Diagnoses proxy issues, CNTLM drops, firewalls, DNS breaks, and MTU limits.
     """
 
@@ -34,6 +33,15 @@ class NetworkDoctor:
         vpn_prefixes: list[str] | None = None,
         debug_traffic: bool = False,
     ):
+        """Initializes the NetworkDoctor with target and environment details.
+
+        Args:
+            target_host: The hostname or IP of the destination service.
+            target_port: The TCP port of the destination service.
+            proxy_url: The URL of the local proxy (e.g., CNTLM).
+            vpn_prefixes: A list of IP prefixes indicating corporate VPN ranges.
+            debug_traffic: If True, enables deep traffic inspection via httptap.
+        """
         self.target_host = target_host
         self.target_port = target_port
         self.proxy_url = proxy_url
@@ -52,7 +60,8 @@ class NetworkDoctor:
             self.proxy_port = int(clean_url.split(":")[-1])
         except Exception as e:
             LOG.warning(
-                "Could not parse proxy URL format '%s'. Defaulting to standard loopback. Error: %s",
+                "Could not parse proxy URL format '%s'. "
+                "Defaulting to standard loopback. Error: %s",
                 proxy_url,
                 e,
             )
@@ -60,7 +69,11 @@ class NetworkDoctor:
             self.proxy_port = 3128
 
     def run_diagnostics(self) -> bool:
-        """Runs the sequential health evaluation pipeline."""
+        """Runs the sequential health evaluation pipeline.
+
+        Returns:
+            bool: True if all critical diagnostic checks passed, False otherwise.
+        """
         self._results = []
         LOG.info("=" * 60)
         LOG.info("🚀 STARTING USER-SPACE NETWORK ENVIRONMENT CHECK")
@@ -120,7 +133,11 @@ class NetworkDoctor:
         return all_passed
 
     def get_report(self) -> dict[str, Any]:
-        """Returns the diagnostic results as a dictionary for reporting."""
+        """Returns the diagnostic results as a dictionary for reporting.
+
+        Returns:
+            dict[str, Any]: A serialized report of all diagnostic outcomes.
+        """
         return {
             "metadata": {
                 "target_host": self.target_host,
@@ -137,7 +154,17 @@ class NetworkDoctor:
         }
 
     def export_json(self, output_path: Path | str) -> Path:
-        """Exports the diagnostic report to a JSON file."""
+        """Exports the diagnostic report to a JSON file.
+
+        Args:
+            output_path: The filesystem path where the JSON report is saved.
+
+        Returns:
+            Path: The resolved path to the exported JSON file.
+
+        Raises:
+            Exception: If the file cannot be written.
+        """
         report = self.get_report()
         path = Path(output_path)
         try:
@@ -150,7 +177,12 @@ class NetworkDoctor:
             raise
 
     def check_vpn_presence(self) -> tuple[bool, str]:
-        """Verifies if the local machine is assigned an IP within expected corporate ranges."""
+        """Verifies if the machine has an IP within corporate ranges.
+
+        Returns:
+            tuple[bool, str]: A success flag and a description of the
+                detected network interface state.
+        """
         interfaces = psutil.net_if_addrs()
         found_ips = []
 
@@ -172,7 +204,8 @@ class NetworkDoctor:
             if any(ip.startswith(prefix) for prefix in self.vpn_prefixes):
                 return (
                     True,
-                    f"VPN connectivity verified: Local IP {ip} is within a recognized corporate range.",
+                    f"VPN connectivity verified: "
+                    f"Local IP {ip} is within a recognized corporate range.",
                 )
 
         return (
@@ -182,8 +215,7 @@ class NetworkDoctor:
         )
 
     def trace_route(self) -> bool:
-        """
-        Executes a system-level traceroute to visualize the network path.
+        """Executes a system-level traceroute to visualize the network path.
         Provides a professional interpretation of the hop sequence.
         """
         is_win = platform.system() == "Windows"
@@ -204,8 +236,12 @@ class NetworkDoctor:
 
             hop_count = 0
             if process.stdout:
-                for line in process.stdout:
-                    line = line.strip()
+                # Decision: Variable Shadowing Prevention.
+                # We use 'raw_line' for iteration to avoid overwriting the
+                # loop variable with the assignment target, ensuring
+                # compatibility with strict linting rules.
+                for raw_line in process.stdout:
+                    line = raw_line.strip()
                     if not line:
                         continue
 
@@ -249,9 +285,11 @@ class NetworkDoctor:
             return False
 
     def check_dns_servers(self) -> tuple[bool, str]:
-        """
-        Verifies the system's configured DNS servers, especially for
-        corporate environments.
+        """Verifies the system's configured DNS servers.
+
+        Returns:
+            tuple[bool, str]: Success flag and description of DNS status,
+                checking specifically for corporate-aligned resolvers.
         """
         try:
             if platform.system() == "Windows":
@@ -301,7 +339,12 @@ class NetworkDoctor:
             return False, f"Failed to retrieve DNS server configuration: {e!s}"
 
     def check_environment_variables(self) -> tuple[bool, str]:
-        """Validates case symmetry across system routing environment hooks."""
+        """Validates case symmetry across system routing environment hooks.
+
+        Returns:
+            tuple[bool, str]: Success flag and description of potential
+                casing conflicts between lower and uppercase proxy variables.
+        """
         standard_keys = ["http_proxy", "https_proxy", "no_proxy"]
         mismatches = []
 
@@ -336,9 +379,14 @@ class NetworkDoctor:
         )
 
     def check_pac_discovery(self) -> tuple[bool, str]:
-        """Detects if a hidden network PAC setup blocks standard socket access lines."""
+        """Detects if a hidden network PAC setup is present.
+
+        Returns:
+            tuple[bool, str]: Success flag and the discovered PAC URL,
+                if applicable.
+        """
         try:
-            pac_url = resolver.get_pac_url()
+            pac_url = collect_pac_urls()
             if pac_url:
                 return (
                     True,
@@ -356,7 +404,12 @@ class NetworkDoctor:
         )
 
     def check_local_cntlm(self) -> tuple[bool, str]:
-        """Validates if the local CNTLM engine is running or completely disabled."""
+        """Validates if the local CNTLM engine is running.
+
+        Returns:
+            tuple[bool, str]: Success flag and description of the
+                responsiveness of the local proxy port.
+        """
         try:
             with socket.create_connection(
                 (self.proxy_host, self.proxy_port), timeout=2.0
@@ -381,12 +434,16 @@ class NetworkDoctor:
             )
 
     def check_proxy_handshake(self) -> tuple[bool, str]:
-        """Validates proxy exit credentials and checks for SSL
-        interception artifacts.
+        """Validates proxy exit credentials and SSL integrity.
+
+        Returns:
+            tuple[bool, str]: Success flag and description of the outbound
+                handshake, including public IP and potential SSL issues.
         """
 
         @contextlib.contextmanager
         def maybe_tap():
+            """Context manager to optionally enable httptap inspection."""
             if self.debug_traffic:
                 try:
                     from httptap import httpx_tap
@@ -441,7 +498,12 @@ class NetworkDoctor:
             return False, f"TCP Handshake failed: {e!s}"
 
     def check_target_firewall(self) -> tuple[bool, str]:
-        """Differentiates DNS resolution glitches from hard firewall drops."""
+        """Differentiates DNS glitches from hard firewall drops.
+
+        Returns:
+            tuple[bool, str]: Success flag and description of the connection
+                attempt to the final target host and port.
+        """
         try:
             with socket.create_connection(
                 (self.target_host, self.target_port), timeout=3.0
@@ -476,8 +538,12 @@ class NetworkDoctor:
             )
 
     def check_mtu_payload(self) -> tuple[bool, str]:
-        """
-        Tests packet fragmentation over user space streams to reveal MTU/VPN limits.
+        """Tests packet fragmentation over user space streams.
+
+        Returns:
+            tuple[bool, str]: Success flag and description of the results
+                after attempting to send a large (4MB) data payload to detect
+                MTU-related fragmentation drops.
         """
         try:
             with socket.create_connection(
@@ -510,7 +576,8 @@ class NetworkDoctor:
 
 # --- EXECUTION DEMO ---
 # if __name__ == "__main__":
-#     # Simulate testing a connection to an external database (e.g. standard ClickHouse native port)
+#     # Simulate testing a connection to an external database
+#     (e.g. standard ClickHouse native port)
 #     # Replace these inputs with your targeted production servers and local setups
 #     doctor = NetworkDoctor(
 #         target_host="clickhouse.production.internal",

@@ -75,12 +75,12 @@ class OracleService(DatabaseSource, DatabaseSink):
             -- Idempotency: Clear the target slice
             DELETE FROM {target_table}
             WHERE {partition_col} = '{partition_val};
-            
-            -- Performance: Use APPEND hint for direct-path insert 
+
+            -- Performance: Use APPEND hint for direct-path insert
             -- (bypasses buffer cache)
-            INSERT /*+ APPEND */ INTO {target_table} 
+            INSERT /*+ APPEND */ INTO {target_table}
             SELECT * FROM {staging_table};
-            
+
             COMMIT;
             EXECUTE IMMEDIATE 'DROP TABLE {staging_table}';
         EXCEPTION WHEN OTHERS THEN
@@ -135,7 +135,7 @@ class OracleService(DatabaseSource, DatabaseSink):
             )
             return False
 
-        col_selection = ", ".join(sorted(list(compare_cols)))
+        col_selection = ", ".join(sorted(compare_cols))
 
         sql = f"""
             SELECT {col_selection} FROM {ref_table}
@@ -148,8 +148,8 @@ class OracleService(DatabaseSource, DatabaseSink):
     def clone(self, reference: str, other: str) -> None:
         # Removed TEMPORARY as regression shadow tables must persist between sessions
         sql = f"""
-            CREATE TABLE {other} AS 
-            SELECT * FROM {reference} 
+            CREATE TABLE {other} AS
+            SELECT * FROM {reference}
             WHERE 1 = 0
         """
         LOG.info("Cloning table structure", source=reference, destination=other)

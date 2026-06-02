@@ -11,15 +11,48 @@ LOG = logging.getLogger(__name__)
 
 
 class SecretProvider(ABC):
+    """Abstract base class for secret management providers."""
+
     @abstractmethod
     def get_secret(self, secret_id: str) -> str:
+        """
+        Retrieves a secret value by its identifier.
+
+        Args:
+            secret_id: The unique identifier for the secret.
+
+        Returns:
+            str: The plaintext secret value.
+        """
+        pass
+
+    @abstractmethod
+    def update_secret(self, secret_id: str, value: Any) -> None:
+        """
+        Updates a secret value in the provider.
+
+        Args:
+            secret_id: The unique identifier for the secret.
+            value: The new value to store. Can be a string or dictionary.
+        """
         pass
 
 
 class LocalSecretProvider(SecretProvider):
-    """For Dev/Test: Reads from a local JSON file with environment fallback."""
+    """
+    Secret provider for development and testing environments.
 
-    def __init__(self, **config: dict[str, Any]) -> None:
+    Supports resolution from a local JSON file with fallback to
+    system environment variables.
+    """
+
+    def __init__(self, **config: Any) -> None:
+        """
+        Initializes the LocalSecretProvider.
+
+        Args:
+            **config: Configuration containing the 'path' to the JSON file.
+        """
         LOG.debug("Initializing LocalSecretProvider", extra={"config": config})
         file_path = str(config.get("path"))
         self.path = Path(file_path) if file_path else None
@@ -27,6 +60,7 @@ class LocalSecretProvider(SecretProvider):
         self._load_secrets()
 
     def _load_secrets(self) -> None:
+        """Internal helper to load secrets from the configured JSON path."""
         if self.path and self.path.exists():
             LOG.info("Loading secrets from local file", extra={"path": str(self.path)})
             with self.path.open() as file:
@@ -38,7 +72,15 @@ class LocalSecretProvider(SecretProvider):
             )
 
     def get_secret(self, secret_id: str) -> str:
-        # Priority: 1. JSON File | 2. Environment Variable | 3. Fallback String
+        """
+        Retrieves a secret based on priority: File > Env > Default.
+
+        Args:
+            secret_id: The key to look up.
+
+        Returns:
+            str: The resolved secret value.
+        """
         val = self._data.get(secret_id)
         if val:
             LOG.debug("Secret resolved from JSON file", extra={"secret_id": secret_id})
@@ -59,6 +101,13 @@ class LocalSecretProvider(SecretProvider):
         return "dev_fallback_value"
 
     def update_secret(self, secret_id: str, value: Any) -> None:
+        """
+        Updates a secret in memory and persists it to the JSON file.
+
+        Args:
+            secret_id: The unique identifier for the secret.
+            value: The value to store.
+        """
         self._data[secret_id] = str(value)
         if self.path:
             with self.path.open("w") as f:
@@ -70,7 +119,10 @@ class AWSSecretProvider(SecretProvider):
 
     def __init__(self, **config) -> None:
         """
-        :param aws_client: An instance of libs.cloud.aws.AWSClient (Singleton)
+        Initializes the AWS Secrets Manager provider.
+
+        Args:
+            **config: Configuration for AWSClient and service-specific overrides.
         """
 
         from libs.cloud.aws import AWSClient, AWSClientConfig
@@ -94,6 +146,15 @@ class AWSSecretProvider(SecretProvider):
         )
 
     def get_secret(self, secret_id: str) -> str:
+        """
+        Fetches a secret string from AWS Secrets Manager.
+
+        Args:
+            secret_id: The AWS SecretId (Name or ARN).
+
+        Returns:
+            str: The SecretString from the AWS response.
+        """
         LOG.debug(
             "Fetching secret from AWS Secrets Manager", extra={"secret_id": secret_id}
         )
@@ -102,17 +163,42 @@ class AWSSecretProvider(SecretProvider):
         return str(response["SecretString"])
 
     def update_secret(self, secret_id: str, value: Any) -> None:
+        """
+        Updates an existing secret value in AWS Secrets Manager.
+
+        Args:
+            secret_id: The AWS SecretId.
+            value: The new content to store (dict or string).
+        """
         str_val = json.dumps(value) if isinstance(value, dict) else str(value)
         self.client.put_secret_value(SecretId=secret_id, SecretString=str_val)
 
 
 def encrypt_local_secret(plaintext, key) -> str:
+    """
+    Helper to encrypt a plaintext string using a Fernet key.
+
+    Args:
+        plaintext: The raw string to encrypt.
+        key: A valid Fernet-compatible encryption key.
+
+    Returns:
+        str: The encrypted token as a string.
+    """
     f = Fernet(key)
     return str(f.encrypt(plaintext.encode()).decode())
 
 
 class LocalEncryptedProvider(SecretProvider):
-    def __init__(self, **config: dict[str, Any]) -> None:
+    """Read-only provider for encrypted local JSON secret files."""
+
+    def __init__(self, **config: Any) -> None:
+        """
+        Initializes the LocalEncryptedProvider.
+
+        Args:
+            **config: Config requiring 'encrypted_file_path' and 'master_key'.
+        """
         encrypted_file_path = str(config.get("encrypted_file_path"))
         master_key = str(config.get("master_key"))
 
@@ -135,6 +221,15 @@ class LocalEncryptedProvider(SecretProvider):
         )
 
     def get_secret(self, secret_id: str) -> str:
+        """
+        Decrypts and retrieves a secret from the local storage.
+
+        Args:
+            secret_id: The key to look up.
+
+        Returns:
+            str: The decrypted plaintext value.
+        """
         encrypted_val = self._data.get(secret_id)
         if not encrypted_val:
             LOG.error(
@@ -145,6 +240,14 @@ class LocalEncryptedProvider(SecretProvider):
         LOG.debug("Decrypting secret", extra={"secret_id": secret_id})
         return str(self.f.decrypt(encrypted_val.encode()).decode())
 
-        # Decrypt to a file
-        # with open("output.txt", "wb") as f:
-        #     f.write(self.f.decrypt(encrypted_val.encode()))
+    def update_secret(self, secret_id: str, value: Any) -> None:
+        """
+        Updates are not supported for this provider.
+
+        Args:
+            secret_id: Ignored.
+            value: Ignored.
+        """
+        raise NotImplementedError(
+            "LocalEncryptedProvider does not support secret updates."
+        )

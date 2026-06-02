@@ -54,7 +54,7 @@ jobs:
           APP_SYMLINK="$BASE_PATH/current_app.pex" # New symlink for the app itself
 
           echo "Attempting rollback for $APP_NAME to release $TARGET_RELEASE_ID..."
-          
+
           # Verify target release directory exists on the remote host
           ssh -p 2222 -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "[ -d \"$TARGET_RELEASE_PATH\" ]" || {
             echo "❌ Error: Target release directory $TARGET_RELEASE_PATH not found on remote host."

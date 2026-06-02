@@ -27,20 +27,44 @@ LOG = logger
 
 
 class ExtractStage(ExecutionStage):
+    """Stage responsible for acquiring raw data from external sources.
+
+    Decision: Contract-Aware Extraction.
+    We apply schema casting and column normalization during the extraction
+    phase inside Ray workers. This ensures that 'data at rest' in our vault
+    is already sanitized and follows the organization's data contract.
+    """
+
     name = StageName.EXTRACT.label
     manifest: ExtractPayload
 
     def pre_flight(self, task: "Task") -> None:
-        """Verify source connectivity from the execution node."""
+        """Verify source connectivity and initialize the service handle.
+
+        Decision: Fail-Fast Connectivity.
+        By resolving the service in pre-flight, we ensure credentials are
+        valid before committing compute resources or Ray slots to the job.
+        """
         super().pre_flight(task)
         task_ctx = task.context
         self.service = ServiceFactory.get_source(
             task_ctx.extract.source_type, **task_ctx.extract.source_config
         )
-        # Implementation would trigger a lightweight ping/exists check
 
     def execute(self, task: "Task") -> str:
+        """Orchestrates the distributed extraction of data.
 
+        Args:
+            task: The Task instance to execute.
+
+        Returns:
+            str: The label of the next stage.
+
+        Decision: Resource-Aware Scaling.
+        We calculate the 'Width Factor' of the dataset (Columns vs Rows)
+        to determine the optimal number of Ray workers. This maintains
+        the 2GB RAM ceiling by reducing row-count per worker for wide tables.
+        """
         task_ctx = task.context
         start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
 
@@ -63,31 +87,14 @@ class ExtractStage(ExecutionStage):
                 )
                 options["filter_condition"] = condition
 
-            # --- RESOURCE-AWARE WORKER CALCULATION ---
-            total_rows = self.service.get_total_count(
-                str(task_ctx.extract.source_identifier), options.get("filter_condition")
-            )
-
-            # Calculate "Width Factor"
-            # More columns = fewer rows per worker to stay under 2GB.
-            num_columns = (
-                len(task_ctx.extract.schema_items) or 20
-            )  # Default to 20 if unknown
-
-            rows_per_worker = max(50_000, 20_000_000 // num_columns)
-
-            target_num_workers = task_ctx.extract.num_workers
-            if not target_num_workers:
-                target_num_workers = max(1, min(100, total_rows // rows_per_worker))
-                LOG.info(
-                    f"Ingestion Scale: {total_rows} rows, {num_columns} cols. "
-                    f"Targeting {rows_per_worker} rows/worker -> {target_num_workers} workers."
-                )
-
+            # Decision: Delegated Scaling.
+            # We no longer calculate workers here. We pass the configuration
+            # directly to the ReaderContext. The Service Layer (Source) is now
+            # the authority on resource-aware scaling based on its metadata.
             ctx = ReaderContext(
                 source_type=task_ctx.extract.source_type,
                 source_identifier=task_ctx.extract.source_identifier,
-                num_workers=target_num_workers,
+                num_workers=task_ctx.extract.num_workers,
                 schema_items=task_ctx.extract.schema_items,
                 run_id=task.run_id,
                 partition_date=task_ctx.partition_date,
@@ -133,7 +140,7 @@ class ExtractStage(ExecutionStage):
                 )
 
             file_infos = []
-            total_rows = 0
+            rows_aggregated = 0
             all_schemas = []
 
             for i, f in enumerate(extracted_files):
@@ -156,7 +163,7 @@ class ExtractStage(ExecutionStage):
                         size_bytes=f["path"].stat().st_size,
                     )
                 )
-                total_rows += f["rows"]
+                rows_aggregated += f["rows"]
 
                 # C. Checkpoint: Update manifest every 1 files (Optimization)
                 # This updates the 'last_modified' timestamp on disk,
@@ -165,21 +172,22 @@ class ExtractStage(ExecutionStage):
                     task.update_manifest(
                         {
                             "extract": {
-                                "source_row_count": total_rows,
+                                "source_row_count": rows_aggregated,
                                 "file_count": len(file_infos),
                             }
                         }
                     )
-                    # No request_status_sync needed here anymore
 
             # c. CALCULATE FINAL SCHEMA (The "Union" of all files)
             # This identifies all columns across all files, handling API drift.
             final_schema_dict = self._merge_schemas(all_schemas)
 
             # 5. Resolve Final Audit Identity
-            # We look at the actual files discovered to decide the _source value
+            # The service layer is the authority on how to name the source audit.
             source_files = getattr(reader, "source_files", [])
-            audit_identity = self._resolve_audit_identity(ctx, source_files)
+            audit_identity = self.service.resolve_identity(
+                str(task_ctx.extract.source_identifier), source_files
+            )
 
             # 6. Create Payload and Finalize
             # We map the strategy output to our ExtractPayload schema
@@ -189,7 +197,7 @@ class ExtractStage(ExecutionStage):
                 source_files=source_files,
                 file_count=len(file_infos),
                 files=file_infos,
-                source_row_count=total_rows,
+                source_row_count=rows_aggregated,
                 # Grab schema from the last file processed
                 schema_signature={k: str(v) for k, v in final_schema_dict.items()},
                 start_timestamp=start_ts,
@@ -202,7 +210,7 @@ class ExtractStage(ExecutionStage):
                 "Reader completed",
                 stage=self.name,
                 file_count=len(file_infos),
-                total_rows=total_rows,
+                total_rows=rows_aggregated,
             )
 
             # 4. State Transition
@@ -257,6 +265,7 @@ class ExtractStage(ExecutionStage):
             stage=self.name,
             file_count=len(schemas),
         )
+
         merged = {}
         for schema in schemas:
             for col, dtype in schema.items():

@@ -31,7 +31,7 @@ accounts:
     prod:
       account_id: "sf_prod_01"
       secret_key: "sf_service_account_vault_id"
-      
+
 environments:
   dev:
     archive_base_path: "file:///tmp/archive"
@@ -61,7 +61,7 @@ environments:
         storage_options:
           s3_storage_class: "DEEP_ARCHIVE"
           region: "ap-southeast-1"
-          
+
       vault_cas:
         type: "cas_archive" # Maps to StorageVault
         account_id: "prod_aws_secure"

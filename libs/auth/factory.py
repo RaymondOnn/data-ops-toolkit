@@ -25,7 +25,22 @@ class AuthFactory:
     @classmethod
     def get_provider(cls, env: str, **config) -> SecretProvider:
         """
-        Singleton provider based on environment.
+        Retrieves or creates a singleton SecretProvider based on the environment.
+
+        If an environment is set to 'prod', the factory forces the use of
+        the AWS Secret Manager provider regardless of the configuration.
+
+        Args:
+            env: The deployment environment (e.g., 'dev', 'prod', 'test').
+            **config: Configuration parameters for the provider.
+                Expected keys vary by provider type (e.g., 'master_key').
+
+        Returns:
+            SecretProvider: An initialized secret provider instance.
+
+        Raises:
+            ValueError: If the provider type is unsupported or if mandatory
+                configuration (like master_key) is missing.
         """
         if cls._provider:
             return cls._provider
@@ -60,7 +75,6 @@ class AuthFactory:
                 "encrypted_file_path", config.get("path", "./.secrets.json")
             )
 
-
         elif provider_type == "env_file":
             # Ensure we have a fallback path if none provided
             config.setdefault("path", "./.secrets.json")
@@ -77,7 +91,7 @@ class AuthFactory:
         LOG.debug(
             "Instantiating provider class", extra={"cls": provider_class.__name__}
         )
-        cls._provider = provider_class(**config)  
+        cls._provider = provider_class(**config)
         if not cls._provider:
             raise ValueError(
                 f"Failed to instantiate provider class: {provider_class.__name__}"

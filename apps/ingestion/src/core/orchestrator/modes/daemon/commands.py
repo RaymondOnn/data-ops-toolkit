@@ -13,17 +13,23 @@ if TYPE_CHECKING:
 LOG = logger
 
 # Define command priorities: Lower number = Higher priority
-COMMAND_PRIORITIES = {
+COMMAND_PRIORITIES: dict[str, int] = {
     "STOP": 0,
     "CANCEL_RUN": 0,
     "RELOAD_CONFIG": 1,
     "RECOVER_ALL": 2,
     "RESUME": 2,
-    "ADHOC_RUN": 3,
+    "ADD": 3,
 }
 
 
 class CommandProcessor:
+    """
+    Processes filesystem-based command signals for the Daemon.
+
+    Scans a designated signal directory for `.cmd` files, parses their content,
+    and dispatches them to registered handlers based on priority."""
+
     def __init__(
         self,
         exec_ctx: "ExecutionContext",
@@ -31,8 +37,11 @@ class CommandProcessor:
         state_store: "DaemonStateStore",
     ):
         self.exec_ctx = exec_ctx
+        """The execution context for the daemon."""
         self.janitor = janitor
+        """The daemon janitor for recovery operations."""
         self.state_store = state_store
+        """The daemon state store for managing job records."""
 
         # Registry mapping command prefixes to handlers
         self._handlers: dict[str, Callable[[Any], None]] = {
@@ -46,15 +55,26 @@ class CommandProcessor:
     def register_handler(
         self, command_name: str, handler: "Callable[[Any], None]"
     ) -> None:
-        """Registers a new callback for a specific .cmd filename type."""
+        """Registers a new callback for a specific .cmd filename type.
+
+        Args:
+            command_name: The base name of the command (e.g., "STOP", "RESUME").
+            handler: The callable function to execute when the command is found.
+        """
         key = command_name.upper().replace(".CMD", "")
         self._handlers[key] = handler
         LOG.debug("Registered custom command handler", command=key)
 
     def process_commands(self) -> list[tuple[Callable[[Any], None], Any]]:
-        """
-        Scans signals/ for .cmd files and collects actions into a queue.
-        Returns a list of (handler, payload) tuples ready for execution.
+        """Scans the signal directory for `.cmd` files and collects actions.
+
+        Commands are sorted by priority (defined in `COMMAND_PRIORITIES`) and
+        then by file modification time. Each command file is deleted after
+        processing.
+
+        Returns:
+            list[tuple[Callable[[Any], None], Any]]: A list of tuples, where
+                each tuple contains a handler function and its associated payload.
         """
         cmd_dir = self.exec_ctx.signal_path
         if not cmd_dir.exists():
@@ -63,13 +83,28 @@ class CommandProcessor:
         command_queue = []
 
         def get_base_key(stem: str) -> str:
-            """Extracts the command name, ignoring unique IDs or arguments (e.g. ADHOC_RUN_123 -> ADHOC_RUN)."""
+            """
+            Extracts the base command name from a file stem.
+
+            This ignores unique IDs or arguments appended to the command
+            (e.g., "ADD_123" -> "ADD").
+
+            Args:
+                stem: The stem of the command file (e.g., "ADHOC_RUN_123").
+
+            Returns:
+                str: The base command name.
+            """
             upper_stem = stem.upper()
-            # Find the longest matching command key from COMMAND_PRIORITIES
-            for key in sorted(COMMAND_PRIORITIES.keys(), key=len, reverse=True):
-                if upper_stem.startswith(key):
-                    return key
-            return upper_stem
+
+            # Explicitly typing this as list[str] prevents the 'Sized' inference issue
+            sorted_keys: list[str] = sorted(
+                COMMAND_PRIORITIES.keys(), key=len, reverse=True
+            )
+
+            return next(
+                (k for k in sorted_keys if upper_stem.startswith(k)), upper_stem
+            )
 
         # Hybrid Priority-FIFO: Sort by Priority Level, then by File Modification Time
         cmd_files = sorted(
@@ -112,7 +147,15 @@ class CommandProcessor:
         return command_queue
 
     def _handle_cancel_run(self, data: Any) -> None:
-        """Logic to stop a specific run and evict it from queues."""
+        """Handles the `CANCEL_RUN` command to stop a specific run.
+
+        This method logs the cancellation and would typically interact with
+        the `TaskManager` and `Compute` engine to stop the run and reclaim
+        resources.
+
+        Args:
+            data: The payload associated with the command, expected to contain a `run_id`.
+        """
         run_id = data.get("run_id") if isinstance(data, dict) else data
         if not run_id:
             LOG.error("CANCEL_RUN requires a run_id (e.g., CANCEL_RUN:run123.cmd)")

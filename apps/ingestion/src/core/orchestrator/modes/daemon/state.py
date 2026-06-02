@@ -4,6 +4,7 @@ import msgspec
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
 from apps.ingestion.src.core.contexts.task import TaskContext
 from apps.ingestion.src.core.models.task import ExecutionStatus, TaskManifest
+from apps.ingestion.src.core.orchestrator.common.state import StateStore
 from apps.ingestion.src.core.orchestrator.enums import (
     JobRecord,
     to_ch_datetime,
@@ -12,8 +13,6 @@ from apps.ingestion.src.utils.constants import (
     MANIFEST_FILENAME,
 )
 from loguru import logger
-
-from ...common.state import StateStore
 
 LOG = logger
 SOURCE_TBL = "META.CURRENT_EXECUTION"
@@ -26,32 +25,51 @@ class DaemonStateStore:
     """
 
     def __init__(self, store: StateStore, exec_ctx: ExecutionContext):
+        """Initializes the Daemon-specific state store observer.
+
+        Args:
+            store: The base StateStore instance for database interactions.
+            exec_ctx: The global execution context for environment settings.
+
+        Decision: Composition over Inheritance.
+        By composing the base StateStore instead of inheriting from it, we
+        keep the core state management logic clean while adding daemon-only
+        polling and observation capabilities.
+        """
         self.store = store
         self.exec_ctx = exec_ctx
 
     def get_latest_state(
         self, force_refresh: bool = False, lookahead_mins: int = 60
     ) -> dict[str, JobRecord]:
-        """Polls the DB view for active/pending jobs and updates the store registry."""
+        """Polls the DB view for active/pending jobs and updates the registry.
+
+        Args:
+            force_refresh: Flag to ignore cache (currently unused).
+            lookahead_mins: Minutes into the future to look for scheduled runs.
+
+        Returns:
+            dict[str, JobRecord]: A mapping of Run IDs to JobRecord objects.
+
+        Decision: Server-Side Time Normalization.
+        We calculate 'now' within the SQL query (CTE) to ensure the
+        orchestrator and database are perfectly synchronized, preventing
+        issues caused by clock drift between different compute nodes.
+        """
         new_active_records = {}
         active_statuses = [f"'{s.value}'" for s in ExecutionStatus.active_statuses()]
         status_filter = ", ".join(active_statuses)
-
-        # Debug: Check the ClickHouse "Now"
-        ch_now = self.store.db.fetch("SELECT now64(3) + INTERVAL 8 HOUR AS NOW_TS_LC")[
-            0
-        ][0]
 
         sql = f"""
              WITH dates AS (
                 SELECT
                     8 AS OFFSET_HOURS
                     , now64(3) + INTERVAL OFFSET_HOURS HOUR AS NOW_TS_LC
-            ) 
-            SELECT * FROM {SOURCE_TBL} 
+            )
+            SELECT * FROM {SOURCE_TBL}
             WHERE JOB_STATUS IN ({status_filter})
             AND RUN_ID IS NOT NULL
-            AND SCHEDULED_TIMESTAMP_LC <= (SELECT NOW_TS_LC FROM dates) 
+            AND SCHEDULED_TIMESTAMP_LC <= (SELECT NOW_TS_LC FROM dates)
             + INTERVAL {lookahead_mins} MINUTE
         """
 

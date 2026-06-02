@@ -7,7 +7,8 @@ def test_task_check_in_new_manifest(exec_ctx):
     """
     GIVEN a new Task where the manifest file does not yet exist
     WHEN check_in is called for a specific stage
-    THEN it should perform a 'Fat Initial Update' including all header fields and set status to RUNNING
+    THEN it should perform a 'Fat Initial Update' including all header fields
+    and set status to RUNNING
     """
     task_ref = TaskRef(
         namespace="task",
@@ -19,7 +20,8 @@ def test_task_check_in_new_manifest(exec_ctx):
         run_id="run_123",
     )
 
-    # exec_ctx from conftest.py provides a real ExecutionContext with a tmp_path workspace
+    # exec_ctx from conftest.py provides a real ExecutionContext
+    # with a tmp_path workspace
     task = Task(task_ref=task_ref, worker_id="worker_1", exec_ctx=exec_ctx)
 
     # Ensure manifest doesn't exist initially
@@ -41,7 +43,8 @@ def test_task_check_in_existing_manifest(exec_ctx):
     """
     GIVEN a Task where the manifest already exists on disk
     WHEN check_in is called for a new stage
-    THEN it should only update the current_stage and status without overwriting header fields or bitmask
+    THEN it should only update the current_stage and status without
+    overwriting header fields or bitmask
     """
     task_ref = TaskRef(
         namespace="task",
@@ -74,7 +77,8 @@ def test_task_request_status_sync(exec_ctx):
     """
     GIVEN a Task
     WHEN request_status_sync is called with TaskSignal.DONE
-    THEN it should drop a .done signal file and the filename should follow the standard pattern
+    THEN it should drop a .done signal file and the filename should follow
+    the standard pattern
     """
     task_ref = TaskRef(
         namespace="task",

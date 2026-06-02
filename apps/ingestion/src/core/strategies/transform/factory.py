@@ -31,7 +31,6 @@ class TransformFactory:
         transform_type: str,
         **kwargs: Any,
     ) -> "Transformer":
-
         transform_type = transform_type.casefold()
         if transform_type not in cls._TRANSFORMERS:
             raise ValueError(f"Transform type {transform_type} not found")

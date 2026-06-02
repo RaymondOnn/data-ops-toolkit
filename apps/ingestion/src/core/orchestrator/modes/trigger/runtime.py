@@ -1,6 +1,5 @@
 import contextlib
 import time
-from collections import Counter
 from typing import TYPE_CHECKING, Any
 
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
@@ -15,8 +14,13 @@ LOG = logger
 
 
 class TriggerRuntime:
-    """
-    Synchronous: Triggers a specific set of tasks and blocks until they finish.
+    """Synchronous orchestration runtime for targeted task execution.
+
+    Decision: Block-until-Terminal.
+    Unlike the Daemon mode which handles triggers asynchronously, the
+    TriggerRuntime provides a synchronous 'Run to Completion' interface.
+    This is preferred for CLI tools and ad-hoc batch processing where
+    the caller expects a success/failure summary immediately.
     """
 
     def __init__(
@@ -24,6 +28,12 @@ class TriggerRuntime:
         exec_ctx: ExecutionContext,
         orchestrator: "Orchestrator",
     ) -> None:
+        """Initializes the runtime with execution and orchestration handles.
+
+        Args:
+            exec_ctx: The global application context.
+            orchestrator: The engine for task management and signaling.
+        """
         self.exec_ctx = exec_ctx
         self.orchestrator = orchestrator
 
@@ -39,6 +49,22 @@ class TriggerRuntime:
         partition_date_str: str | None = None,
         overrides: dict[str, Any] | None = None,
     ) -> None:
+        """Executes and monitors a set of tasks until completion or timeout.
+
+        Args:
+            job_id: The primary job identifier.
+            dataset_id: The specific dataset to process.
+            partition_date_str: Target date in YYYY-MM-DD format.
+            overrides: Dynamic configuration overrides.
+
+        Raises:
+            TimeoutError: If terminal state is not reached within timeout.
+
+        Decision: Centralized Event Loop.
+        By driving the engine and processing signals within a single
+        polling loop, we ensure that state transitions are handled
+        deterministically even when running in foreground mode.
+        """
         # Perform Pre-flight check
         self.orchestrator._perform_platform_preflight()
 
@@ -57,22 +83,14 @@ class TriggerRuntime:
             self.orchestrator.process_task_events(run_filter=run_ids)
             self.state_store.flush()
 
-            # Monitor status
-            run_stats = Counter()
-            for rid in run_ids:
-                status = self._get_run_status(
-                    job_id,
-                    dataset_id,
-                    partition_date_str or "",
-                    rid,
-                )
-                run_stats[status] += 1
-
-            total_terminal = sum(
-                count for status, count in run_stats.items() if status.is_terminal
-            )
-
-            if total_terminal == len(run_ids):
+            # Decision: Simplified Terminal Check.
+            # We use all() to determine if every run in the batch has reached
+            # a terminal status, reducing the logic from 10 lines to a generator.
+            statuses = [
+                self._get_run_status(job_id, dataset_id, partition_date_str or "", rid)
+                for rid in run_ids
+            ]
+            if all(s.is_terminal for s in statuses):
                 self.orchestrator._summarize_failures(self.state_store, run_ids)
                 break
 
@@ -92,14 +110,33 @@ class TriggerRuntime:
     def _get_run_status(
         self, job_id: str, dataset_id: str, partition_date: str, run_id: str
     ) -> ExecutionStatus:
-        """Standard status resolver for terminal loop exit."""
-        identifier = self.exec_ctx.get_task_identifier(
-            job_id, dataset_id, partition_date or ""
+        """Standard status resolver for terminal loop exit.
+
+        Args:
+            job_id: The job identifier.
+            dataset_id: The dataset identifier.
+            partition_date: The processing date.
+            run_id: The unique execution ID.
+
+        Returns:
+            ExecutionStatus: The current status of the task.
+
+        Decision: Multi-Tier Status Resolution.
+        We check the Hot Cache first for high-performance polling, falling
+        back to the database registry for final terminal state verification.
+        """
+        from apps.ingestion.src.core.models.task.enums import TaskIdentity
+
+        identity = TaskIdentity(
+            job_id=job_id,
+            dataset_id=dataset_id,
+            partition_date=partition_date or "",
+            run_id=run_id,
         )
 
         # 1. Check Hot Cache
         with self.tasks.lock:
-            pattern = f"{CACHE_TASK_NAMESPACE}:*:*:{identifier}:{run_id}"
+            pattern = f"{CACHE_TASK_NAMESPACE}:*:*:{identity.identifier}:{run_id}"
             key = next(iter(self.tasks.cache.iterkeys(pattern=pattern)), None)
             if key:
                 from apps.ingestion.src.core.orchestrator.enums import (
@@ -108,7 +145,7 @@ class TriggerRuntime:
 
                 try:
                     cached_ref = TaskRef.from_str(key)
-                    return ExecutionStatus(cached_ref.status)
+                    return cached_ref.status
                 except ValueError:
                     return ExecutionStatus.RUNNING
 

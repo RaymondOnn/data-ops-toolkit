@@ -5,6 +5,7 @@ import msgspec
 from apps.ingestion.src.core.contexts.task import TaskContext, load_task_context
 from apps.ingestion.src.core.models.states import ExpiredState
 from apps.ingestion.src.core.models.task import ExecutionStatus
+from apps.ingestion.src.core.models.task.enums import TaskIdentity
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, STRIP_TZ_FOR_DB
 from libs.utils.dates import get_current_timestamp, standardize_timestamp
 from loguru import logger
@@ -23,14 +24,15 @@ def resolve_task_context(
     Attempts to locate and load a TaskContext from either the dispatched
     workspace or the pending config in the active root.
     """
-    job_path = exec_ctx.get_run_path(
-        run.JOB_ID, run.DATASET_ID, str(run.PARTITION_DATE), run.RUN_ID
+    identity = TaskIdentity(
+        job_id=run.JOB_ID,
+        dataset_id=run.DATASET_ID,
+        partition_date=str(run.PARTITION_DATE),
+        run_id=run.RUN_ID,
     )
-    identifier = exec_ctx.get_task_identifier(
-        run.JOB_ID, run.DATASET_ID, str(run.PARTITION_DATE)
-    )
+    job_path = exec_ctx.get_run_path(identity)
     pending_config = (
-        exec_ctx.active_path / f"{identifier}:{run.RUN_ID}_{CONFIG_FILENAME}"
+        exec_ctx.active_path / f"{identity.identifier}:{run.RUN_ID}_{CONFIG_FILENAME}"
     )
 
     try:
@@ -168,12 +170,13 @@ class TriggerManager:
                 # If a Run ID exists in the DB but the config is missing on disk,
                 # the workspace is corrupt.
                 if ctx is None and record.RUN_ID:
-                    job_path = self.exec_ctx.get_run_path(
-                        record.JOB_ID,
-                        record.DATASET_ID,
-                        str(record.PARTITION_DATE or ""),
-                        record.RUN_ID,
+                    identity = TaskIdentity(
+                        job_id=record.JOB_ID,
+                        dataset_id=record.DATASET_ID,
+                        partition_date=str(record.PARTITION_DATE or ""),
+                        run_id=record.RUN_ID,
                     )
+                    job_path = self.exec_ctx.get_run_path(identity)
                     if job_path.exists():
                         LOG.warning(
                             f"Self-healing: Ghost task detected for {record.RUN_ID}. "

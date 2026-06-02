@@ -133,5 +133,3 @@ def test_expired_state_applicability():
 
     # ExpiredState often takes a record or a task
     assert ExpiredState.is_applicable(task=None, record=record) is True
-
-

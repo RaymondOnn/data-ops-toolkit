@@ -1,20 +1,31 @@
-import time
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
 import msgspec
-from apps.ingestion.src.core.contexts import ExecutionContext, TaskContext
-from apps.ingestion.src.core.models.stages.base import ExecutionStage
 from apps.ingestion.src.core.models.stages.enums import StageName
-from apps.ingestion.src.core.models.task.manifest import TaskManifest
 from apps.ingestion.src.core.models.task.status import ExecutionStatus
 from apps.ingestion.src.utils.common import recursive_merge
 from loguru import logger
 
-from .enums import TaskRef, TaskSignal
+from .enums import TaskIdentity, TaskRef, TaskSignal
 from .workspace import TaskWorkspace
 
+if TYPE_CHECKING:
+    from apps.ingestion.src.core.contexts.execution import ExecutionContext
+    from apps.ingestion.src.core.contexts.task import TaskContext
+    from apps.ingestion.src.core.models.stages.base import ExecutionStage
+    from apps.ingestion.src.core.models.task.manifest import TaskManifest
+
 LOG = logger
+
+# Constants to replace magic values
+RECOVERY_WORKER_ID = "recovery"
+TERMINATED_SIGNAL = "TERMINATED"
+MARKER_RETRYING = ".retrying"
+MARKER_BLOCKED = ".blocked"
+DEFAULT_NAMESPACE = "task"  # Default namespace for TaskRef
 
 
 class Task:
@@ -28,10 +39,11 @@ class Task:
         workspace: TaskWorkspace | None = None,
     ) -> None:
         self.task_ref = task_ref
-        self.job_id = task_ref.job_id
-        self.dataset_id = task_ref.dataset_id
-        self.run_id = task_ref.run_id
-        self.partition_date = task_ref.partition_date
+        # Proxy attributes for easier access
+        self.job_id = task_ref.identity.job_id
+        self.dataset_id = task_ref.identity.dataset_id
+        self.run_id = task_ref.identity.run_id
+        self.partition_date = task_ref.identity.partition_date
 
         self.worker_id = worker_id
         self.exec_ctx = exec_ctx
@@ -68,14 +80,20 @@ class Task:
 
         # Folder pattern: active/{job_id}:{dataset_id}:{partition_date}/{run_id}
         identifier_parts = active_path.parent.name.split(":")
-        job_id, dataset_id, partition_date = identifier_parts
+
+        identity = TaskIdentity(
+            job_id=identifier_parts[0],
+            dataset_id=identifier_parts[1],
+            partition_date=identifier_parts[2],
+            run_id=run_id,
+        )
 
         # Re-hydrate manifest to find the correct target stage if not provided
         # Since we have the path, we can read it directly
         workspace = TaskWorkspace(
-            job_id=job_id,
-            dataset_id=dataset_id,
-            partition_date=partition_date,
+            job_id=identity.job_id,
+            dataset_id=identity.dataset_id,
+            partition_date=identity.partition_date,
             run_id=run_id,
             exec_ctx=exec_ctx,
         )
@@ -93,18 +111,15 @@ class Task:
 
         # Reconstruct identity (Ref)
         task_ref = TaskRef(
-            namespace="task",
-            status="UNKNOWN",  # Status will be set by the caller/manifest
+            namespace=DEFAULT_NAMESPACE,
+            status=ExecutionStatus.UNKNOWN,
             stage=current_stage,
-            job_id=job_id,
-            dataset_id=dataset_id,
-            partition_date=partition_date,
-            run_id=run_id,
+            identity=identity,
         )
 
         return cls(
             task_ref=task_ref,
-            worker_id="recovery",
+            worker_id=RECOVERY_WORKER_ID,
             exec_ctx=exec_ctx,
             workspace=workspace,
         )
@@ -112,11 +127,6 @@ class Task:
     @property
     def id(self) -> str:
         return self.task_ref.identifier
-
-    @property
-    def folder(self) -> Path:
-        """DEPRECATED: Use workspace.run_url for cloud compatibility."""
-        return self.workspace.run_path
 
     @property
     def manifest(self) -> TaskManifest:
@@ -167,7 +177,6 @@ class Task:
 
         :raises ValueError: If the job is not initialized.
         """
-        start_time = time.perf_counter()
         log = LOG.bind(job_id=self.job_id, run_id=self.run_id, stage=self.stage.name)
 
         # In 'Pod' Scaling, this is the 'Entry Point' of the isolated process.
@@ -187,10 +196,7 @@ class Task:
                 ExecutionStatus.RUNNING,
                 ExecutionStatus.PENDING,
             ]:
-                return "TERMINATED"
-
-            duration = time.perf_counter() - start_time
-            log.info("Step execution finished", duration_sec=round(duration, 4))
+                return TERMINATED_SIGNAL
             return next_stage_label
         except Exception as e:
             # The stage finalize already handled the move/manifest update
@@ -244,15 +250,13 @@ class Task:
         """
         Drops a signal file to notify the Orchestrator of a state change.
         """
-        ext = f".{signal.value.casefold()}"
-        signal_filename = self.exec_ctx.get_signal_name(
-            self.job_id, self.dataset_id, self.partition_date, self.run_id, ext
-        )
+        ext = f".{signal.value}"
+        signal_filename = self.exec_ctx.get_signal_name(self.task_ref.identity, ext)
 
         self.workspace.drop_signal(signal_filename)
 
         if signal == TaskSignal.RETRY:
-            self.workspace.touch_marker(".retrying")
+            self.workspace.touch_marker(MARKER_RETRYING)
 
     def purge_metadata(self) -> None:
         self.workspace.purge(include_vaults=False)
@@ -264,9 +268,3 @@ class Task:
     def purge(self) -> None:
         """Full purge of metadata and all data vaults."""
         self.workspace.purge(include_vaults=True)
-
-
-def create_task_folder(folder_path: Any, source_config_path: Path) -> None:
-    """Legacy helper: Re-routing to the Task identity to handle provisioning."""
-    # This function is now just a bridge until Orchestrator is updated
-    pass

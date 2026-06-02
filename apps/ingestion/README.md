@@ -1,128 +1,137 @@
-# Ingestion Engine
+# Data-Ops Ingestion Engine
 
-A highly resilient, distributed data ingestion framework designed for mission-critical ETL workflows. This service leverages modern data engineering patterns to ensure scalability, fault tolerance, and high-performance processing.
+A high-performance, distributed ETL framework designed for scalable data processing with a focus on memory efficiency. This engine utilizes Ray for orchestration and Polars for lazy streaming transformations, ensuring enterprise-grade resilience and observability.
 
-## Architecture & Core Design
+## 🚀 Engineering Highlights
 
-The Ingestion Engine is built as a state-driven pipeline that moves data through a series of checkpoints. This design prioritizes observability and resilience, allowing for automatic recovery from any stage.
+* **Resource-Aware Worker Scaling:** Dynamically calculates the number of Ray workers based on "Width Factors" (column count vs. row count) to prevent OOMs before they happen.
+* **Zero-Footprint Local Strategy:** Reclaims high-speed local disk space immediately after archiving data to S3, using relative symlinks to maintain pipeline integrity.
+* **Deterministic Workspace:** Implements a "Data Vault" pattern (`data/stage/run/`) ensuring that every run is immutable and reproducible.
+* **Self-Healing State Machine:** Uses bitmask-driven checkpoints and filesystem signals (`.done`, `.fail`) for "Fail-Fast" recovery that survives orchestrator crashes.
 
-### Key Architectural Pillars
+## 🏗️ Technical Architecture
 
-1. **Checkpoint-Driven State Machine**:
-    - The workflow transitions through distinct states: `START -> EXTRACT -> TRANSFORM -> WRITE -> PUBLISH -> COMPLETE`.
-    - Data is persisted as **Parquet** files at each stage, creating immutable checkpoints.
-    - **Resilience**: If a stage fails, the orchestrator resumes from the last successful checkpoint, preventing redundant processing of upstream tasks.
+### Distributed Control Plane (Ray)
 
-2. **Distributed Compute with Ray**:
-    - Leverages **Ray Actors** for parallel processing.
-    - **IO/CPU Specialization**: Separate worker pools manage I/O-bound tasks (data acquisition, loading) and CPU-bound tasks (complex transformations, audits).
-    - **Scalability**: The same codebase runs on a local machine during development and scales to a massive Kubernetes cluster in production without modifications.
+The engine separates I/O-bound workers (Extraction/Loading) from CPU-bound workers (Transformation) using custom Ray Resource Maps. This prevents "Thundering Herd" scenarios where network ingestion starves CPU-intensive schema merges.
 
-3. **High-Performance Data Ops (Polars)**:
-    - Powered by **Polars**, a lightning-fast Rust-based DataFrame library.
-    - Maintains a strict **2GB RAM ceiling** even when processing datasets exceeding 50M rows using LazyFrame streaming.
-
-4. **Autonomous Control Loop**:
-    - A polling-based orchestrator ensures consistent behavior across different environments (EC2, K8s).
-    - **Self-Healing**: Every "tick" of the control loop performs a full state reconciliation to recover from crashes or network partitions.
-
-## 🔄 Workflow Lifecycle
+### Deterministic Lifecycle
 
 ```mermaid
-graph LR
-    Start([START]) --> Extract[EXTRACT]
-    Extract --> Transform[TRANSFORM]
-    Transform --> Write[WRITE]
-    Write --> Publish[PUBLISH]
-    Publish --> Complete([COMPLETE])
+sequenceDiagram
+    participant O as Orchestrator
+    participant W as Ray Worker
+    participant FS as Workspace (Disk)
+    participant S as Signal Sensor
 
-    subgraph "Resilience Layer (Diskcache + FileLock)"
-    Extract -.-> |Checkpoint| Extract
-    Transform -.-> |Checkpoint| Transform
-    Write -.-> |Checkpoint| Write
-    end
+    O->>FS: Provision Manifest (status: WAITING)
+    O->>W: Dispatch TaskRef
+    W->>FS: Atomic Check-in (status: RUNNING)
+    Note over W: Execute Stage Logic (Polars Lazy)
+    W->>FS: Write Parquet Artifacts (Vault)
+    W->>FS: Update Manifest + Signal (.done)
+    S->>O: Detected Signal
+    O->>FS: Sync State -> ClickHouse
 ```
 
-## Resilience & Fault Tolerance
+## 🛡️ Resilience & Reliability
 
-- **Circuit Breakers**: Implemented via a shared `ServiceRegistry` backed by **Diskcache**. This prevents cascading failures when external services (DBs, APIs) are down.
-- **Atomic Handoffs**: Ray workers perform atomic updates to the job state, ensuring that half-finished tasks are never mistakenly marked as complete.
-- **Zombie Task Recovery**: The orchestrator automatically detects stalled workers (via heartbeats) and re-queues them for retry.
-- **Signal-Based Syncing**: Uses signal files (`.sync`, `.done`) for inter-process communication, ensuring portability across filesystems.
-- **Filesystem as Source of Truth**: Metadata is managed in `active/` folders, allowing for recovery even if the central database is temporarily unavailable.
+* **Circuit Breakers:** Uses a cross-process `Diskcache` registry to trip connectivity to unstable sources (Oracle, APIs) globally across the Ray cluster.
+* **Zombie Detection:** The `Janitor` service reconciles the "Active Registry" against Ray's internal state, automatically re-queuing tasks whose workers died silently.
+* **Contract-Aware Ingestion:** Performs dynamic **Schema Unioning** across distributed Parquet files to handle upstream API drift without breaking the downstream `Transform` logic.
 
-## Technology Stack
+## 🛠️ Technology Stack
 
-| Component         | Technology      | Why?                                                                    |
-| :---              | :---            | :---                                                                    |
-| Orchestration     | Ray             | Seamlessly distributed compute with IO/CPU specialized actor pools.     |
-| Processing Engine | Polars          | Rust-level performance with LazyFrame streaming for low-RAM footprints. |
-| Data Quality      | Pandera / Audit | Robust schema validation and contract enforcement.                      |
-| Resilience        | Diskcache       | Persistent, cross-process state management for circuit breakers.        |
-| Serialization     | msgspec         | Zero-copy JSON/YAML serialization for high-throughput metadata.         |
-| Local Cloud       | LocalStack      | AWS-compatible S3 mocks for local-first development.                    |
-| Observability     | ClickHouse      | High-performance OLAP store for execution logs and telemetry.           |
+| Layer | Tech | Why? |
+| :--- | :--- | :--- |
+| **Compute** | Ray | Seamless process isolation and horizontal scaling. |
+| **Engine** | Polars | Rust-level performance with `LazyFrame` streaming. |
+| **Resilience** | Diskcache | Zero-latency, atomic state sharing across nodes. |
+| **Serialization** | msgspec | JSON/YAML overhead reduced to near-zero for metadata. |
+| **Observability** | ClickHouse | High-performance OLAP store for historical telemetry. |
 
-## Technical Deep Dive
+## 🔬 Technical Deep Dives
 
-### Hybrid Observability (JSONL + ClickHouse)
+### Adaptive Throttling
 
-To minimize I/O overhead on workers while maintaining global visibility:
+The `Compute` manager monitors system vitals (CPU/MEM/Disk). If disk usage exceeds thresholds, the orchestrator gracefully stops spawning new workers while allowing `Load` stages to complete, effectively clearing the local backlog before a hard crash occurs.
 
-1. Local Buffering: Workers append state transitions to execution_stream.jsonl.
-2. Scheduled Flushing: The Orchestrator rotates these files, converts them to Parquet, and performs bulk-inserts into ClickHouse (META.EXECUTION_LOG).
-3. Query Layer: The "Active Registry" reflects the META.CURRENT_EXECUTION view for real-time status.
+### The "Data Vault" Pattern
 
-### Atomic State Consistency
+To ensure portability across Kubernetes pods, the engine uses relative symlinks in the `active/` folder. A `Transform` stage simply reads from `../extract/`, which the engine ensures points to the deterministic physical artifacts in the vault, regardless of the worker node's absolute path.
 
-The `manifest.json` acts as the single source of truth for every job. To guarantee consistency during hardware failures, we employ a Swap-and-Replace strategy:
+## 🏁 Usage
 
-1. Write updates to a .tmp file.
-2. Call `os.fsync` to ensure bits are physically committed to the platter.
-3. Perform an atomic `replace()` of the old manifest.
+### Running a Pipeline
 
-### Contract-Aware Ingestion
+```bash
+python -m ingestion run 2024-05-20 --job-id sales_sync --dataset daily_orders
+```
 
-To handle production schema drift, the `RawStep` performs dynamic **Schema Unioning**. It scans the metadata footers of all partitioned Parquet files to identify column additions or type shifts, generating a master "Contract" for the downstream `TransformStep`. This prevents pipeline breaks when upstream APIs introduce new fields.
+### Environment Diagnostics
+
+```bash
+python -m ingestion doctor network s3.amazonaws.com 443 --proxy http://cntlm:3128
+```
+
+### Regression Testing
+
+Compare a "Candidate" PEX against a "Baseline" version to detect record drift:
+
+```bash
+python -m ingestion test regression run --job-id core_finance --dataset ledger
+```
 
 ### Signal-Based IPC
 
 We chose a filesystem-centric **Signal Architecture** (`.sync`, `.done`, `.cmd`) over traditional message brokers (RabbitMQ/Redis).
 
-- **Portability**: Operates identically on local SSDs, AWS EFS, or Azure Files.
-- **Observability**: Developers can "see" the state of the orchestrator by simply listing the `signals/` directory.
-- **Backpressure**: The orchestrator's polling loop naturally batches signal processing, preventing "thundering herd" spikes during massive job fan-outs.
+* **Portability**: Operates identically on local SSDs, AWS EFS, or Azure Files.
+* **Observability**: Developers can "see" the state of the orchestrator by simply listing the `signals/` directory.
+* **Backpressure**: The orchestrator's polling loop naturally batches signal processing, preventing "thundering herd" spikes during massive job fan-outs.
 
 ### Storage Virtualization
 
 The service uses a dual-layered storage strategy:
 
-- **Vault Layer (`data/`)**: Stores the physical, immutable Parquet checkpoints.
-- **Active Layer (`active/`)**: Uses symlinks to point to the current data for easy job relocation.
+* **Vault Layer (`data/`)**: Stores the physical, immutable Parquet checkpoints.
+* **Active Layer (`active/`)**: Uses symlinks to point to the current data for easy job relocation.
 Moving a job to `HOLD` or `FAILED` is a metadata-only operation (rewiring symlinks), which is near-instant regardless of whether the underlying data is 1MB or 1TB.
 
 ## Getting Started
 
 ### Prerequisites
 
-- Python 3.11+
-- Ray installed and configured (local or cluster)
+* Python 3.11+ (`uv` recommended)
+* Ray cluster (Local or Distributed)
+* ClickHouse (for state telemetry)
 
 ### Usage
 
-Trigger a manual ingestion job via the CLI:
+The toolkit is executed as a module. Trigger a manual ingestion job via the `run` command:
 
 ```bash
-python apps/ingestion/src/main.py ingest \
-  --source "s3://my-data-bucket/sales_raw.csv" \
-  --dataset "global_sales"
+python -m ingestion run 2024-05-20 --job-id sales_sync --dataset daily_orders
 ```
 
-## 📈 Monitoring & Observability
+## 📈 Monitoring & Diagnostics
 
-Tasks can be monitored via the generated `manifest.json` in the `storage/active/{job_id}_{run_id}` directory. This manifest provides real-time insights into the current stage, status, and any error payloads.
+Tasks can be monitored via the generated `manifest.json` in the `.workspace/active/{job_id}:{dataset_id}_{date}/{run_id}` directory. This manifest provides real-time insights into the current stage, status, and any error payloads.
 
-1. **Filesystem**: Check the `signals/` and `active/` directories for real-time task movement.
+1. **Filesystem**: Check the `.workspace/signals/` and `.workspace/active/` directories for real-time task movement.
 2. **Ray Dashboard**: Visit `http://localhost:8265` to monitor worker resource utilization.
 3. **ClickHouse**: Query `META.EXECUTION_LOG` for historical performance metrics.
-4. **Logs**: Structured JSONL logs are available in `.workspace/logs/`.
+4. **Diagnostics**: Run `python -m ingestion doctor` to verify environment health.
+
+## 🛠️ Operational Guide: Handling Failures
+
+This engine is designed to handle failure gracefully. If a job moves to the `FAILED/` directory:
+
+1. **Inspect the Manifest:** Open `.workspace/FAILED/{run_id}/manifest.json`. The `error` block contains the stage, message, and a full traceback.
+2. **Check the Doctor:** Run `python -m ingestion doctor connect {host} {port}` to see if an external dependency is unreachable.
+3. **Review the Vault:** Use `python -m ingestion test peek {path}` to inspect the physical data artifacts in the vault and verify quality at the point of failure.
+4. **Resume:** After fixing the issue (e.g., updating a credential), run `python -m ingestion resume --run-id {id}` to restart the task from the exact point of failure.
+
+## 📖 Developer Guide: Adding a Transformer
+
+To add custom business logic, simply create a new class in `libs/strategies/transform/` that inherits from `BaseTransformer` and register it in the `TransformFactory`. The engine will automatically handle the distributed batching and memory management via Ray.

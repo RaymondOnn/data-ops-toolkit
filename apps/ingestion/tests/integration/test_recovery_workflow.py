@@ -8,7 +8,8 @@ def test_manual_rewind_recovery(runtime, tmp_path):
     """
     GIVEN a task that has already completed the EXTRACT stage
     WHEN the task is manually rewound to EXTRACT using the Janitor
-    THEN the stage marker should be deleted, and the engine should re-run the extraction
+    THEN the stage marker should be deleted, and the engine
+    should re-run the extraction
     """
     # 1. Provision a task and fake a successful extraction
     run_ids = runtime.orchestrator._trigger_job("test_job", "test_dataset")
@@ -67,7 +68,17 @@ def test_recovery_max_retries_limit(runtime, tmp_path):
     from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
 
     (folder / MANIFEST_FILENAME).write_text(
-        '{"job_id":"j", "run_id":"exhausted-run", "dataset_id":"d", "retry_count": 5, "status": "failed", "current_stage": "extract", "bitmask": 0}'
+        """
+        {
+            "job_id":"j",
+            "run_id":"exhausted-run",
+            "dataset_id":"d",
+            "retry_count": 5,
+            "status": "failed",
+            "current_stage": "extract",
+            "bitmask": 0
+        }
+        """
     )
     (folder / CONFIG_FILENAME).write_text('{"options": {"max_retries": 3}}')
 

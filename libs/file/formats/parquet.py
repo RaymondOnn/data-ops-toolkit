@@ -11,12 +11,34 @@ LOG = logging.getLogger(__name__)
 
 
 class ParquetHandler(FormatHandler):
+    """
+    Handles reading and writing data in Apache Parquet format.
+
+    Parquet is the preferred format for the toolkit due to its columnar
+    storage and support for predicate pushdown via Polars.
+    """
+
     @property
     def is_splittable(self) -> bool:
+        """
+        Indicates that Parquet is a splittable format.
+
+        Returns:
+            bool: Always True for Parquet.
+        """
         return True
 
     def discover(self, input_path: Path | str, pattern: str | None = None) -> set[str]:
-        """Expands a path into a list of Parquet files."""
+        """
+        Expands a path into a list of Parquet files.
+
+        Args:
+            input_path: The base path or directory to search.
+            pattern: Optional glob pattern to filter discovered files.
+
+        Returns:
+            set[str]: A set of fully qualified paths to discovered Parquet files.
+        """
         # Standardize the path by stripping the protocol if present
         # so fsspec doesn't treat it as relative to CWD.
         path_str = self.fs._strip_protocol(str(input_path))
@@ -43,7 +65,19 @@ class ParquetHandler(FormatHandler):
         }
 
     def read(self, input_path: Path | str, **kwargs: Any) -> io.BytesIO:
-        """Parquet is binary; read directly into buffer."""
+        """
+        Reads raw Parquet bytes directly into an in-memory buffer.
+
+        Note: For data processing, use `to_df` as it leverages Polars'
+        streaming capabilities instead of loading raw bytes.
+
+        Args:
+            input_path: The path to the file(s) to read.
+            **kwargs: Additional options, including 'encoding'.
+
+        Returns:
+            io.BytesIO: An in-memory buffer containing the combined bytes.
+        """
         paths = self.discover(input_path)
         if not paths:
             LOG.warning(f"No files discovered for path: {input_path}")
@@ -60,8 +94,17 @@ class ParquetHandler(FormatHandler):
 
     def to_df(self, input_path: Path | str, **kwargs: Any) -> pl.LazyFrame:
         """
-        Decision: Always use scan_parquet for 50M row performance.
-        Returns a LazyFrame to allow for predicate pushdown and streaming.
+        Reads Parquet files into a unified Polars LazyFrame.
+
+        Utilizes `pl.scan_parquet` to enable predicate pushdown and memory-
+        efficient streaming for large datasets.
+
+        Args:
+            input_path: The path to the file(s) or directory to read.
+            **kwargs: Additional options passed to `pl.scan_parquet`.
+
+        Returns:
+            pl.LazyFrame: A Polars LazyFrame representing the combined data.
         """
         paths = self.discover(input_path)
         if not paths:
@@ -74,9 +117,14 @@ class ParquetHandler(FormatHandler):
 
     def from_df(self, df: pl.LazyFrame | pl.DataFrame, output_path: Path | str) -> None:
         """
-        Decision: Execution-Aware Sink.
-        1. If LazyFrame: Use .sink_parquet() for memory-efficient streaming.
-        2. If DataFrame: Use .write_parquet() for Ray worker chunks.
+        Writes a Polars DataFrame or LazyFrame to the specified output path.
+
+        Uses `sink_parquet` for LazyFrames to enable streaming and
+        `write_parquet` for eager DataFrames.
+
+        Args:
+            df: The Polars DataFrame or LazyFrame to write.
+            output_path: The destination path for the output file.
         """
         if isinstance(df, pl.LazyFrame):
             df.sink_parquet(
@@ -89,6 +137,13 @@ class ParquetHandler(FormatHandler):
             df.write_parquet(output_path, compression="snappy")
 
     def write(self, data: bytes, output_path: Path | str):
+        """
+        Writes raw bytes directly to the specified output path.
+
+        Args:
+            data: The bytes object to write.
+            output_path: The destination path for the file.
+        """
         with self.fs.open(output_path, "wb") as f:
             # Cast f to an IO[bytes] so Ty knows .write() accepts bytes
             cast("IO[bytes]", f).write(data)

@@ -33,13 +33,13 @@ graph TD
     %% App to Lib Dependencies
     ORCH --> CACHE
     ORCH --> RES
-    
+
     STG --> FILE
     STG --> DB
-    
+
     STRAT --> UTILS
     STRAT --> FILE
-    
+
     %% Lib to Lib Dependencies
     DB --> AUTH
     DB --> RES
@@ -54,7 +54,7 @@ This graph represents the state-machine transitions and physical data dependenci
 ```mermaid
 graph LR
     START((Start)) --> EXTRACT[Extract Stage]
-    
+
     subgraph COMPUTE ["Ray Distributed Work"]
         EXTRACT --> TRANSFORM[Transform Stage]
         TRANSFORM --> WRITE[Write Stage]

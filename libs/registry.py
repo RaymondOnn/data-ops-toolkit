@@ -7,6 +7,7 @@ import ray
 
 LOG = logging.getLogger(__name__)
 
+
 class BaseRegistry(ABC):
     @abstractmethod
     def update(self, service: str, status: str) -> None: ...
@@ -63,9 +64,7 @@ def get_registry() -> BaseRegistry:
         try:
             return RemoteRayRegistry()
         except Exception as e:
-            LOG.warning(
-                f"Failed to connect to Ray Actor, falling back to disk: {e}"
-            )
+            LOG.warning(f"Failed to connect to Ray Actor, falling back to disk: {e}")
             return LocalDiskRegistry()
     else:
         # This handles cases where you're running a unit test

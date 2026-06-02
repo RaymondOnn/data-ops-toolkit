@@ -20,7 +20,7 @@ datasets:
       wrap_quotes: false
     extract:
       service_ref: "postgres" # for credential lookup
-      load_mode: delta # Loading Strategy: delta | snapshot 
+      load_mode: delta # Loading Strategy: delta | snapshot
       source_params:
         batch_size: 100000
 
@@ -32,11 +32,11 @@ datasets:
         type: database
         table_name: "production.orders"
         # For delta load mode
-        filter_sql: "status = 'COMPLETED' AND updated_at >= {{partition_date}}"        
+        filter_sql: "status = 'COMPLETED' AND updated_at >= {{partition_date}}"
 
         # API Source
         type: api
-        endpoint: "example.com/v1/orders"        
+        endpoint: "example.com/v1/orders"
         query_params:
           include_deleted: false
           region: "EMEA"
@@ -53,13 +53,13 @@ datasets:
           - "order_date": 4
           - "total_amount": 8
           - "status": 16
-      
+
       # Example for custom transformer
       type: custom
       params:
         # Lazy-loaded custom Python logic
         script: "src.workflows.finance.currency_conversion"
-        # add more params here 
+        # add more params here
 
       # Example for no transformer
       type: none
@@ -74,11 +74,11 @@ datasets:
         type: blob
         folder_path: "s3://bucket/processed/orders/"
 
-  
-    
+
+
     # audit:
     #   # Threshold-based checks
-    #   allow_missing_percent: 0.02 
+    #   allow_missing_percent: 0.02
     #   # Row-level logic
     #   expectations:
     #     - "amount <= 1000000" # Flag outliers
@@ -98,27 +98,27 @@ datasets:
       source_type: "api"
       source_identifier: "/v1/ledger"
       load_mode: snapshot
-      params: 
+      params:
         query_params:
           include_deleted: false
           region: "EMEA"
       schema_file: "ledger.csv"
-    
+
     transform:
       type: custom
       params:
         script: "src.workflows.finance.currency_conversion"
-    
+
     load:
       type: clickhouse
       sink_identifier: "ledger_entries"
       params:
-        
+
     # OVERRIDE: Specific archival for this dataset
     archive:
-      archive_type: "cas_archive" 
+      archive_type: "cas_archive"
       retention_days: 3650 # 10 years for finance
-      
+
   # DATASET 3: Temporary Log data (No Archival)
   internal_logs:
     partitions:
@@ -131,21 +131,21 @@ datasets:
       source_type: "api"
       source_identifier: "/v1/logs"
       load_mode: snapshot
-      params: 
+      params:
         query_params:
           include_deleted: false
           region: "EMEA"
       schema_file: "logs.csv"
-    
+
     transform:
       type: custom
       params:
         script: "src.workflows.finance.currency_conversion"
-    
+
     load:
       type: clickhouse
       sink_identifier: "internal_logs"
       params:
-        
+
     archive:
       enable_archival: false

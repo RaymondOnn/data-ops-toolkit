@@ -12,5 +12,5 @@ __all__ = [
     "DaemonStateStore",
     "ReactiveMaintenance",
     "StrictAdmission",
-    "TriggerManager"
+    "TriggerManager",
 ]

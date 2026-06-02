@@ -7,7 +7,8 @@ def test_statestore_flushes_manifest_to_db(runtime, tmp_path, mock_db_client):
     """
     GIVEN a task that has updated its manifest on disk
     WHEN StateStore.flush is called
-    THEN it should execute an UPSERT/UPDATE statement against ClickHouse with the latest metrics.
+    THEN it should execute an UPSERT/UPDATE statement against
+    ClickHouse with the latest metrics.
     """
     # 1. Setup: Provision a task and update manifest with specific metrics
     run_ids = runtime.orchestrator._trigger_job("sync_job", "sync_ds")

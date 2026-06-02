@@ -10,11 +10,30 @@ if TYPE_CHECKING:
     from apps.ingestion.src.core.orchestrator.enums import JobRecord
 
 
+class SchemaRow(msgspec.Struct):
+    """
+    Represents the strict structure of a schema.csv row.
+    Used to validate configurations before regression runs.
+    """
+
+    source_col: str | None
+    target_col: str
+    source_dtype: str | None
+    target_dtype: str
+    source_length: Any = None
+    source_scale: Any = None
+    target_length: Any = None
+    target_scale: Any = None
+    masking: str | None = None
+    internal_flag: bool = False
+    primary_key: bool = False
+
+
 class ExtractConfig(msgspec.Struct):
     """Configuration for data extraction/ingestion."""
 
     source_type: str  # e.g. "postgres", "s3", "local"
-    source_identifier: str | None # path, table, or API endpoint
+    source_identifier: str | None  # path, table, or API endpoint
     num_workers: int = 10  # parallelism level
     load_mode: Literal["snapshot", "delta"] = "snapshot"
     source_config: dict[str, Any] = msgspec.field(
@@ -23,8 +42,19 @@ class ExtractConfig(msgspec.Struct):
     source_params: dict[str, Any] = msgspec.field(
         default_factory=dict
     )  # extraction-specific options (filters, etc.)
-    schema_file: str | None = None
-    schema_items: list[dict[str, Any]] = msgspec.field(default_factory=list)
+    schema_items: list[SchemaRow] = msgspec.field(default_factory=list)
+
+    def post_init(self) -> None:
+        """Post-initialization validation."""
+        self.validate_schema_pk(self.source_identifier or "unknown_dataset")
+
+    def validate_schema_pk(self, dataset_id: str) -> None:
+        """Ensures at least one column is marked as primary_key."""
+        if not any(col.primary_key for col in self.schema_items):
+            raise ValueError(
+                f"Invalid schema for '{dataset_id}': No primary key defined. "
+                "Ingestion requires at least one primary key for idempotent publishing."
+            )
 
 
 class TransformConfig(msgspec.Struct):

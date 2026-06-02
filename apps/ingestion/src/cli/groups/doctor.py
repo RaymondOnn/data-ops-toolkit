@@ -1,23 +1,55 @@
 from typing import Annotated
 
 import typer
-
-doctor_app = typer.Typer(help="🩺 Diagnose environment health and configuration.")
 from apps.ingestion.src.core.contexts import TaskContextBuilder
 from apps.ingestion.src.core.orchestrator.common import StateStore
 from apps.ingestion.src.core.orchestrator.doctor import Doctor
 
+doctor_app = typer.Typer(help="🩺 Diagnose environment health and configuration.")
 network_app = typer.Typer(help="🌐 Network path and connectivity diagnostics.")
 doctor_app.add_typer(network_app, name="network")
 
 
 def _get_doctor(env: str = "local") -> Doctor:
-    """Helper to instantiate the Doctor utility with its dependencies."""
+    """Helper to instantiate the Doctor utility with its dependencies.
+
+    Args:
+        env: The environment context to load configurations from.
+            Defaults to "local".
+
+    Returns:
+        Doctor: An initialized diagnostic engine.
+
+    Decision: Dependency Injection.
+    Encapsulates the complex setup of the Doctor component (StateStore,
+    DB config, and ContextBuilder) into a single factory method. This
+    ensures that CLI commands remain focused on user interaction
+    rather than object graph construction.
+    """
     builder = TaskContextBuilder(env=env)
     exec_ctx = builder.get_execution_context()
     db_config = builder.app_settings.get("services.clickhouse", {}).to_dict()
     state_store = StateStore(exec_ctx=exec_ctx, db_config=db_config)
     return Doctor(exec_ctx, lambda: state_store.db, builder)
+
+
+def _exit_on_failure(success: bool) -> None:
+    """Exits the CLI process with code 1 if the operation failed.
+
+    Args:
+        success: The boolean result of a diagnostic check.
+
+    Raises:
+        typer.Exit: If success is False.
+
+    Decision: Consistent CLI Exit.
+    Standardizes failure reporting across all diagnostic commands.
+    Using a central helper ensures that failed checks always return
+    a non-zero exit code, which is critical for CI/CD pre-flight
+    validation.
+    """
+    if not success:
+        raise typer.Exit(code=1)
 
 
 @doctor_app.callback(invoke_without_command=True)
@@ -27,7 +59,18 @@ def doctor_main(
         False, "--debug", help="Show detailed diagnostic output."
     ),
 ):
-    """Runs all diagnostic checks by default."""
+    """Runs all diagnostic checks by default.
+
+    Args:
+        ctx: The Typer context.
+        debug: Enables verbose output for checks.
+
+    Decision: Multi-level Dispatch.
+    Uses the Typer callback mechanism to provide a "check everything"
+    experience by default when no subcommand is provided, while still
+    allowing specialized tools (like network or config) to be
+    invoked individually.
+    """
     doctor = _get_doctor()
 
     if ctx.invoked_subcommand is None:
@@ -36,9 +79,18 @@ def doctor_main(
 
 @doctor_app.command("fs")
 def doctor_fs(
-    debug: bool = typer.Option(False, "--debug", help="Show detailed output.")
+    debug: bool = typer.Option(False, "--debug", help="Show detailed output."),
 ):
-    """Checks filesystem health (disk space, permissions)."""
+    """Checks filesystem health including disk space and permissions.
+
+    Args:
+        debug: Enables verbose output.
+
+    Decision: Separation of Concerns.
+    Delegates storage-specific diagnostics to the Doctor class to
+    ensure that CLI logic doesn't become brittle if the underlying
+    disk-checking logic needs to evolve.
+    """
     doctor = _get_doctor()
 
     doctor.check_filesystem(debug)
@@ -58,14 +110,25 @@ def network_check(
     """
     Deep-dive diagnostic of the network path to a specific host and port.
     Checks VPN, DNS, Proxies (CNTLM), and Firewalls.
+
+    Args:
+        target_host: The host to test.
+        target_port: The port to test.
+        proxy_url: Optional proxy settings.
+        debug: Enables verbose output.
+
+    Decision: Diagnostic Verbosity.
+    Provides a specific entry point for deep-path analysis. The inclusion
+    of proxy settings is a specific decision to support enterprise
+    environments where corporate proxies (like CNTLM) often interfere
+    with cloud service connectivity.
     """
     doctor = _get_doctor()
 
     success = doctor.run_network_diagnostics(
         target_host, target_port, proxy_url=proxy_url
     )
-    if not success:
-        raise typer.Exit(code=1)
+    _exit_on_failure(success)
 
 
 @network_app.command("trace")
@@ -77,11 +140,19 @@ def network_trace(
 ):
     """
     Visualizes every network hop between this machine and the target host.
+
+    Args:
+        target_host: The host to visualize.
+        debug: Enables verbose output.
+
+    Decision: Visual Troubleshooting.
+    Tracing hops is often a manual terminal task; bringing it into the
+    doctor suite ensures that operators can troubleshoot latency or
+    firewall drops without leaving the application's toolset.
     """
     doctor = _get_doctor()
     success = doctor.run_network_trace(target_host)
-    if not success:
-        raise typer.Exit(code=1)
+    _exit_on_failure(success)
 
 
 @doctor_app.command("connect")
@@ -99,6 +170,16 @@ def doctor_connect(
 ):
     """
     Tests connectivity for a specific service type across all its configured instances.
+
+    Args:
+        service_name: The service identifier (e.g., 'oracle_db').
+        env: Target environment for credential resolution.
+        debug: Enables verbose output.
+
+    Decision: Config-Driven Validation.
+    Instead of hardcoding hosts or ports, this command resolves details
+    from the environment's configuration, ensuring that the health check
+    matches the actual parameters used by the execution engine.
     """
     doctor = _get_doctor(env=env)
     doctor.check_service_connectivity(service_name)
@@ -120,6 +201,16 @@ def doctor_config(
 ):
     """
     Validates YAML syntax and schema models for configurations.
+
+    Args:
+        job_id: Optional ID of a specific job to validate.
+        all_jobs: If True, validates the entire configs directory.
+        env: Environment context for validation.
+        debug: Enables verbose output.
+
+    Decision: Proactive Validation.
+    Allows operators to check syntax and schema constraints before
+    triggering a run, significantly reducing the "fail-at-runtime" loop.
     """
     doctor = _get_doctor(env=env)
     doctor.check_config(job_id, all_jobs=all_jobs, debug=debug)
@@ -138,6 +229,16 @@ def doctor_inspect(
 ):
     """
     Displays the fully merged configuration (App + Job + Dataset) for a specific run.
+
+    Args:
+        job_id: The identifier for the job.
+        dataset: Optional specific dataset identifier.
+        env: Environment context for resolution.
+
+    Decision: Observability.
+    Merging YAML configurations across levels can create surprising
+    results. This command acts as a "What You See Is What You Get"
+    viewer for the internal task configuration.
     """
     doctor = _get_doctor(env=env)
     doctor.inspect_config(job_id, dataset_id=dataset)

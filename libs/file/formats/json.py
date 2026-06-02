@@ -13,16 +13,39 @@ LOG = logging.getLogger(__name__)
 
 
 class JSONHandler(FormatHandler):
+    """
+    Handles reading and writing data in JSON and NDJSON formats.
+
+    Supports standard JSON (arrays of objects) and Newline Delimited JSON
+    (NDJSON/JSONL). Includes self-healing logic to repair trailing commas
+    common in human-edited or legacy exported files.
+    """
+
     fs: AbstractFileSystem
 
     @property
     def is_splittable(self) -> bool:
-        # Only NDJSON can be scanned lazily for row counts
-        # Standard JSON (arrays) requires eager loading
+        """
+        Indicates if the format supports splittable reading.
+
+        Returns:
+            bool: Always False. While NDJSON is technically splittable,
+                standard JSON arrays are not, so we default to False for
+                safety in unified pathing.
+        """
         return False
 
     def discover(self, input_path: Path | str, pattern: str | None = None) -> set[str]:
-        """Expands a path into a list of JSON files."""
+        """
+        Expands a path into a list of JSON, JSONL, or NDJSON files.
+
+        Args:
+            input_path: The base path or directory to search.
+            pattern: Optional glob pattern to filter discovered files.
+
+        Returns:
+            set[str]: A set of fully qualified paths to discovered files.
+        """
         # Standardize the path by stripping the protocol if present
         # so fsspec doesn't treat it as relative to CWD.
         path_str = self.fs._strip_protocol(str(input_path))
@@ -50,7 +73,19 @@ class JSONHandler(FormatHandler):
         }
 
     def read(self, input_path: Path | str, **kwargs: Any) -> io.BytesIO:
-        """Handles 'Trailing Comma' repairs for standard JSON."""
+        """
+        Reads raw bytes and repairs malformed JSON syntax.
+
+        Performs a regex-based 'Trailing Comma' repair (e.g., [1,2,] -> [1,2])
+        to ensure standard JSON parsers don't fail on common syntax errors.
+
+        Args:
+            input_path: The path to the file(s) to read.
+            **kwargs: Additional options, including 'encoding' (default 'utf-8').
+
+        Returns:
+            io.BytesIO: An in-memory buffer containing the repaired JSON bytes.
+        """
         encoding = kwargs.get("encoding", "utf-8")
         paths = self.discover(input_path)
         if not paths:
@@ -84,10 +119,19 @@ class JSONHandler(FormatHandler):
 
     def to_df(self, input_path: Path | str, **kwargs: Any) -> pl.LazyFrame:
         """
-        Unified Reader:
-        1. High-Performance: Uses scan_ndjson for .ndjson/.jsonl or
-           NDJSON-formatted .json.
-        2. Defensive: Uses read_json + repair for standard .json (arrays).
+        Reads JSON or NDJSON files into a unified Polars LazyFrame.
+
+        Differentiates between NDJSON (high-performance scanning) and
+        standard JSON (defensive reading with repair) by checking file
+        extensions or peeking at the first few bytes.
+
+        Args:
+            input_path: The path to the file(s) or directory to read.
+            **kwargs: Additional options, including 'ignore_errors' and
+                'encoding'.
+
+        Returns:
+            pl.LazyFrame: A Polars LazyFrame representing the combined data.
         """
         paths = self.discover(input_path)
         if not paths:
@@ -135,8 +179,14 @@ class JSONHandler(FormatHandler):
 
     def from_df(self, df: pl.LazyFrame | pl.DataFrame, output_path: Path | str) -> None:
         """
-        Streaming write: ALWAYS uses NDJSON for better 50M row performance
-        and memory safety (2GB RAM limit).
+        Writes data to the specified output path in NDJSON format.
+
+        Always utilizes NDJSON for writing to ensure better performance on
+        large datasets (50M+ rows) and to stay within memory limits.
+
+        Args:
+            df: The Polars DataFrame or LazyFrame to write.
+            output_path: The destination path for the output file.
         """
         if isinstance(df, pl.LazyFrame):
             df.sink_ndjson(output_path)
@@ -144,5 +194,12 @@ class JSONHandler(FormatHandler):
             df.write_ndjson(output_path)
 
     def write(self, data: bytes, output_path: Path | str) -> None:
+        """
+        Writes raw bytes directly to the specified output path.
+
+        Args:
+            data: The bytes object to write.
+            output_path: The destination path for the file.
+        """
         with self.fs.open(output_path, "wb") as f:
             f.write(data)

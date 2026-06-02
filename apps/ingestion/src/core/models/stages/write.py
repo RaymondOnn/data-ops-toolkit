@@ -42,7 +42,7 @@ class WriteStage(ExecutionStage):
             )
 
         # 2. Gate: Transform Marker/Folder must exist
-        transform_path = task.folder / StageName.TRANSFORM.label
+        transform_path = task.workspace.run_path / StageName.TRANSFORM.label
         if not transform_path.exists():
             raise RewindTask(
                 StageName.TRANSFORM.label, "Transformation data marker missing."
@@ -50,8 +50,8 @@ class WriteStage(ExecutionStage):
 
         # 3. Gate: Physical artifact verification
         # If the manifest indicates rows were processed, they must be present on disk
-        if (transform_meta.output_row_count > 0 and 
-            not any(transform_path.glob("*.parquet"))
+        if transform_meta.output_row_count > 0 and not any(
+            transform_path.glob("*.parquet")
         ):
             raise RewindTask(
                 StageName.TRANSFORM.label, "Transformed physical artifacts missing."
@@ -68,7 +68,7 @@ class WriteStage(ExecutionStage):
 
         try:
             # 1. Resolve logical input (The partitioned parquet files)
-            source_dir = (task.folder / StageName.TRANSFORM.label).resolve()
+            source_dir = (task.workspace.run_path / StageName.TRANSFORM.label).resolve()
 
             LOG.info(
                 "Starting load into {target}",

@@ -53,7 +53,8 @@ class Doctor:
         try:
             usage = get_disk_usage(self.exec_ctx.workspace_dir)
             LOG.info(
-                f"✅ Disk space: {usage.free_gb:.2f}GB free ({usage.percent:.2f}% used) on {self.exec_ctx.workspace_dir}"
+                f"✅ Disk space: {usage.free_gb:.2f}GB free "
+                f"({usage.percent:.2f}% used) on {self.exec_ctx.workspace_dir}"
             )
         except Exception as e:
             LOG.error(f"❌ Failed to get disk usage: {e}")
@@ -133,7 +134,7 @@ class Doctor:
                 LOG.warning(f"⚠️ Code PEX not found: {self.exec_ctx.code_pex_path}")
                 all_ok = False
         else:
-            LOG.info("ℹ️ Code PEX path not configured.")
+            LOG.info("Code PEX path not configured.")
 
         if self.exec_ctx.deps_pex_path:
             if self.exec_ctx.deps_pex_path.exists():
@@ -142,7 +143,7 @@ class Doctor:
                 LOG.warning(f"⚠️ Deps PEX not found: {self.exec_ctx.deps_pex_path}")
                 all_ok = False
         else:
-            LOG.info("ℹ️ Deps PEX path not configured.")
+            LOG.info("Deps PEX path not configured.")
 
         return all_ok
 
@@ -176,7 +177,9 @@ class Doctor:
         return doctor.trace_route()
 
     def check_service_connectivity(self, service_type: str) -> bool:
-        """Tests connectivity for all configured services matching the requested type."""
+        """
+        Tests connectivity for all configured services matching the requested type.
+        """
         LOG.info(f"🩺 Testing service type: '{service_type}'...")
 
         if not self.builder:
@@ -257,7 +260,7 @@ class Doctor:
             targets.append(job_id)
 
         if not targets:
-            LOG.info("ℹ️ No job-specific IDs provided; skipping job validation.")
+            LOG.info("No job-specific IDs provided; skipping job validation.")
             return all_ok
 
         # 3. Validate Target Jobs

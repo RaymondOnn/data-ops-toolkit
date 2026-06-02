@@ -1,6 +1,8 @@
 import time
 import uuid
-from diskcache import Deque, Cache
+
+from diskcache import Cache, Deque
+
 
 class DiskcacheQueue:
     def __init__(self, directory, visibility_timeout=30, max_retries=3):
@@ -8,7 +10,7 @@ class DiskcacheQueue:
         self.cache = Cache(directory)
         self.visibility_timeout = visibility_timeout
         self.max_retries = max_retries
-        
+
         # We use a Deque for the actual Kafka-style ordering
         self.queue = Deque(directory=f"{directory}/queue")
 
@@ -21,7 +23,7 @@ class DiskcacheQueue:
             "group_id": group_id,
             "retry_count": 0,
             "available_at": time.time(),
-            "status": "pending"
+            "status": "pending",
         }
         # Metadata stored in cache, ID pushed to queue
         self.cache[job_id] = message
@@ -38,29 +40,28 @@ class DiskcacheQueue:
         # In a real high-scale system, you'd prune the deque
         for _ in range(len(self.queue)):
             job_id = self.queue.popleft()
-            
+
             with self.cache.transact():
                 msg = self.cache.get(job_id)
-                
+
                 if not msg or msg["status"] == "dlq":
                     continue
-                
+
                 now = time.time()
                 # Check if job is ready to be processed (handles backoff/timeout)
                 if msg["available_at"] <= now:
                     msg["status"] = "processing"
                     msg["available_at"] = now + self.visibility_timeout
                     msg["retry_count"] += 1
-                    
+
                     self.cache[job_id] = msg
-                    # Re-add to the end of the queue so it can be 'redelivered' 
+                    # Re-add to the end of the queue so it can be 'redelivered'
                     # if this worker crashes
                     self.queue.append(job_id)
                     return msg
-                else:
-                    # Not ready yet, put it back in the queue
-                    self.queue.append(job_id)
-            
+                # Not ready yet, put it back in the queue
+                self.queue.append(job_id)
+
             # Short sleep to prevent CPU spinning if queue is busy but locked
             time.sleep(0.01)
         return None
@@ -75,7 +76,8 @@ class DiskcacheQueue:
         """Negative Ack with Exponential Backoff."""
         with self.cache.transact():
             msg = self.cache.get(job_id)
-            if not msg: return
+            if not msg:
+                return
 
             if msg["retry_count"] >= self.max_retries:
                 msg["status"] = "dlq"
@@ -84,5 +86,5 @@ class DiskcacheQueue:
                 # Exponential backoff: 10s, 20s, 40s...
                 wait = (2 ** msg["retry_count"]) * 10
                 msg["available_at"] = time.time() + wait
-            
+
             self.cache[job_id] = msg

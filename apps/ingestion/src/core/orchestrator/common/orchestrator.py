@@ -8,6 +8,8 @@ from apps.ingestion.src.core.models.task import (
     Task,
     TaskSignal,
 )
+from apps.ingestion.src.core.models.task.enums import TaskIdentity
+from apps.ingestion.src.core.orchestrator.enums import TaskRef
 from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.utils.common import make_short_hash
 from apps.ingestion.src.utils.constants import (
@@ -20,7 +22,6 @@ from libs.utils.dates import get_current_timestamp
 from libs.utils.system import get_disk_usage, get_system_vitals
 from loguru import logger
 
-from ..enums import TaskRef
 from .janitor import Janitor
 from .manager import TaskManager
 from .signals import SignalProcessor
@@ -126,7 +127,7 @@ class Orchestrator:
             return
 
         for event in events:
-            run_id = event.task_ref.run_id
+            run_id = event.identity.run_id
             if event.signal_type == ".done":
                 LOG.success("Task Completion detected", run_id=run_id)
                 if event.folder_path:
@@ -227,7 +228,6 @@ class Orchestrator:
         overrides: dict[str, Any] | None = None,
         run_id: str | None = None,
     ) -> set[str]:
-
         run_ids = set()
 
         # 1. Get the list of dataset configurations for this Task ID
@@ -241,32 +241,35 @@ class Orchestrator:
         for task_ctx in task_contexts:
             # 1. Create the TaskRef first - this is now the source of truth for identity
             run_id = run_id or generate_run_id()
-            task_ref = TaskRef(
-                namespace=CACHE_TASK_NAMESPACE,
-                status=ExecutionStatus.PROVISIONED.value,
-                stage=task_ctx.from_stage,
+            identity = TaskIdentity(
                 job_id=task_ctx.job_id,
                 dataset_id=task_ctx.dataset_id,
                 partition_date=task_ctx.partition_date,
                 run_id=run_id,
             )
+            task_ref = TaskRef(
+                namespace=CACHE_TASK_NAMESPACE,
+                status=ExecutionStatus.PROVISIONED,
+                stage=task_ctx.from_stage,
+                identity=identity,
+            )
 
             log = LOG.bind(
-                run_id=task_ref.run_id,
-                job_id=task_ref.job_id,
-                dataset_id=task_ref.dataset_id,
+                run_id=task_ref.identity.run_id,
+                job_id=task_ref.identity.job_id,
+                dataset_id=task_ref.identity.dataset_id,
             )
             log.info(
                 "Provisioning new run",
-                run_id=task_ref.run_id,
-                identifier=task_ref.identifier,
+                run_id=task_ref.identity.run_id,
+                identifier=task_ref.identity.identifier,
                 from_stage=task_ref.stage,
             )
 
             # 2. Freeze the Task Context using the TaskRef identity
             config_path = (
                 self.exec_ctx.active_path
-                / f"{task_ref.identifier}:{task_ref.run_id}_{CONFIG_FILENAME}"
+                / f"{task_ref.identity.identifier}:{task_ref.identity.run_id}_{CONFIG_FILENAME}"
             )
             with config_path.open("wb") as f:
                 f.write(msgspec.json.encode(task_ctx))
@@ -290,9 +293,9 @@ class Orchestrator:
             # Update the state store with the actual TaskKey from the queue
             if queued_ref:
                 self.state_store.update_run(
-                    task_ref.run_id,
+                    task_ref.identity.run_id,
                     {
-                        "JOB_STATUS": queued_ref.status,
+                        "JOB_STATUS": queued_ref.status.value,
                         "CURRENT_STAGE": queued_ref.stage,
                     },
                 )
@@ -327,7 +330,7 @@ class Orchestrator:
         # 2. Sync the StateStore
         # Since request_status_sync created the .done file, we tell the StateStore
         # to perform its final deep sync to pull the failure details into the DB.
-        self.state_store.sync_from_folder(task.folder)
+        self.state_store.sync_from_folder(task.workspace.run_path)
 
         # 3. Cleanup logic (Optional: move to failed or delete)
         if status == ExecutionStatus.EXPIRED:

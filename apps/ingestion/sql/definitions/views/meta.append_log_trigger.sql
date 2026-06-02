@@ -5,11 +5,11 @@ APPEND TO META.EXECUTION_LOG
 AS
 WITH dates AS (
     SELECT now64(3) + INTERVAL 8 HOUR AS NOW_TS_LC
-) 
+)
 SELECT
     concat(
-        formatDateTime(CS.NEXT_RUN_TS_LC, '%Y%m%d-%H%i%s'), 
-        '-', 
+        formatDateTime(CS.NEXT_RUN_TS_LC, '%Y%m%d-%H%i%s'),
+        '-',
         substring(lower(hex(MD5(concat(CS.JOB_ID, CS.DATASET_ID, toString(CS.NEXT_RUN_TS_LC))))), 1, 8)
     ) AS RUN_ID
     , CS.JOB_ID AS JOB_ID
@@ -21,13 +21,13 @@ SELECT
     , (SELECT NOW_TS_LC FROM dates) AS LAST_UPDATED_AT_TS_LC
     -- 3. Added S. and CS. prefixes inside the IF logic to avoid ambiguity
     , cast(
-        if(S.IS_SNAPSHOT = 1 AND (SELECT NOW_TS_LC FROM dates) > cron_next(if(empty(S.CRON_EXPR), '0 0 * * *', S.CRON_EXPR), CS.NEXT_RUN_TS_LC), 
-            'EXPIRED', 
+        if(S.IS_SNAPSHOT = 1 AND (SELECT NOW_TS_LC FROM dates) > cron_next(if(empty(S.CRON_EXPR), '0 0 * * *', S.CRON_EXPR), CS.NEXT_RUN_TS_LC),
+            'EXPIRED',
             'PENDING'
         ), 'LowCardinality(String)'
     ) AS JOB_STATUS
     , cast(NULL, 'LowCardinality(Nullable(String))') AS CURRENT_STAGE
-    , cast(0, 'UInt16') AS JOB_BITMASK 
+    , cast(0, 'UInt16') AS JOB_BITMASK
     , cast(1, 'UInt8') AS IS_SCHEDULED
     , CS.WATCH_FILE_PATH AS WATCH_FILE_PATH
     , cast(NULL, 'Nullable(String)') AS RUNTIME_OVERRIDES
@@ -38,12 +38,12 @@ SELECT
     , cast(NULL, 'Nullable(String)') AS REMARKS
 FROM META.CURRENT_SCHEDULES AS CS
 LEFT ANY JOIN (
-    SELECT 
+    SELECT
         JOB_ID
         , DATASET_ID
         , IS_SNAPSHOT
-        , CRON_EXPR 
-    FROM META.JOB_SCHEDULES 
+        , CRON_EXPR
+    FROM META.JOB_SCHEDULES
     LIMIT 1 BY JOB_ID, DATASET_ID
 ) AS S ON CS.JOB_ID = S.JOB_ID AND CS.DATASET_ID = S.DATASET_ID
 WHERE CS.IS_DUE = 1;

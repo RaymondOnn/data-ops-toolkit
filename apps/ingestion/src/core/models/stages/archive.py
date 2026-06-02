@@ -36,7 +36,7 @@ class ArchiveStage(ExecutionStage):
                 parts = check_url.split("/")
                 check_url = "/".join(parts[:3])
 
-            if not self.service.client.exists(check_url):
+            if not self.service.fs.exists(check_url):
                 raise ConnectionError(
                     f"Archive pre-flight failed: Root destination '{check_url}' is unreachable or does not exist."
                 )
@@ -67,7 +67,7 @@ class ArchiveStage(ExecutionStage):
                 # Establish the root archival path for this specific run
                 # Pass the service client's storage options to UPath
                 # This ensures s3:// links use the correct credentials/endpoints
-                base = UPath(task_ctx.archive.base_path, **self.service.client.opts)
+                base = UPath(task_ctx.archive.base_path, **self.service.opts)
                 final_archive_path = (
                     base / task.job_id / task.partition_date / task.run_id
                 )
@@ -123,17 +123,12 @@ class ArchiveStage(ExecutionStage):
         Decision: Move files to the Archive location defined in the Context.
         Standardizing on: archive/{job_id}/{run_id}/{stage}/
         """
-
-        # We loop through the stages we want to keep
-        for stage in [StageName.EXTRACT, StageName.TRANSFORM]:
-            # Using .label ensures we use the case-folded string expected by the filesystem
-            label = stage.label
-            # Follow the active symlink to find the physical data
-            src_folder = task.folder.resolve() / label
+        # Decision: Concise stage iterator
+        for label in [StageName.EXTRACT.label, StageName.TRANSFORM.label]:
+            src_folder = task.workspace.run_path.resolve() / label
             if src_folder.exists():
-                dest_folder = f"{archive_root}/{label}"
                 object_store.archive_data(
-                    source_dir=src_folder, archive_path=dest_folder
+                    source_dir=src_folder, archive_path=f"{archive_root}/{label}"
                 )
 
     def _calculate_expiry(self, job: Task, end_timestamp: datetime) -> str:

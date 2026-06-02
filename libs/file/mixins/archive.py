@@ -5,6 +5,7 @@ from typing import Any
 
 import fsspec
 import polars as pl
+from libs.utils.dates import get_current_timestamp
 
 LOG = logging.getLogger(__name__)
 
@@ -29,8 +30,18 @@ class StandardArchiveMixin:
     ) -> str:
         """
         Archives raw source or normalized Bronze data for a specific dataset.
+
+        Args:
+            data: Either a path to a local file (str) or a Polars LazyFrame.
+            job_id: The unique identifier for the orchestration job.
+            dataset_name: The name of the specific table or dataset.
+            category: The lifecycle stage of the data (e.g., 'source', 'bronze').
+            logical_date: The business date the data belongs to. Defaults to now.
+
+        Returns:
+            str: The full path to the archived artifact.
         """
-        ref_date = logical_date or datetime.now().astimezone()
+        ref_date = logical_date or get_current_timestamp()
         date_path = ref_date.strftime("%Y/%m/%d")
 
         # New Hierarchy: job_id -> dataset_name -> date -> category
@@ -57,6 +68,15 @@ class StandardArchiveMixin:
     ) -> str:
         """
         Retrieves the specific table's archived file for re-processing.
+
+        Args:
+            job_id: The unique identifier for the job.
+            dataset_name: The name of the dataset to restore.
+            logical_date: The specific business date to look up.
+            category: The data category (default 'source').
+
+        Returns:
+            str: The path to the first file found in the archive directory.
         """
         date_path = logical_date.strftime("%Y/%m/%d")
         search_dir = (
@@ -79,8 +99,14 @@ class StandardArchiveMixin:
     ):
         """
         Deletes expired archives for a specific dataset within a job.
+
+        Args:
+            job_id: The unique identifier for the job.
+            dataset_name: The name of the dataset to clean.
+            days: Number of days of data to retain.
+            dry_run: If True, logs intended deletions without removing files.
         """
-        cutoff_date = datetime.now().astimezone() - timedelta(days=days)
+        cutoff_date = get_current_timestamp() - timedelta(days=days)
         dataset_root = f"{self.url}/archive/{job_id}/{dataset_name}"
 
         if not self.fs.exists(dataset_root):

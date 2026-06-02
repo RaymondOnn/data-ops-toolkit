@@ -11,7 +11,7 @@ JUST_BIN="$BIN_DIR/just"
 install_just() {
     echo "tools: 'just' not found in $BIN_DIR. Downloading version $VERSION..."
     mkdir -p "$BIN_DIR"
-    
+
     # Determine OS and Architecture
     OS=$(uname -s | tr '[:upper:]' '[:lower:]')
     ARCH=$(uname -m)
@@ -20,7 +20,7 @@ install_just() {
 
     # Use the official installer script restricted to the user directory
     curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to "$BIN_DIR" --tag "$VERSION"
-    
+
     echo "tools: 'just' installed successfully to $JUST_BIN"
 }
 

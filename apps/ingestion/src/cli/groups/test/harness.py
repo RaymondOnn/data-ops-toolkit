@@ -1,9 +1,11 @@
 import time
 from enum import StrEnum
-from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from apps.ingestion.src.core.models.task import ExecutionStatus, Task
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class ScenarioType(StrEnum):
@@ -30,14 +32,33 @@ class WorkflowHarness:
     """
 
     def __init__(self, orchestrator: Any):
+        """Initializes the harness with a reference to the orchestrator.
+
+        Args:
+            orchestrator: The runtime orchestrator instance to control.
+        """
         self.orchestrator = orchestrator
         self.exec_ctx = orchestrator.exec_ctx
 
     def trigger_and_wait(self, job_id: str, dataset_id: str, timeout: int = 60) -> str:
         """
-        GIVEN a job and dataset
-        WHEN triggered via the orchestrator
-        THEN wait until it reaches a terminal state or the timeout occurs.
+        Triggers a job and blocks until completion or timeout.
+
+        Args:
+            job_id: The ID of the job to trigger.
+            dataset_id: The specific dataset to trigger.
+            timeout: Maximum seconds to wait before raising TimeoutError.
+
+        Returns:
+            str: The run_id of the executed task.
+
+        Raises:
+            TimeoutError: If the task does not finish within the specified window.
+
+        Decision: Synchronous Driving.
+        By manually calling `_drive_engine` in a loop, the harness can simulate
+        the daemon's reactive behavior within a blocking test call, making
+        assertions reliable without needing complex asynchronous event listeners.
         """
         run_ids = self.orchestrator._trigger_job(job_id, dataset_id)
         run_id = next(iter(run_ids))
@@ -60,9 +81,21 @@ class WorkflowHarness:
 
     def inspect_task(self, run_id: str) -> Task:
         """
-        GIVEN a specific run_id
-        WHEN the physical folder is resolved
-        THEN rehydrate and return a Task object for assertion checks.
+        Rehydrates a Task object from its physical workspace for inspection.
+
+        Args:
+            run_id: The unique identifier of the run.
+
+        Returns:
+            Task: A rehydrated task object representing the current state on disk.
+
+        Raises:
+            FileNotFoundError: If the run folder cannot be located.
+
+        Decision: Physical Rehydration.
+        Accessing the Task object directly from the disk-based workspace
+        allows tests to verify actual side-effects (manifest updates, file
+        creations) rather than just checking in-memory mock states.
         """
         folder = self.orchestrator.state_store.resolve_task_path(run_id)
         if not folder:

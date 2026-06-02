@@ -20,7 +20,7 @@ class StageBitmask(IntFlag):
     ARCHIVE = auto()
 
     @classmethod
-    def ALL_DONE(cls) -> "StageBitmask":
+    def all_done(cls) -> "StageBitmask":
         """
         Dynamically calculates the sum of all flags.
         Useful for checking if the 50M row pipeline is 100% complete.
@@ -31,8 +31,8 @@ class StageBitmask(IntFlag):
         return mask
 
     def is_fully_complete(self) -> bool:
-        """Helper to check if the current instance matches ALL_DONE."""
-        return self == self.ALL_DONE()
+        """Helper to check if the current instance matches all_done."""
+        return self == self.all_done()
 
 
 class StageName(StrEnum):

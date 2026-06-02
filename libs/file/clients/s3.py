@@ -15,21 +15,32 @@ class S3Client(FileSystemClient):
     S3 Driver for AWS, MinIO, or LocalStack.
 
     Storage Options:
-        - key (str): AWS Access Key ID
-        - password (str): AWS Secret Access Key
-        - token (str): Temporary session token
-        - client_kwargs (dict): e.g., {'region_name': 'ap-southeast-1', 'endpoint_url': '...'}
-        - config_kwargs (dict): e.g., {'retries': {'max_attempts': 10}}
-        - default_fill_cache (bool): Set to False to prevent 2GB RAM spikes.
+        key (str): AWS Access Key ID.
+        password (str): AWS Secret Access Key.
+        token (str): Temporary session token.
+        client_kwargs (dict): e.g., {'region_name': 'ap-southeast-1', ...}.
+        config_kwargs (dict): e.g., {'retries': {'max_attempts': 10}}.
+        default_fill_cache (bool): Set to False to prevent 2GB RAM spikes.
     """
 
     def __init__(self, url: str, storage_options: dict[str, Any] | None = None) -> None:
+        """
+        Initializes the S3Client.
+
+        Args:
+            url: The base S3 URL (e.g., 's3://my-bucket').
+            storage_options: Driver-specific configuration dictionary.
+        """
         super().__init__(url, storage_options)
 
     @property
     def fs(self) -> S3FileSystem:
-        """Establishes the S3 connection using mapped credentials."""
+        """
+        Establishes the S3 connection using mapped credentials.
 
+        Returns:
+            S3FileSystem: The underlying s3fs instance.
+        """
         if not hasattr(self, "_fs") or self._fs is None:
             client_cfg = self.opts.pop("client")
 
@@ -103,8 +114,16 @@ class S3Client(FileSystemClient):
 
     def exists(self, path: str | Path) -> bool:
         """
-        WORKAROUND: Bypass the NoSuchBucket 404 in LocalStack
-        by using list_buckets for root-level checks.
+        Checks if a path or bucket exists on S3.
+
+        Includes a workaround for LocalStack NoSuchBucket errors for root-level
+        bucket checks by using list_buckets.
+
+        Args:
+            path: The S3 path to check.
+
+        Returns:
+            bool: True if the path exists, False otherwise.
         """
         resolved = self.resolve_path(str(path))
 
@@ -132,7 +151,16 @@ class S3Client(FileSystemClient):
             raise
 
     def find(self, path: str, pattern: str = "*") -> Generator[str, None, None]:
-        """Replacement for walk_paths following CLI search patterns."""
+        """
+        Searches for files under a path matching a glob-like pattern.
+
+        Args:
+            path: The directory or prefix to search.
+            pattern: Glob pattern to filter results (default '*').
+
+        Yields:
+            str: The full S3 path of matching objects.
+        """
         resolved = self.resolve_path(path)
         # s3fs.find is optimized to use S3 Prefixes rather than recursive LS
         for p in self.fs.find(resolved):
@@ -145,8 +173,13 @@ class S3Client(FileSystemClient):
         self, source: str, destination: str, recursive: bool = True, **kwargs
     ) -> None:
         """
-        The Interaction Layer:
-        Determines if this is a Cloud-to-Cloud copy or a Local-to-Cloud upload.
+        Copies files between local/S3 and S3/S3.
+
+        Args:
+            source: Source path (local or S3).
+            destination: Destination S3 path.
+            recursive: Whether to copy directories recursively.
+            **kwargs: Additional options passed to s3fs.
         """
         src = self.resolve_path(source)
         dst = self.resolve_path(destination)
@@ -169,19 +202,51 @@ class S3Client(FileSystemClient):
         return self.fs.cp(src, dst, recursive=recursive, **kwargs)
 
     def ls(self, path: str = "", detail: bool = False) -> list[Any]:
-        """Wrapper for listing objects."""
+        """
+        Lists objects in an S3 directory.
+
+        Args:
+            path: The S3 path to list.
+            detail: If True, returns full metadata for each object.
+
+        Returns:
+            list[Any]: A list of object names or dictionaries if detail=True.
+        """
         return self.fs.ls(path, detail=detail)
 
     def open(self, path: str, mode: str = "rb") -> Any:
-        """Wrapper for file I/O."""
+        """
+        Opens an S3 object for reading or writing.
+
+        Args:
+            path: The S3 path to open.
+            mode: Standard file opening mode (e.g., 'rb', 'wb').
+
+        Returns:
+            Any: An S3File object provided by s3fs.
+        """
         return self.fs.open(path, mode=mode)
 
     def _ensure_bucket_exists(self, path: str) -> None:
+        """
+        Validates that the target bucket exists, creating it if missing.
+
+        Useful for LocalStack scenarios where buckets aren't pre-provisioned.
+
+        Args:
+            path: An S3 path from which the bucket name is extracted.
+        """
         bucket = path.replace("s3://", "").lstrip("/").split("/")[0]
         if not self.exists(f"s3://{bucket}"):
             LOG.info(f"S3Client: Creating missing bucket {bucket}")
             self.fs.mkdir(bucket)
 
     def rm(self, path: str, recursive: bool = False) -> None:
-        """Wrapper for deletion."""
+        """
+        Deletes objects from S3.
+
+        Args:
+            path: The S3 path to delete.
+            recursive: If True, deletes all objects under the prefix.
+        """
         self.fs.rm(path, recursive=recursive)

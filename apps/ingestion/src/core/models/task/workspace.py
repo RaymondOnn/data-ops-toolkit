@@ -40,11 +40,25 @@ class TaskWorkspace:
 
     @property
     def run_path(self) -> Path:
-        """Standardizes the Path for this specific run."""
-        identifier = self.exec_ctx.get_task_identifier(
-            self.job_id, self.dataset_id, self.partition_date
+        """Standardizes the Path for this specific run.
+
+        Returns:
+            Path: The resolved absolute path to the task run directory.
+
+        Decision: Unified Path Management.
+        By delegating path resolution to the ExecutionContext and TaskIdentity,
+        we ensure that all components (Orchestrator, Worker, CLI) look for
+        metadata in the exact same deterministic locations.
+        """
+        from .enums import TaskIdentity
+
+        identity = TaskIdentity(
+            job_id=self.job_id,
+            dataset_id=self.dataset_id,
+            partition_date=self.partition_date,
+            run_id=self.run_id,
         )
-        return self.base_dir / self.category / identifier / self.run_id
+        return self.exec_ctx.get_run_path(identity, category=self.category)
 
     @property
     def manifest_path(self) -> Path:
@@ -138,11 +152,22 @@ class TaskWorkspace:
             shutil.rmtree(self.run_path)
 
         # 2. Cleanup orphaned config in active root (from the Provisioning phase)
-        ident = self.exec_ctx.get_task_identifier(
-            self.job_id, self.dataset_id, self.partition_date
+        # Decision: Metadata Hygiene.
+        # The provisioning phase seeds a config file in the active root before the
+        # folder is created. We ensure this 'seed' is purged alongside the
+        # task directory to prevent metadata bloat.
+        from .enums import TaskIdentity
+
+        identity = TaskIdentity(
+            job_id=self.job_id,
+            dataset_id=self.dataset_id,
+            partition_date=self.partition_date,
+            run_id=self.run_id,
         )
         root_config = (
-            self.base_dir / "active" / f"{ident}:{self.run_id}_{CONFIG_FILENAME}"
+            self.base_dir
+            / "active"
+            / f"{identity.identifier}:{self.run_id}_{CONFIG_FILENAME}"
         )
         root_config.unlink(missing_ok=True)
 

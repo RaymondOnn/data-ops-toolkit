@@ -52,22 +52,22 @@ graph TB
     RT --> TRIG
     RT --> CMD
     RT --> ORCH
-    
+
     TRIG -- Evaluates schedules --> ORCH
     CMD -- Parses .cmd files --> RT
-    
+
     %% Orchestrator Coordination
     ORCH --> TMGR
     ORCH --> SIG
     ORCH --> SSTORE
     ORCH --> JAN
-    
+
     %% Dispatching Flow
     TMGR -- Admission Control --> CACHE
     TMGR -- Resource check --> COMP
     COMP -- spawn_worker --> RAY
     RAY -- Spawns --> EXEC
-    
+
     %% Worker Execution Flow
     EXEC -- Rehydrates Identity --> TASK
     TASK --> WS
@@ -75,13 +75,13 @@ graph TB
     STAGES -- Distributed I/O --> DB_SRC
     STAGES -- Distributed I/O --> S3_OBJ
     STAGES -- Deterministic Write --> FS_DATA
-    
+
     %% Event Feedback Loop
     STAGES -- Finalize --> WS
     WS -- Drops .done/.fail signal --> SIG
     WS -- Relative Symlinks --> FS_ACTIVE
     SIG -- Triggers Tick --> ORCH
-    
+
     %% Auditing & Maintenance
     SSTORE -- Deep Sync --> FS_ACTIVE
     SSTORE -- Buffer/Flush --> CH
@@ -132,14 +132,14 @@ graph LR
     TR -- 1. Resolve Overrides --> ORCH
     ORCH -- 2. Provision --> FS_ACTIVE
     ORCH -- 3. Dispatch --> TMGR
-    
+
     TMGR -- 4. Reserve Slot --> COMP
     TMGR -- 5. Push to Cache --> CACHE
     COMP -- 6. Spawn --> WORKER
-    
+
     STG -- 7. Deterministic Write --> FS_DATA
     STG -- 8. Signal Completion --> SIG
-    
+
     SIG -- 9. Trigger Tick --> ORCH
     ORCH -- 10. Sync Artifacts --> SSTORE
     SSTORE -- 11. Final Flush --> CH[(ClickHouse)]

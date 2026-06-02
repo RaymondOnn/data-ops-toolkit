@@ -44,11 +44,10 @@ class DefaultTransformer(Transformer):
         lf = lf.with_columns(pl.col(pl.Utf8).replace("", None))
 
         # 4. DEDUPLICATE: Global uniqueness at the record level
-        lf = lf.unique(keep="first")
+        return lf.unique(keep="first")
 
         # # 5. AUTO-FLATTEN: Unpack nested Structs
         # lf = self._auto_flatten_structs(lf)
-        return lf
 
     def _standardize_column_names(self, lf: pl.LazyFrame) -> pl.LazyFrame:
         """Forces snake_case and removes special characters."""

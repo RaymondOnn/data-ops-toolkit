@@ -49,7 +49,7 @@ jobs:
           # -a: archive mode, -v: verbose, --update: only copy if source is newer
           mkdir -p ./dist/${{ matrix.app }}
           rsync -av --update deps.pex ${{ matrix.app }}.pex ./dist/${{ matrix.app }}/
-          
+
           echo "### 📂 Staging Summary" >> $GITHUB_STEP_SUMMARY
           ls -lh ./dist/${{ matrix.app }} >> $GITHUB_STEP_SUMMARY
 
@@ -64,7 +64,7 @@ jobs:
         run: |
           # S3 Path: s3://deployments/<app_name>/<release_id>/...
           S3_PATH="s3://deployments/${{ matrix.app }}/${{ needs.list-apps.outputs.release_id }}"
-          
+
           aws s3 mb s3://deployments --endpoint-url $LOCALSTACK_URL || true
           aws s3 sync ./dist/${{ matrix.app }} $S3_PATH --endpoint-url $LOCALSTACK_URL
 
@@ -72,15 +72,15 @@ jobs:
         run: |
           S3_PATH="s3://deployments/${{ matrix.app }}/${{ needs.list-apps.outputs.release_id }}"
           mkdir -p ./s3_verify
-          
+
           echo "📥 Downloading artifacts from S3 for verification..."
           aws s3 cp $S3_PATH ./s3_verify --recursive --endpoint-url $LOCALSTACK_URL
-          
+
           echo "🔍 Running rsync checksum verification..."
           # -i (itemize) outputs a code like '>f..t....' if there's a difference.
           # If the output is empty, the folders are identical.
           DIFFS=$(rsync -rvnc --delete --itemize-changes ./dist/${{ matrix.app }}/ ./s3_verify/ | grep -v 'sending list' || true)
-          
+
           if [ -n "$DIFFS" ]; then
             echo "❌ Verification Failed! S3 content does not match local dist."
             echo "Differences found:"
@@ -96,12 +96,12 @@ jobs:
           echo "🧹 Cleaning up old releases in S3 (keeping last 5)..."
           # List folders, sort them, skip the last 5, and delete the rest
           OLD_RELEASES=$(aws s3 ls s3://deployments/${{ matrix.app }}/ --endpoint-url $LOCALSTACK_URL | awk '{print $2}' | sort -r | tail -n +6)
-          
+
           for RELEASE in $OLD_RELEASES; do
             echo "Deleting old release: $RELEASE"
             aws s3 rm s3://deployments/${{ matrix.app }}/$RELEASE --recursive --endpoint-url $LOCALSTACK_URL
           done
-          
+
           echo "✅ S3 Cleanup complete." >> $GITHUB_STEP_SUMMARY
 
   deploy:
@@ -146,16 +146,16 @@ jobs:
             export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
             export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
             export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION
-            
+
             mkdir -p $DEPLOY_DIR
-            
+
             echo "📥 Remote host pulling artifacts from S3..."
             aws s3 cp $S3_URI $DEPLOY_DIR --recursive --endpoint-url $LOCALSTACK_INTERNAL_URL
-            
+
             echo "🔗 Updating global dependency symlink..."
             # Create a stable symlink for the deps.pex
             ln -sfn $DEPLOY_DIR/deps.pex /opt/deploy/current_deps.pex
-            
+
             echo "🏃 Running application..."
             # PEX_PATH is already set in the Dockerfile ENV, so we just run the app
             python3 $DEPLOY_DIR/${{ matrix.app }}.pex
@@ -179,7 +179,7 @@ jobs:
         run: |
           APP_NAME="${{ matrix.app }}"
           RELEASES_PATH="/opt/deploy/$APP_NAME"
-          
+
           echo "🧹 Cleaning up old releases on remote server (keeping last 5)..."
           # List directories, sort by name (which includes timestamp), keep the last 5, and delete the rest
           ssh -p 2222 -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "bash -s" << EOF

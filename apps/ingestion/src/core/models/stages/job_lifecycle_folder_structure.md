@@ -19,7 +19,7 @@ workspace_dir/
 
 ## 1. Task Initialization
 
-When a new ingestion job is triggered, the engine provisions a dedicated isolated space for its metadata in the `active/` directory. 
+When a new ingestion job is triggered, the engine provisions a dedicated isolated space for its metadata in the `active/` directory.
 
 **Folder Path:**
 `active/{job_id}:{dataset_id}_{partition_date}/{run_id}/`
@@ -53,23 +53,23 @@ sequenceDiagram
 
     Note over O,AR: Phase 1: Provisioning
     O->>AR: Seed {job_id}_{run_id}_config.json
-    
+
     Note over O,AJ: Phase 2: Task Initialization (Lazy Folder Creation)
     O->>AJ: Create Folder active/{job_id}:{dataset}_{date}/{run_id}
     O->>AJ: Create / Seed manifest.json (status=RUNNING)
     O->>AR: Move config.json -> AJ: {job_id}_{run_id}_config.json
-    
+
     loop For Every Step (Extract, Transform, Load...)
         Note over O,AJ: Step Check-in
         O->>AJ: Update manifest.json (current_stage=NAME, status=RUNNING)
-        
+
         Note over O,D: Processing Stage Logic...
         O->>D: Write payload to data/stage_dir/
-        
+
         Note over O,AJ: Step Sign-off (Atomic Write)
         O->>AJ: Write directory marker (e.g., /extract)
         O->>AJ: Update manifest.json (metrics, status=SUCCESS)
-        
+
         Note over O,S: External Notification
         O->>S: Touch signals/{run_id}.sync
     end
@@ -104,7 +104,7 @@ If a job reaches `COMPLETE`, or has stagnated beyond its TTL (Time-To-Live), the
 
 ## 4. End of Lifecycle: The `CompleteStep`
 
-Assuming a job runs successfully through the entire pipeline and finishes its final stage (`CompleteStep`), the system reaches a "Zero-Footprint" (or minimized footprint) state for that run. 
+Assuming a job runs successfully through the entire pipeline and finishes its final stage (`CompleteStep`), the system reaches a "Zero-Footprint" (or minimized footprint) state for that run.
 
 **What you will see on disk immediately after `CompleteStep`:**
 
@@ -138,7 +138,7 @@ workspace_dir/
 ```mermaid
 graph TD
     Trigger((Task Triggered)) --> Queue[Diskcache: PENDING]
-    
+
     subgraph "Execution (active/)"
         Queue --> Executor[Executor Picks Up: PROVISIONING]
         Executor --> Init[Task.from_folder: Rehydrate]
@@ -165,12 +165,12 @@ graph TD
     %% Recovery / Manual Intervention
     H -- "Resource Available / Manual Resume" --> Resume[Move back to active/]
     Resume --> Queue
-    
+
     F -- "Developer Fix + Retry" --> Retry[Move back to active/ & Reset Manifest]
     Retry --> Queue
 
     Zombie -- "Discovery via Recovery Scan + Auto Resume" --> Retry[Move back to active/ & Reset Manifest]
-    
+
 
     %% Cleanup
     C --> Janitor[Janitor: TTL Cleanup]

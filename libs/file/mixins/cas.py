@@ -8,6 +8,7 @@ from typing import Any
 import fsspec
 import polars as pl
 from libs.file.formats import FormatFactory
+from libs.file.utils import filter_files
 from libs.utils.dates import get_current_timestamp
 from upath import UPath
 
@@ -15,7 +16,15 @@ LOG = logging.getLogger(__name__)
 
 
 def calculate_sha256(local_path: str) -> str:
+    """
+    Calculates the SHA-256 hash of a local file in chunks.
 
+    Args:
+        local_path: The filesystem path to the local file.
+
+    Returns:
+        str: The hex digest of the file's content.
+    """
     sha256_hash = hashlib.sha256()
     with UPath(local_path).open("rb") as f:
         for byte_block in iter(lambda: f.read(65536), b""):  # 64KB chunks
@@ -57,9 +66,38 @@ class CASArchiveMixin:
     def archive_to_cas(
         self, local_path: str, job_id: str, metadata: dict[str, Any] | None = None
     ) -> tuple[str, str]:
+        """Archives a local file to the Content-Addressable Storage vault.
+
+        Generates a content hash, stores the file in a sharded physical vault,
+        and creates a logical manifest pointer for the specific job.
+
+        Args:
+            local_path: Path to the local file to archive.
+            job_id: Identifier for the job creating the archive.
+            metadata: Optional dictionary of metadata to store in the manifest.
+
+        Returns:
+            tuple[str, str]: (generated_vault_path, logical_manifest_path).
+
+        Decision: Sharded Entropy.
+        We use the first 4 characters of the hash to create a two-tier directory
+        structure. This prevents any single directory from exceeding OS-level
+        file count limits when the vault grows to millions of artifacts.
         """
-        The main entry point for archiving.
-        Returns (vault_path, manifest_path).
+        """
+        Archives a local file to the Content-Addressable Storage vault.
+
+        Generates a content hash, stores the file in a sharded physical vault,
+        and creates a logical manifest pointer for the specific job.
+
+        Args:
+            local_path: Path to the local file to archive.
+            job_id: Identifier for the job creating the archive.
+            metadata: Optional dictionary of metadata to store in the manifest.
+
+        Returns:
+            tuple[str, str]: A tuple containing the generated vault path
+                and the manifest path.
         """
 
         # 1. Generate Hash and Sharded Path
@@ -91,7 +129,14 @@ class CASArchiveMixin:
     def _atomic_vault_upload(
         self, local_path: str, vault_path: str, vault_dir: str
     ) -> None:
-        """Ensures file integrity by using a temporary upload path."""
+        """
+        Ensures file integrity by using a temporary upload path.
+
+        Args:
+            local_path: Source path on the local filesystem.
+            vault_path: Final destination path in the CAS vault.
+            vault_dir: The sharded directory containing the vault file.
+        """
         temp_path = f"{vault_path}.tmp"
 
         self.fs.makedirs(vault_dir, exist_ok=True)
@@ -112,8 +157,17 @@ class CASArchiveMixin:
         reference_date: datetime | None = None,  # New: Support for backfills
     ) -> str:
         """
-        Writes the logical pointer.
-        Use reference_date for backfills to ensure data is logically correctly placed.
+        Writes the logical pointer (manifest) for a CAS entry.
+
+        Args:
+            job_id: The unique identifier for the job.
+            file_hash: The SHA-256 hash of the content.
+            vault_path: The physical path where the content is stored.
+            meta: Metadata dictionary to persist with the manifest.
+            reference_date: Optional date for backfills. Defaults to now.
+
+        Returns:
+            str: The full path to the created manifest JSON file.
         """
         # Use the provided date (backfill) or current date (standard run)
         target_date = reference_date or get_current_timestamp()
@@ -151,14 +205,41 @@ class CASArchiveMixin:
 
     def crawl_manifests(self, job_id: str | None = None) -> pl.DataFrame:
         """
-        Aggregates all job manifests into a single Polars DataFrame.
-        Useful for storage reporting and audit trails.
-        """
-        # If job_id is provided, scope to that job; otherwise, crawl everything.
-        search_path = f"{self.url}/archive/jobs/{job_id if job_id else '**'}"
+        Aggregates logical manifests into a single Polars DataFrame.
 
-        # We use the crawler context to find all manifest.json files
-        _, targets = self.get_reader_context(search_path, file_pattern="manifest.json")
+        Args:
+            job_id: If provided, limits the crawl to a specific job's history.
+                Otherwise, crawls all manifests across the system.
+
+        Returns:
+            pl.DataFrame: A DataFrame containing the combined manifest data
+                useful for audit trails and lineage reporting.
+
+        Decision: JSONL over JSON.
+        While manifests are single JSON files, we recommend JSONL for
+        high-volume logging. For crawling, we load manifests into Polars
+        DataFrames because manifest volume can grow to 100k+ files, which
+        Polars handles much more efficiently than standard Python lists.
+        """
+        """Aggregates logical manifests into a single Polars DataFrame.
+
+        Decision: Container Agnostic Discovery.
+        We use _mount_archive_fs to handle cases where the entire job
+        history might be encapsulated in an archive (e.g. historical_jobs.zip).
+        This allows the crawler to see manifest.json files regardless of
+        the physical storage medium.
+        """
+        search_path = f"{self.url}/archive/jobs/{job_id if job_id else '**'}"
+        fs = self._mount_archive_fs(search_path)
+
+        # If the mount returns a virtual FS (archive), we use container discovery
+        if fs is not self.fs:
+            targets = self.get_archive_contents(search_path, pattern="manifest.json")
+        else:
+            # Standard directory search
+            resolved = self.resolve_path(search_path)
+            all_files = fs.find(resolved) if fs.isdir(resolved) else [resolved]
+            targets = filter_files(all_files, "manifest.json", search_path)
 
         if not targets:
             return pl.DataFrame()
@@ -171,7 +252,16 @@ class CASArchiveMixin:
     def retrieve_file(self, job_id: str, date_str: str) -> str:
         """
         Finds the physical vault path for a specific job run.
-        date_str format: 'YYYY/MM/DD'
+
+        Args:
+            job_id: The job identifier.
+            date_str: Date string in 'YYYY/MM/DD' format.
+
+        Returns:
+            str: The resolved physical path in the vault.
+
+        Raises:
+            FileNotFoundError: If the manifest or the physical file is missing.
         """
         manifest_path = f"{self.url}/archive/jobs/{job_id}/{date_str}/manifest.json"
 
@@ -192,8 +282,14 @@ class CASArchiveMixin:
 
     def garbage_collect(self, dry_run: bool = True) -> None | int:
         """
-        Identifies and removes files in the /vault/ that are no longer
-        referenced by any manifest in /jobs/.
+        Removes orphaned files in the vault not referenced by any manifest.
+
+        Args:
+            dry_run: If True, logs intended deletions without removing files.
+
+        Returns:
+            Optional[int]: The number of files deleted (or marked for deletion).
+                Returns None if no manifests are found to prevent total loss.
         """
         LOG.info(f"🧹 Starting Garbage Collection (Dry Run: {dry_run})")
 

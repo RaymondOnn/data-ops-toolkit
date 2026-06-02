@@ -10,7 +10,8 @@ def test_circuit_breaker_blocks_and_recovers(runtime, tmp_path):
     """
     GIVEN a service (e.g., ClickHouse) that becomes temporarily unavailable
     WHEN a task attempts to use that service
-    THEN the task should transition to BLOCKED, and then to RETRY once the service recovers.
+    THEN the task should transition to BLOCKED, and then to RETRY
+    once the service recovers.
     """
     # 1. Setup: Trigger a job that uses a service that we will mock to fail
     # We need a source that will trigger the service factory

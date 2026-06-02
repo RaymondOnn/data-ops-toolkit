@@ -4,7 +4,7 @@ from typing import Any, ClassVar
 
 from apps.ingestion.src.utils.exceptions import RetryTask
 from libs.auth.factory import AuthFactory, SecretProvider
-from libs.auth.models import Secret
+from libs.auth.secret import Secret
 from libs.cache.base import KeyValueCache
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreakerTripped
@@ -30,17 +30,34 @@ class ServiceFactory:
 
     @staticmethod
     def _make_hashable(value: Any) -> Any:
+        """
+        Recursively converts a dictionary or list into a hashable structure.
+
+        Args:
+            value: The nested object to convert.
+
+        Returns:
+            Any: A structure composed of frozensets and tuples.
+        """
         if isinstance(value, dict):
             return frozenset(
                 (k, ServiceFactory._make_hashable(v)) for k, v in value.items()
             )
-        if isinstance(value, (list, tuple)):
+        if isinstance(value, list | tuple):
             return tuple(ServiceFactory._make_hashable(v) for v in value)
         return value
 
     @classmethod
     def register(cls, name: str) -> Callable[[type], type]:
-        """Decorator to register services."""
+        """
+        Decorator to register a service class into the factory registry.
+
+        Args:
+            name: The unique key used to identify the service (e.g., 'data_lake').
+
+        Returns:
+            Callable: The decorator wrapper.
+        """
 
         def wrapper(wrapped_class: type) -> type:
             cls._SERVICES[name.casefold()] = wrapped_class
@@ -50,6 +67,13 @@ class ServiceFactory:
 
     @classmethod
     def get_provider(cls, env: str, config: dict[str, Any]) -> None:
+        """
+        Initializes the secret provider used for resolving credentials.
+
+        Args:
+            env: The deployment environment (dev/prod).
+            config: Configuration for the AuthFactory.
+        """
         cls._provider = AuthFactory.get_provider(env=env, **config)
 
     @classmethod
@@ -57,8 +81,23 @@ class ServiceFactory:
         cls, service_type: str, flags: Any | None = None, **config: Any
     ) -> Any:
         """
-        Acts as the Singleton Manager.
-        Returns a service instance based on account_id.
+        Retrieves or creates a singleton service instance.
+
+        Handles service registration lookup, benchmark-mode swapping,
+        secret resolution for 'password' fields, and connection retry logic.
+
+        Args:
+            service_type: The registered name of the service.
+            flags: Optional object containing 'benchmark_mode' toggles.
+            **config: Driver-specific configuration parameters.
+
+        Returns:
+            Any: An initialized service instance.
+
+        Raises:
+            ServiceNotFound: If the service_type is not registered.
+            RetryTask: On transient connectivity failures during init.
+            AuthFailure: On terminal credential issues.
         """
         # FEATURE TOGGLE: Cost/Tool Benchmarking
         # If benchmark_mode is on, we can swap the requested service
@@ -102,10 +141,10 @@ class ServiceFactory:
                             f"Cannot resolve secret for '{path}'."
                         )
                     update_nested_key(
-                        data=config, 
-                        path=path, 
-                        new_key="password", 
-                        new_value=Secret(value, provider=cls._provider)
+                        data=config,
+                        path=path,
+                        new_key="password",
+                        new_value=Secret(value, provider=cls._provider),
                     )
 
             try:
@@ -137,7 +176,21 @@ class ServiceFactory:
     def _get_typed_service(
         cls, service_type: str, interface: type, flags: Any | None = None, **config: Any
     ) -> Any:
-        """Helper to ensure the retrieved service matches the expected interface."""
+        """
+        Ensures the retrieved service adheres to a specific interface.
+
+        Args:
+            service_type: The registered name of the service.
+            interface: The expected class or protocol (Source/Sink/Archive).
+            flags: Optional feature flags.
+            **config: Driver configuration.
+
+        Returns:
+            Any: The validated service instance.
+
+        Raises:
+            TypeError: If the service does not implement the interface.
+        """
         service = cls.get_service(service_type, flags=flags, **config)
         if not isinstance(service, interface):
             raise TypeError(
@@ -149,6 +202,17 @@ class ServiceFactory:
     def get_source(
         cls, service_type: str, flags: Any | None = None, **config: Any
     ) -> Source:
+        """
+        Specialized factory for Data Sources.
+
+        Args:
+            service_type: Registered source name.
+            flags: Optional flags.
+            **config: Connection settings.
+
+        Returns:
+            Source: An object implementing the Source interface.
+        """
         return cls._get_typed_service(service_type, Source, flags, **config)
         # return cast(Source, service)
 
@@ -156,19 +220,50 @@ class ServiceFactory:
     def get_sink(
         cls, service_type: str, flags: Any | None = None, **config: Any
     ) -> Sink:
+        """
+        Specialized factory for Data Sinks.
+
+        Args:
+            service_type: Registered sink name.
+            flags: Optional flags.
+            **config: Connection settings.
+
+        Returns:
+            Sink: An object implementing the Sink interface.
+        """
         return cls._get_typed_service(service_type, Sink, flags, **config)
 
     @classmethod
     def get_archive(
         cls, service_type: str, flags: Any | None = None, **config: Any
     ) -> Archive:
+        """
+        Specialized factory for Archival services.
+
+        Args:
+            service_type: Registered archive name.
+            flags: Optional flags.
+            **config: Connection settings.
+
+        Returns:
+            Archive: An object implementing the Archive interface.
+        """
         return cls._get_typed_service(service_type, Archive, flags, **config)
 
     @classmethod
     def get_cache(cls, workspace_dir: Path, cache_cfg: dict[str, Any]) -> KeyValueCache:
         """
-        Returns a normalized CacheService instance.
-        Dependency-free: uses primitive Path and Dict instead of ExecutionContext.
+        Creates a normalized KeyValueCache instance.
+
+        Supports Redis for distributed environments and tuned DiskCache for
+        local execution with reduced SQLite contention.
+
+        Args:
+            workspace_dir: Physical directory for local storage.
+            cache_cfg: Configuration containing 'type' (redis/diskcache).
+
+        Returns:
+            KeyValueCache: A concrete cache implementation.
         """
         from libs.cache import DiskCache, RedisCache
 

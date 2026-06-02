@@ -33,7 +33,13 @@ def to_ch_datetime(ts: Any) -> str | None:
 
 
 class TaskMetadata(msgspec.Struct):
-    """Typed metadata for a job in the task queue."""
+    """Typed metadata for a job in the task queue.
+
+    Decision: Persistence of Intent.
+    By including rewind_history here, we ensure that the 'One-Time Rewind'
+    constraint is enforced even if the orchestrator reboots, as the hot cache
+    on disk preserves this state.
+    """
 
     job_id: str
     run_id: str
@@ -44,6 +50,7 @@ class TaskMetadata(msgspec.Struct):
     status: str = "WAITING"
     last_hb: float = msgspec.field(default_factory=time.time)
     retry_count: int = 0
+    rewind_history: dict[str, str] = msgspec.field(default_factory=dict)
     expires_at: float | None = None
     blocked_by: str | None = None
 
@@ -53,11 +60,11 @@ class TaskMetadata(msgspec.Struct):
     ) -> "TaskMetadata":
         """Standardized factory to create metadata from a reference."""
         return cls(
-            job_id=ref.job_id,
-            run_id=ref.run_id,
-            dataset_id=ref.dataset_id,
-            partition_date=ref.partition_date,
-            status=ref.status,
+            job_id=ref.identity.job_id,
+            run_id=ref.identity.run_id,
+            dataset_id=ref.identity.dataset_id,
+            partition_date=ref.identity.partition_date,
+            status=ref.status.value,
             config_file=config_file,
             current_stage=ref.stage,
             last_hb=time.time(),
@@ -66,14 +73,18 @@ class TaskMetadata(msgspec.Struct):
 
     def to_ref(self) -> TaskRef:
         """Converts metadata back into a TaskRef identity handle."""
+        from apps.ingestion.src.core.models.task.enums import TaskIdentity
+
         return TaskRef(
             namespace=CACHE_TASK_NAMESPACE,
-            status=self.status,
+            status=ExecutionStatus(self.status),
             stage=self.current_stage,
-            job_id=self.job_id,
-            dataset_id=self.dataset_id,
-            partition_date=self.partition_date,
-            run_id=self.run_id,
+            identity=TaskIdentity(
+                job_id=self.job_id,
+                dataset_id=self.dataset_id,
+                partition_date=self.partition_date,
+                run_id=self.run_id,
+            ),
         )
 
 
@@ -174,22 +185,14 @@ class JobUpdate(msgspec.Struct, kw_only=True):
     RUNTIME_OVERRIDES: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
-        """Sanitize all fields for normalization (timestamps and stages)."""
-        if isinstance(self.CURRENT_STAGE, str):
+        """Declarative data normalization for database compatibility."""
+        # 1. Normalize Stage Naming
+        if self.CURRENT_STAGE:
             super().__setattr__("CURRENT_STAGE", self.CURRENT_STAGE.upper())
 
-        for name, _ in self.__annotations__.items():
-            if "TIMESTAMP" in name or name.endswith("_LC"):
-                val = getattr(self, name, None)
-                if val is not None:
-                    super().__setattr__(name, to_ch_datetime(val))
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        """Intercepts assignments to ensure data normalization."""
-        if name == "CURRENT_STAGE" and isinstance(value, str):
-            value = value.upper()
-
-        if "TIMESTAMP" in name or name.endswith("_LC"):
-            value = to_ch_datetime(value)
-
-        super().__setattr__(name, value)
+        # 2. Bulk Timestamp Sanitization
+        for field in self.__struct_fields__:
+            if "TIMESTAMP" in field or field.endswith("_LC"):
+                val = getattr(self, field)
+                if val:
+                    super().__setattr__(field, to_ch_datetime(val))

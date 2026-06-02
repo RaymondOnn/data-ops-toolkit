@@ -14,7 +14,7 @@ aws configure set output json
 # Function to validate S3 bucket naming conventions
 validate_bucket_name() {
     local bucket_name=$1
-    
+
     # 1. Length check (3-63 characters)
     if [[ ${#bucket_name} -lt 3 || ${#bucket_name} -gt 63 ]]; then
         echo "❌ Error: Bucket name '$bucket_name' must be between 3 and 63 characters."
@@ -75,8 +75,8 @@ awslocal secretsmanager create-secret \
     --secret-string '{"key":"test","secret_key":"test"}'
 
 # 3. Create the IAM Role for STS AssumeRole
-# This role is used by AWSSessionManager. 
-# Note: LocalStack Community doesn't strictly enforce policy JSON, 
+# This role is used by AWSSessionManager.
+# Note: LocalStack Community doesn't strictly enforce policy JSON,
 # but the role must exist for assume_role to succeed.
 awslocal iam create-role \
     --role-name ProdIngestionRole \

@@ -1,4 +1,4 @@
-from .base import Task, create_task_folder
+from .base import Task
 from .enums import TaskRef, TaskSignal
 from .manifest import (
     ArchivePayload,
@@ -25,5 +25,4 @@ __all__ = [
     "TaskSignal",
     "TransformPayload",
     "WritePayload",
-    "create_task_folder"
 ]
