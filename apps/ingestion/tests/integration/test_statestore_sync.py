@@ -14,13 +14,13 @@ def test_statestore_flushes_manifest_to_db(runtime, tmp_path, mock_db_client):
     run_ids = runtime.orchestrator._trigger_job("sync_job", "sync_ds")
     run_id = next(iter(run_ids))
     task_path = runtime.orchestrator.state_store.resolve_task_path(run_id)
-    task = Task.from_folder(task_path, runtime.exec_ctx)
+    task = Task.from_path(task_path, runtime.exec_ctx)
 
     # Simulate progress with some metrics
     task.update_manifest(
         {
             "status": ExecutionStatus.RUNNING,
-            "extract": {"source_row_count": 50000000, "file_count": 50},
+            "extract": {"source_count": 50000000, "file_count": 50},
         }
     )
 
@@ -30,7 +30,7 @@ def test_statestore_flushes_manifest_to_db(runtime, tmp_path, mock_db_client):
         mock_db.client = mock_db_client
 
         # First, ensure the StateStore re-reads the disk
-        runtime.orchestrator.state_store.sync_from_folder(task.folder)
+        runtime.orchestrator.state_store.sync_from_folder(task.workspace.path)
         # Then, flush the local stream to the "database"
         runtime.orchestrator.state_store.flush()
 

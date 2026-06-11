@@ -1,44 +1,32 @@
-from typing import TYPE_CHECKING, Any, ClassVar, Optional, Protocol, runtime_checkable
+"""Base classes and protocols for task state management."""
+
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 from apps.ingestion.src.core.models.task import ExecutionStatus, TaskSignal
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.task import Task
-    from apps.ingestion.src.core.orchestrator.enums import JobRecord
+    from apps.ingestion.src.core.orchestrator.enums import TaskRecord
 
 
 @runtime_checkable
-class ResultState(Protocol):
-    """Base class for states that represent the outcome of a task's execution."""
+class TaskOutcome(Protocol):
+    """Defines the outcome of a task execution."""
 
-    # Where to move the task folder (e.g., "FAILED", "RETRY", "active")
-    folder_name: ClassVar[str | None]
+    folder: ClassVar[str | None]  # Where to move the task folder
+    status: ClassVar[ExecutionStatus]  # Status to set in manifest
+    is_final: ClassVar[bool]  # True if this is a terminal state
+    signal: ClassVar[TaskSignal | None]  # Signal to send to orchestrator
 
-    # The status to set in the manifest
-    target_status: ClassVar[ExecutionStatus]
-
-    # True if this state is an end-state (no further processing)
-    is_terminal: ClassVar[bool]
-
-    # The signal to drop for the orchestrator
-    signal: ClassVar[TaskSignal | None]
-
-    def is_applicable(self, task: "Task", exception: Exception | None = None) -> bool:
-        """
-        Determines if this state policy is applicable given the current task
-        and exception.
-        """
+    def matches(self, task: "Task", error: Exception | None = None) -> bool:
+        """Check if this outcome applies to the current task state."""
         ...
 
 
 @runtime_checkable
-class InferredState(Protocol):
-    """Experts in orchestrator-side diagnoses (Zombie, Expired)."""
+class DetectedState(Protocol):
+    """Outcome determined by background monitoring (zombie, expiry)."""
 
-    target_status: ClassVar[ExecutionStatus]
+    status: ClassVar[ExecutionStatus]
 
-    def is_applicable(
-        self,
-        record: Optional["JobRecord"] = None,
-        **kwargs: Any,
-    ) -> bool: ...
+    def matches(self, record: "TaskRecord | None" = None, **kwargs: Any) -> bool: ...

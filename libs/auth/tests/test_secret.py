@@ -40,7 +40,7 @@ class TestSecret:
         assert val == "cached_val"
         assert mock_provider.get_secret.call_count == 1
 
-    @patch("libs.auth.secret.register_log_masking")
+    @patch("libs.auth.secret.mask_secrets")
     def test_log_masking_registration(self, mock_register):
         """
         GIVEN a new Secret resolution
@@ -59,13 +59,13 @@ class TestSecret:
         """
         GIVEN a secret with special URL characters
         THEN it should return a URL-encoded string
-        WHEN resolve is called with sanitize=True
+        WHEN resolve is called with url_encode=True
         """
         mock_provider = MagicMock()
         mock_provider.get_secret.return_value = "pass#word"
         secret = Secret("dsn", provider=mock_provider)
 
-        val = secret.resolve(sanitize=True)
+        val = secret.resolve(url_encode=True)
 
         assert val == urllib.parse.quote_plus("pass#word")
         assert "#" not in val

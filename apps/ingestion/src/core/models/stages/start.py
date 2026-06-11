@@ -1,13 +1,13 @@
 from typing import TYPE_CHECKING
 
-import msgspec
-from apps.ingestion.src.core.models.task.manifest import BasePayload
+from apps.ingestion.src.core.models.task.manifest import StagePayload
 from apps.ingestion.src.utils.constants import STRIP_TZ_FOR_DB
-from libs.utils.dates import get_current_timestamp
+from libs.utils.dates import current_timestamp
 from loguru import logger
 
 from .base import ExecutionStage
-from .enums import StageName
+from .enums import Stage
+from .utils import stage
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.task import Task
@@ -16,54 +16,30 @@ if TYPE_CHECKING:
 LOG = logger
 
 
+@stage(Stage.START.value)
 class StartStage(ExecutionStage):
-    name = StageName.START.label
-    manifest: BasePayload
+    requires_disk_space: bool = False
 
     def execute(self, task: "Task") -> str:
         # persist job-start metadata using engine helper
-        start_timestamp = get_current_timestamp(strip_tz=STRIP_TZ_FOR_DB).isoformat(
-            sep=" "
-        )
-
+        start_ts = current_timestamp(naive=STRIP_TZ_FOR_DB).isoformat(sep=" ")
         try:
-            # 3. Gather System Metadata
-            commit_hash = self._get_commit_hash()  # Use the helper above
-            # worker_id = f"{socket.gethostname()}-{os.getpid()}"
-
             # 4. Create Payload
-            payload = BasePayload(
-                commit_hash=commit_hash,
-                source_params={},
-                worker_id=task.worker_id,
-                start_timestamp=start_timestamp,
+            payload = StagePayload(
+                start_time=start_ts,
+                # worker_id=task.worker_id,
             )
-            ctx = msgspec.structs.asdict(payload)
-
             # 5. Finalize (using the generic helper we discussed)
-            # Note: Pass the Struct directly if finalize() handles to_builtins
-            self.finalize(task, results=ctx)
+            # Note: Pass the Struct directly if checkpoint() handles to_builtins
+            self.checkpoint(task, payload=payload)
             LOG.info(
                 "Task initialized",
                 stage=self.name,
                 job_id=task.job_id,
                 run_id=task.run_id,
             )
-            return str(self._transit(task))
+            return self._next_stage()
         except Exception as e:
             # Ensure we capture the traceback in the manifest
-            self.finalize(task, exception=e)
+            self.checkpoint(task, error=e)
             raise
-
-    def _get_commit_hash(self) -> str:
-        import subprocess
-
-        try:
-            # Returns the short hash (e.g., a1b2c3d)
-            return (
-                subprocess.check_output(["git", "rev-parse", "--short", "HEAD"])
-                .decode("ascii")
-                .strip()
-            )
-        except Exception:
-            return "unknown"

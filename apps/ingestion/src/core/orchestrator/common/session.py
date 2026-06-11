@@ -1,127 +1,150 @@
+"""Task execution session manager with lifecycle hooks."""
+
 import time
 from typing import TYPE_CHECKING
 
 from apps.ingestion.src.core.models.task import ExecutionStatus, Task
 from apps.ingestion.src.core.models.task.enums import TaskRef
-from apps.ingestion.src.utils.common import setup_logger
-from apps.ingestion.src.utils.exceptions import RewindTask
+from apps.ingestion.src.utils.exceptions import RollbackRequired
 from loguru import logger
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.orchestrator.common.executor import Executor
-    from loguru import Logger
 
 
 class TaskSession:
-    """
-    A class-based context manager for managing task execution lifecycles.
-    Safer for Ray pickling than function decorators.
+    """Context manager for managing the lifecycle of a single task stage execution.
+
+    This class handles task initialization, dedicated logging setup, and
+    ensures proper cleanup and state conclusion upon exit.
     """
 
-    def __init__(self, executor: "Executor", task_ref: TaskRef, log: "Logger"):
-        """
-        Initializes the TaskSession.
+    def __init__(self, executor: "Executor", task_ref: TaskRef, log):
+        """Initializes the task session.
 
         Args:
-            executor: The compute executor running the task.
-            task_ref: The identity and routing handle for the task.
-            log: The logger instance for the execution context.
+            executor: The TaskExecutor instance driving this session.
+            task_ref: The reference to the task being executed.
+            log: A Loguru logger instance for this session.
+
+        Decision: Contextual Logging.
+        Each TaskSession gets a dedicated logger handler that writes to a
+        specific file for that task, ensuring isolated and searchable logs.
         """
         self.executor = executor
         self.task_ref = task_ref
         self.log = log
-        self.handler_id: int | None = None
         self.task: Task | None = None
-        self.start_time: float = 0
+        self._handler_id: int | None = None
+        self._context_manager = None
+        self._start_time: float = 0
 
     def __enter__(self) -> Task:
-        """
-        Prepares the environment for task execution.
-
-        Rehydrates the Task model, validates the physical workspace,
-        initializes dedicated file-based logging, and performs the
-        start-of-stage check-in.
+        """Enters the runtime context for the task stage.
 
         Returns:
-            Task: The initialized and checked-in task instance.
+            Task: The initialized Task object for the current stage.
 
         Raises:
-            FileNotFoundError: If the task workspace directory does not exist.
+            FileNotFoundError: If the task's workspace directory is missing.
+
+        Decision: Fail-Fast Workspace Validation.
+        We verify the existence of the task workspace immediately upon entry.
+        This prevents later operations from failing due to missing directories.
         """
-        # 1. Rehydrate Identity
-        self.start_time = time.perf_counter()
+        self._start_time = time.perf_counter()
+
+        self.executor.is_busy = True
+        self._context_manager = logger.contextualize(
+            run_id=self.task_ref.identity.run_id,
+            job_id=self.task_ref.identity.job_id,
+            stage=self.task_ref.stage,
+        )
+        self._context_manager.__enter__()
+
+        log_dir = self.executor.exec_ctx.workspace_dir / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_name = log_dir / (
+            f"{self.task_ref.identity.task_key}_"
+            f"{self.task_ref.identity.run_id}.jsonl".replace(":", "_")
+        )
+        # self._handler_id = setup_logger(
+        #     log_dir=self.executor.exec_ctx.workspace_dir / "logs",
+        #     is_debug=self.executor.exec_ctx.is_debug,
+        #     filename=log_name,
+        #     enqueue=False,
+        # )
+        self._handler_id = logger.add(
+            str(log_name),
+            level="DEBUG",
+            serialize=True,  # JSON format for structured logging
+            enqueue=True,
+            # Don't rotate per run - it's a single file per run
+        )
+
+        self.log.info(f"Session initialized for task: {self.task_ref.identity.run_id}")
+
         self.task = Task(
             task_ref=self.task_ref.with_updates(status=ExecutionStatus.RUNNING),
             worker_id=self.executor.worker_id,
             exec_ctx=self.executor.exec_ctx,
         )
 
-        # 2. Validate Workbench
+        # Verify workspace exists
         if not self.task.workspace.exists():
             raise FileNotFoundError(
-                f"Task workbench missing: {self.task.workspace.run_path}"
+                f"Task workspace missing: {self.task.workspace.path}"
             )
 
-        # 3. Dedicated Logging
-        self.handler_id = setup_logger(
-            log_dir=self.executor.exec_ctx.workspace_dir / "logs",
-            is_prod=self.executor.exec_ctx.is_prod,
-            is_debug=self.executor.exec_ctx.is_debug,
-            filename=f"{self.task.id}_{self.task.run_id}.jsonl".replace(":", "_"),
-            enqueue=True,
-        )
-
-        # 4. Start Handshake
+        # Initialize
         self.task.check_in(self.task_ref.stage)
         self.task.workspace.remove_marker(".retrying")
         self.task.workspace.remove_marker(".blocked")
-
-        self.log.info(
-            "ExecutionStage {stage} started", stage=self.task_ref.stage.upper()
-        )
+        self.log.info(f"Stage {self.task_ref.stage.upper()} started")
         return self.task
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """
-        Finalizes the task execution and cleans up resources.
-
-        Closes the dedicated log handler, updates the task manifest
-        based on the success or failure of the execution, and notifies
-        the executor that the worker is no longer busy.
+        """Exits the runtime context, handling exceptions and finalizing the task.
 
         Args:
-            exc_type: The type of exception raised during execution.
-            exc_val: The exception instance raised.
-            exc_tb: The traceback for the exception.
+            exc_type: The type of the exception raised, or None if no exception.
+            exc_val: The exception instance, or None.
+            exc_tb: The traceback object, or None.
+
+        Decision: Unified Conclusion.
+        Regardless of success or failure, `conclude_task` is called to ensure
+        the task's state is properly updated in the cache and manifest.
+
+        Decision: Rollback Exception Handling.
+        `RollbackRequired` is a special exception that signals a non-terminal
+        failure, allowing the task to be rewound without being marked as
+        permanently FAILED.
         """
-        duration = time.perf_counter() - self.start_time
+        duration = time.perf_counter() - self._start_time
 
-        # Ensure finalization happens even if payload execution fails
-        if self.task and not isinstance(exc_val, RewindTask):
-            self.executor.finalize_task_execution(self.task, runtime_exception=exc_val)
+        # Finalize unless this was a rewind
+        if self.task and not isinstance(exc_val, RollbackRequired):
+            self.executor.conclude_task(self.task, runtime_exception=exc_val)
 
+        # Log completion
         if exc_val:
-            if isinstance(exc_val, RewindTask):
+            if isinstance(exc_val, RollbackRequired):
                 self.log.warning(
-                    "ExecutionStage {stage} finished (REWIND)",
-                    stage=self.task_ref.stage.upper(),
-                    duration_sec=round(duration, 4),
+                    f"Stage {self.task_ref.stage.upper()} rewound ({duration:.2f}s)"
                 )
             else:
-                self.log.error(
-                    "ExecutionStage {stage} failed",
-                    stage=self.task_ref.stage.upper(),
-                    duration_sec=round(duration, 4),
-                    error=str(exc_val),
-                )
+                self.log.error(f"Stage {self.task_ref.stage.upper()} failed: {exc_val}")
         else:
             self.log.info(
-                "ExecutionStage {stage} finished",
-                stage=self.task_ref.stage.upper(),
-                duration_sec=round(duration, 4),
+                f"Stage {self.task_ref.stage.upper()} completed ({duration:.2f}s)"
             )
 
-        if self.handler_id is not None:
-            logger.remove(self.handler_id)
+        # Cleanup
+        if self._handler_id:
+            logger.remove(self._handler_id)
+
+        # Exit the logging context
+        if self._context_manager:
+            self._context_manager.__exit__(exc_type, exc_val, exc_tb)
 
         self.executor.is_busy = False

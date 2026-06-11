@@ -32,14 +32,18 @@ default:
         load_mode: "snapshot"
         source_params:
           type: file
-          file_pattern: ./mock_data/sample_orders.csv
+          file_pattern:
+             archive:
+             glob: ./mock_data/sample_orders.csv
         schema_file: "schema.csv"
       transform:
         type: default
         params:
       load:
         service_ref: "clickhouse"
-        sink_identifier: TEST.ORDERS
+        sink_params:
+          type: database
+          destination: TEST.ORDERS
       archive:
         enable_archival: true    # per-dataset archival override
         service_ref: "s3_archive"

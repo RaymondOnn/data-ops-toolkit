@@ -1,19 +1,32 @@
-import importlib
-import pkgutil
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from .base import ExecutionStage
-from .enums import StageName
+from .enums import Stage
 
-# Ensure all stage modules are loaded so StageName.__subclasses__() is populated.
-# This enables automatic discovery of concrete stage implementations.
-_PKG_PATH = str(Path(__file__).parent)
-for _, _MODNAME, _ in pkgutil.iter_modules([_PKG_PATH]):
-    if _MODNAME not in ["__init__", "base", "enums", "utils"]:
-        importlib.import_module(f".{_MODNAME}", package=__package__)
+if TYPE_CHECKING:
+    from .base import ExecutionStage
 
 
-def get_stage_class_by_name(name: str) -> ExecutionStage:
+# Stage class registry (auto-populated)
+_STAGE_CLASSES: dict[str, type["ExecutionStage"]] = {}
+
+
+def register_stage(stage_name: str, stage_class: type["ExecutionStage"]) -> None:
+    """Register a stage class for later lookup."""
+    _STAGE_CLASSES[stage_name] = stage_class
+
+
+def stage(stage_name: str):
+    """Decorator to register a stage class."""
+
+    def decorator(cls):
+        register_stage(stage_name, cls)
+        return cls
+
+    return decorator
+
+
+def get_stage_class(stage_name: str) -> "ExecutionStage":
     """
     Given a stage name, returns the corresponding ExecutionStage class.
 
@@ -21,10 +34,23 @@ def get_stage_class_by_name(name: str) -> ExecutionStage:
     attribute matches the given name.
     If no match is found, raises a ValueError.
     """
-    for stage_class in ExecutionStage.__subclasses__():
-        # If you have nested subclasses, you may want a recursive walk here.
-        if getattr(stage_class, "name", None) == name:
-            # Map the string name back to the ExecutionStage enum member
-            stage_enum_member = StageName[name.upper()]
-            return stage_class(stage=stage_enum_member)
-    raise ValueError(f"Unknown stage name: {name}")
+    # Decision: Just-In-Time Discovery.
+    # We perform a one-time discovery of all stage modules if the registry is empty.
+    # This ensures that decorators are executed and classes are registered before use.
+    if not _STAGE_CLASSES:
+        import importlib
+        import pkgutil
+
+        # We perform a one-time discovery of all stage modules if the registry
+        # is empty. Using relative imports via __package__ ensures that this
+        # works correctly whether running from source or inside a PEX.
+        package_path = [str(Path(__file__).parent)]
+        for _, modname, _ in pkgutil.iter_modules(package_path):
+            if modname not in ("base", "enums", "utils", "__init__"):
+                importlib.import_module(f".{modname}", package=__package__)
+
+    if stage_name not in _STAGE_CLASSES:
+        raise ValueError(f"Unknown stage: {stage_name}: {list(_STAGE_CLASSES.keys())}")
+    stage_cls = _STAGE_CLASSES[stage_name]
+    stage_enum = Stage(stage_name)
+    return stage_cls(stage_enum)

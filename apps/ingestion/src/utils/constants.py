@@ -23,8 +23,6 @@ DISK_THRESHOLD_CRITICAL = 90
 DISK_THRESHOLD_HALT = 95
 
 
-MISFIRE_GRACE_PERIOD_SECS = 3600
-
 # App Settings
 STRIP_TZ_FOR_DB = True
 LOG_HIGHLIGHT_KEYS: set[str] = {"run_id", "job_id", "task_id", "request_id"}

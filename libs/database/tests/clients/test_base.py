@@ -25,7 +25,7 @@ class MockDBClient(DBClient):
     def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
         yield pl.DataFrame({"a": [1, 2]})
 
-    def partition_load(self, table_name, num_workers=10, filter_sql=None):
+    def partition_load(self, table_name, num_workers=10, filter_condition=None):
         return {"SELECT * FROM table"}
 
     def get_schema(self, fq_table):

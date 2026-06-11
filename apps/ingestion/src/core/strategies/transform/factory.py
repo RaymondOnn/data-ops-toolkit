@@ -1,39 +1,34 @@
+"""Transformer factory with dynamic registration."""
+
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
-    from .base import Transformer
+    from .base import TransformLogic
 
 
 class TransformFactory:
-    """
-    Decision: Dynamic Module Loading.
-    Allows for job-specific logic (e.g., complex bitmasking for a specific vendor)
-    without bloating the core engine codebase.
-    """
+    """Factory for creating transform logic instances."""
 
-    _TRANSFORMERS: ClassVar[dict[str, type]] = {}
+    _registry: ClassVar[dict[str, type]] = {}
 
     @classmethod
     def register(cls, name: str) -> Callable[[type], type]:
-        """Decorator to register services."""
-        name = name.casefold()
+        """Decorator to register a transformer."""
 
-        def wrapper(wrapped_class: type) -> type:
-            cls._TRANSFORMERS[name] = wrapped_class
-            return wrapped_class
+        def wrapper(wrapped: type) -> type:
+            cls._registry[name.lower()] = wrapped
+            return wrapped
 
         return wrapper
 
     @classmethod
-    def get_transformer(
-        cls,
-        transform_type: str,
-        **kwargs: Any,
-    ) -> "Transformer":
-        transform_type = transform_type.casefold()
-        if transform_type not in cls._TRANSFORMERS:
-            raise ValueError(f"Transform type {transform_type} not found")
-
-        transformer_class = cls._TRANSFORMERS[transform_type]
-        return transformer_class(**kwargs)
+    def get(cls, name: str, **kwargs: Any) -> "TransformLogic":
+        """Get a transformer instance by name."""
+        key = name.lower()
+        if key not in cls._registry:
+            raise ValueError(
+                f"Unknown transformLogic: {name} "
+                f"Available transforms: {list(cls._registry.keys())}"
+            )
+        return cls._registry[key](**kwargs)

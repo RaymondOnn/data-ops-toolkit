@@ -36,7 +36,7 @@ def test_stage_priority_ordering(runtime):
         mock_fit.side_effect = [True, False]
 
         # Trigger dispatch loop
-        runtime.orchestrator.tasks._process_tasks()
+        runtime.orchestrator.tasks.dispatch()
 
     # 3. Verification
     active_tasks = runtime.orchestrator.tasks._active_tasks.values()

@@ -24,7 +24,6 @@ WITH dates AS (
         , IS_SCHEDULED
         , RUNTIME_OVERRIDES
         , RETRY_ATTEMPTS
-        , WATCH_FILE_PATH
         , REMARKS
         , cron_next(if(empty(S.CRON_EXPR), '0 0 * * *', S.CRON_EXPR), SCHEDULED_TIMESTAMP_LC) AS EXPIRATION_THRESHOLD
         , S.IS_SNAPSHOT
@@ -61,7 +60,6 @@ FROM (
         , 1 AS IS_SCHEDULED
         , NULL AS RUNTIME_OVERRIDES
         , 0 AS RETRY_ATTEMPTS
-        , WATCH_FILE_PATH
         , NULL AS REMARKS
         , cron_next(if(empty(S.CRON_EXPR), '0 0 * * *', S.CRON_EXPR), NEXT_RUN_TS_LC) AS EXPIRATION_THRESHOLD
         , S.IS_SNAPSHOT

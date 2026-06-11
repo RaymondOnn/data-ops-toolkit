@@ -1,5 +1,8 @@
+"""Data loading and promotion strategies."""
+
+from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from apps.ingestion.src.services.base import Sink
 from loguru import logger
@@ -9,81 +12,144 @@ LOG = logger
 
 
 class LoadContext(Struct):
-    sink_identifier: str  # Table name or S3 Prefix
-    partition_col: str
+    """Context for data loading operations."""
+
+    target: str  # Table name or path
+    partition_by: str
     partition_value: str
     expected_count: int
 
 
-class StagingResult(Struct):
-    staging_path: str | None = None  # For S3 or local Parquet
-    staging_table: str | None = None  # For DB Temp tables
-    rows: int = 0
+class Loader(ABC):
+    """Abstract base class for data loaders."""
 
-
-class Loader:
-    """
-    Defines the behavioral contract for moving data into production.
-    Each implementation (Append, Upsert, Overwrite) handles the
-    logic for both Staging and Promotion.
-    """
-
-    def load(
+    @abstractmethod
+    def stage(
         self,
-        service: Sink,
+        sink: Sink,
         source_dir: Path,
-        load_ctx: LoadContext,
+        context: LoadContext,
         file_ext: str = "parquet",
-        audit_values: dict[str, Any] | None = None,
+        audit: dict[str, Any] | None = None,
     ) -> tuple[str, int]:
-        """
-        Phase 1: Moves data from Silver (Parquet) to a temporary 'Staging' area.
-        Returns metadata about the staged data (staging_artifact, rows_loaded).
-        """
-        try:
-            LOG.info(
-                "Staging data into {table} for {partition_col}={partition_val}",
-                table=load_ctx.sink_identifier,
-                partition_col=load_ctx.partition_col,
-                partition_val=load_ctx.partition_value,
-            )
-            result = service.stage_data(
-                source_dir=source_dir,
-                target_table=load_ctx.sink_identifier,
-                file_ext=file_ext,
-                expected_count=load_ctx.expected_count,
-                audit_values=audit_values,
-            )
+        """Stage data from source directory to temporary location."""
+        pass
 
-            if result is None:
-                raise ValueError(
-                    f"Service {type(service).__name__} returned None for staging results. "
-                    "Ensure the service implementation returns (staging_identifier, row_count)."
-                )
-            return result
-        except Exception as exc:
-            LOG.exception("Error during staging data", exception=exc)
-            raise exc
+    @abstractmethod
+    def promote(
+        self,
+        sink: Sink,
+        staging_id: str,
+        context: LoadContext,
+    ) -> None:
+        """Promote staged data to production."""
+        pass
+
+
+class DataLoader(Loader):
+    """Loader for database sinks (ClickHouse, Postgres, etc.)."""
+
+    def stage(
+        self,
+        sink: Sink,
+        source_dir: Path,
+        context: LoadContext,
+        file_ext: str = "parquet",
+        audit: dict[str, Any] | None = None,
+    ) -> tuple[str, int]:
+        LOG.info(
+            f"Staging to {context.target} for "
+            f"{context.partition_by}={context.partition_value}"
+        )
+
+        result = sink.stage(
+            source_dir=source_dir,
+            target=context.target,
+            file_ext=file_ext,
+            expected_count=context.expected_count,
+            audit_values=audit,
+        )
+
+        if result is None:
+            raise ValueError(f"Stage failed for {type(sink).__name__}")
+
+        return result
 
     def promote(
-        self, service: Sink, staging_identifier: str, load_ctx: LoadContext
+        self,
+        sink: Sink,
+        staging_id: str,
+        context: LoadContext,
     ) -> None:
-        """
-        Phase 2: Moves data from 'Staging' to the 'Production' destination.
-        This is where 'Atomic Swaps' or 'Merges' happen.
-        """
-        LOG.info(
-            "Promoting data from {from_table} to {to_table} "
-            "for {partition_col}={partition_val}",
-            from_table=staging_identifier,
-            to_table=load_ctx.sink_identifier,
-            partition_col=load_ctx.partition_col,
-            partition_val=load_ctx.partition_value,
+        LOG.info(f"Promoting {staging_id} -> {context.target}")
+
+        sink.promote(
+            staging=staging_id,
+            target=context.target,
+            partition_by=context.partition_by,
+            partition_value=context.partition_value,
+            expected_count=context.expected_count,
         )
-        service.promote_data(
-            staging_table=staging_identifier,
-            target_table=load_ctx.sink_identifier,
-            partition_col=load_ctx.partition_col,
-            partition_val=load_ctx.partition_value,
-            expected_count=load_ctx.expected_count,
+
+
+class FileLoader(Loader):
+    """Loader for file-based sinks (S3, local filesystem)."""
+
+    def stage(
+        self,
+        sink: Sink,
+        source_dir: Path,
+        context: LoadContext,
+        file_ext: str = "parquet",
+        audit: dict[str, Any] | None = None,
+    ) -> tuple[str, int]:
+        """Stage files to temporary location."""
+        LOG.info(f"Staging files to {context.target}")
+
+        # For file sinks, stage returns (staging_path, file_count)
+        result = sink.stage(
+            source_dir=source_dir,
+            target=context.target,
+            file_ext=file_ext,
+            expected_count=context.expected_count,
+            audit_values=audit,
         )
+
+        if result is None:
+            raise ValueError(f"File stage failed for {type(sink).__name__}")
+
+        return result
+
+    def promote(
+        self,
+        sink: Sink,
+        staging_id: str,
+        context: LoadContext,
+    ) -> None:
+        """Move staged files to final destination."""
+        LOG.info(f"Promoting {staging_id} -> {context.target}")
+
+        # For file sinks, promote moves/copies files to final location
+        sink.promote(
+            staging=staging_id,
+            target=context.target,
+            partition_by=context.partition_by,
+            partition_value=context.partition_value,
+            expected_count=context.expected_count,
+        )
+
+
+# Factory for getting the appropriate loader
+class LoaderFactory:
+    """Factory for creating loaders based on sink type."""
+
+    _LOADERS: ClassVar[dict[str, type[Loader]]] = {
+        "data": DataLoader,
+        "blob": FileLoader,
+    }
+
+    @classmethod
+    def get_loader(cls, sink_type: str) -> Loader:
+        """Get loader for the specified sink type."""
+        loader_cls = cls._LOADERS.get(sink_type, DataLoader)
+        return loader_cls()

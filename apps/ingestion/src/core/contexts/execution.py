@@ -1,3 +1,5 @@
+"""Execution context and runtime configuration."""
+
 from __future__ import annotations
 
 from enum import StrEnum
@@ -35,11 +37,8 @@ class Env(StrEnum):
     PROD = "prod"
 
 
-class ExecutionContext(msgspec.Struct):
-    """
-    Holds global application settings that are resolved at runtime.
-    Injected into major components to avoid reliance on global constants.
-    """
+class ExecutionContext(msgspec.Struct, kw_only=True):
+    """Global runtime configuration injected into all components."""
 
     workspace_dir: Path
     timezone: str = APP_TIMEZONE_LC
@@ -50,10 +49,14 @@ class ExecutionContext(msgspec.Struct):
     code_pex_path: Path | None = None
     deps_pex_path: Path | None = None
     cache_config: dict[str, Any] = {}
-    provider_config: dict[str, str] = {}  # Config for secret provider
+    provider_config: dict[str, str] = {}
     disable_self_healing: bool = False
     stop_at_ts: float | None = None
     drain_timeout_secs: int = 600
+
+    # =========================================================================
+    # Path Properties
+    # =========================================================================
 
     @property
     def active_path(self) -> Path:
@@ -80,7 +83,7 @@ class ExecutionContext(msgspec.Struct):
         return self.workspace_dir / "orchestrator.lock"
 
     def get_managed_directories(self) -> Iterable[Path]:
-        """Yields all core directories that must be writable."""
+        """Yield all core directories that must be writable."""
         yield from [
             self.workspace_dir,
             self.active_path,
@@ -88,10 +91,13 @@ class ExecutionContext(msgspec.Struct):
             self.state_path,
             self.data_path,
             self.failed_path,
-            self.workspace_dir / "HOLD",
             self.workspace_dir / ".cache",
             self.workspace_dir / "logs",
         ]
+
+    # =========================================================================
+    # Mode Properties
+    # =========================================================================
 
     @property
     def is_debug(self) -> bool:
@@ -113,77 +119,39 @@ class ExecutionContext(msgspec.Struct):
     def is_prod(self) -> bool:
         return self.env == Env.PROD
 
-    def get_run_path(
-        self,
-        identity: TaskIdentity,
-        category: str = "active",
-    ) -> Path:
-        """
-        Standardizes the nested folder structure:
-        {workspace}/{category}/{job_id}:{dataset}:{date}/{run_id}
+    # =========================================================================
+    # Path Resolution
+    # =========================================================================
 
-        Args:
-            identity: The task identity object.
-            category: The directory category (e.g., 'active', 'FAILED').
+    def get_run_path(self, identity: TaskIdentity, category: str = "active") -> Path:
+        """Get task run directory path."""
+        return self.workspace_dir / category / identity.task_key / identity.run_id
 
-        Returns:
-            Path: The resolved absolute path to the task run directory.
-        """
-        return self.workspace_dir / category / identity.identifier / identity.run_id
+    def get_signal_name(self, identity: TaskIdentity, extension: str) -> str:
+        """Generate signal filename for a task."""
+        return f"{identity.task_key}:{identity.run_id}{extension}"
 
-    def get_signal_name(
-        self,
-        identity: TaskIdentity,
-        extension: str,
-    ) -> str:
-        """
-        Generates the standardized signal filename for a task.
-
-        Args:
-            identity: The task identity.
-            extension: File extension including the dot (e.g., '.sync').
-
-        Returns:
-            str: The formatted filename.
-        """
-        return f"{identity.identifier}:{identity.run_id}{extension}"
-
-    def get_task_id(self, full_string: str) -> TaskIdentity:
-        """
-        Parses a full colon-delimited string back into a TaskIdentity.
-
-        Args:
-            full_string: The string to parse (e.g. from a signal filename).
-
-        Returns:
-            TaskIdentity: The reconstructed identity object.
-        """
+    def parse_task_id(self, full_string: str) -> TaskIdentity:
+        """Parse colon-delimited string into TaskIdentity."""
         from apps.ingestion.src.core.models.task.enums import TaskIdentity
 
         return TaskIdentity.from_signal_stem(full_string)
 
-    def check_serializability(self) -> bool:
-        """
-        Validates that the context can be serialized for Ray/Distributed execution.
-        Throws an informative error if a non-picklable object has been injected.
-        """
+    # =========================================================================
+    # Serialization
+    # =========================================================================
+
+    def verify_serializable(self) -> bool:
+        """Verify context can be pickled for Ray distribution."""
         import pickle
 
         try:
-            # Step 1: Test individual attributes to find the culprit
             for field in self.__struct_fields__:
                 val = getattr(self, field)
-                try:
-                    pickle.dumps(val)
-                except Exception as e:
-                    raise TypeError(f"Attribute '{field}' is not picklable: {e}") from e
+                pickle.dumps(val)
 
-            # Step 2: Test the whole object
             pickle.dumps(self)
-            LOG.debug(
-                "ExecutionContext is serializable and ready for distributed execution."
-            )
+            LOG.debug("ExecutionContext is serializable")
             return True
         except Exception as e:
-            # We raise a descriptive error to make debugging easier in Ray
-            raise TypeError(f"ExecutionContext is not picklable: {e}") from e
+            raise TypeError(f"ExecutionContext not picklable: {e}") from e

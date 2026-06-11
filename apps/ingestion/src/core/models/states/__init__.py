@@ -1,12 +1,12 @@
-from .inferred import ExpiredState, ZombieState
-from .result import FailedState, ProgressState, RetryState, SuccessState
+from .detect import ExpiredState, ZombieState
+from .outcome import FailureOutcome, ProgressOutcome, RetryOutcome, SuccessOutcome
 
 __all__ = [
     "ExpiredState",
-    "FailedState",
+    "FailureOutcome",
     "HoldState",
-    "ProgressState",
-    "RetryState",
-    "SuccessState",
+    "ProgressOutcome",
+    "RetryOutcome",
+    "SuccessOutcome",
     "ZombieState",
 ]

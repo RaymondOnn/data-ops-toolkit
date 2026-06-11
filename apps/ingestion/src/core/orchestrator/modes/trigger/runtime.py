@@ -1,3 +1,5 @@
+"""Synchronous runtime for CLI and ad-hoc task execution."""
+
 import contextlib
 import time
 from typing import TYPE_CHECKING, Any
@@ -14,146 +16,117 @@ LOG = logger
 
 
 class TriggerRuntime:
-    """Synchronous orchestration runtime for targeted task execution.
+    """
+    Synchronous runtime for CLI and ad-hoc task execution.
 
-    Decision: Block-until-Terminal.
-    Unlike the Daemon mode which handles triggers asynchronously, the
-    TriggerRuntime provides a synchronous 'Run to Completion' interface.
-    This is preferred for CLI tools and ad-hoc batch processing where
-    the caller expects a success/failure summary immediately.
+    Blocks until all tasks complete or timeout, then reports results.
     """
 
-    def __init__(
-        self,
-        exec_ctx: ExecutionContext,
-        orchestrator: "Orchestrator",
-    ) -> None:
-        """Initializes the runtime with execution and orchestration handles.
-
-        Args:
-            exec_ctx: The global application context.
-            orchestrator: The engine for task management and signaling.
-        """
+    def __init__(self, exec_ctx: ExecutionContext, orchestrator: "Orchestrator"):
         self.exec_ctx = exec_ctx
         self.orchestrator = orchestrator
 
         # Aliases for readability
-        self.tasks = orchestrator.tasks
-        self.state_store = orchestrator.state_store
-        self.signal_processor = orchestrator.signals
+        self.scheduler = orchestrator.tasks
+        self.state = orchestrator.state
+        self.scanner = orchestrator.signals
 
     def run(
         self,
         job_id: str,
         dataset_id: str,
-        partition_date_str: str | None = None,
+        partition_date: str | None = None,
         overrides: dict[str, Any] | None = None,
     ) -> None:
-        """Executes and monitors a set of tasks until completion or timeout.
-
-        Args:
-            job_id: The primary job identifier.
-            dataset_id: The specific dataset to process.
-            partition_date_str: Target date in YYYY-MM-DD format.
-            overrides: Dynamic configuration overrides.
+        """
+        Execute tasks and block until completion or timeout.
 
         Raises:
-            TimeoutError: If terminal state is not reached within timeout.
-
-        Decision: Centralized Event Loop.
-        By driving the engine and processing signals within a single
-        polling loop, we ensure that state transitions are handled
-        deterministically even when running in foreground mode.
+            TimeoutError: If tasks don't complete within drain_timeout.
         """
-        # Perform Pre-flight check
-        self.orchestrator._perform_platform_preflight()
+        self.orchestrator.preflight_check()
 
-        # 1. Dispatch
-        run_ids = self.orchestrator._trigger_job(
-            job_id, dataset_id, partition_date_str, overrides=overrides
+        # Dispatch tasks
+        run_ids = self.orchestrator.start_job(
+            job_id, dataset_id, partition_date, overrides=overrides
         )
 
-        # 2. Block until terminal
-        LOG.info("Monitoring job until completion", job_id=job_id)
+        LOG.info(f"Monitoring job {job_id} until completion")
         start_time = time.time()
         timeout = self.exec_ctx.drain_timeout_secs
 
         while True:
-            self.orchestrator._drive_engine()
-            self.orchestrator.process_task_events(run_filter=run_ids)
-            self.state_store.flush()
+            self.orchestrator.submit_tasks()
+            self.orchestrator.process_signals(filter_run_ids=run_ids)
 
-            # Decision: Simplified Terminal Check.
-            # We use all() to determine if every run in the batch has reached
-            # a terminal status, reducing the logic from 10 lines to a generator.
-            statuses = [
-                self._get_run_status(job_id, dataset_id, partition_date_str or "", rid)
-                for rid in run_ids
-            ]
-            if all(s.is_terminal for s in statuses):
-                self.orchestrator._summarize_failures(self.state_store, run_ids)
+            # Check if all tasks have reached terminal state
+            if self._all_tasks_terminal(
+                run_ids, job_id, dataset_id, partition_date or ""
+            ):
+                self.orchestrator.summarize_failures(run_ids)
                 break
 
-            if (time.time() - start_time) > timeout:
-                self.orchestrator._summarize_failures(self.state_store, run_ids)
-                raise TimeoutError(f"Tasks {run_ids} timed out after {timeout}s.")
+            if time.time() - start_time > timeout:
+                self.orchestrator.summarize_failures(run_ids)
+                raise TimeoutError(f"Tasks {run_ids} timed out after {timeout}s")
 
             time.sleep(0.5)
 
         self.stop()
 
     def stop(self) -> None:
-        """Synchronous cleanup for Trigger mode."""
+        """Clean up resources."""
         with contextlib.suppress(Exception):
-            self.state_store.close()
+            self.state.close()
 
-    def _get_run_status(
+    def _all_tasks_terminal(
+        self, run_ids: set[str], job_id: str, dataset_id: str, partition_date: str
+    ) -> bool:
+        """Check if all tasks have reached a terminal status."""
+        for run_id in run_ids:
+            status = self._resolve_task_status(
+                job_id, dataset_id, partition_date, run_id
+            )
+            if not status.is_terminal:
+                return False
+        return True
+
+    def _resolve_task_status(
         self, job_id: str, dataset_id: str, partition_date: str, run_id: str
     ) -> ExecutionStatus:
-        """Standard status resolver for terminal loop exit.
+        """
+        Resolve task status from cache or database.
 
-        Args:
-            job_id: The job identifier.
-            dataset_id: The dataset identifier.
-            partition_date: The processing date.
-            run_id: The unique execution ID.
-
-        Returns:
-            ExecutionStatus: The current status of the task.
-
-        Decision: Multi-Tier Status Resolution.
-        We check the Hot Cache first for high-performance polling, falling
-        back to the database registry for final terminal state verification.
+        Priority:
+        1. Hot cache (fast, real-time)
+        2. Database registry (final state)
+        3. Default to SUCCESS (cleanup)
         """
         from apps.ingestion.src.core.models.task.enums import TaskIdentity
+        from apps.ingestion.src.core.orchestrator.enums import TaskRef
 
         identity = TaskIdentity(
             job_id=job_id,
             dataset_id=dataset_id,
-            partition_date=partition_date or "",
+            partition_date=partition_date,
             run_id=run_id,
         )
 
-        # 1. Check Hot Cache
-        with self.tasks.lock:
-            pattern = f"{CACHE_TASK_NAMESPACE}:*:*:{identity.identifier}:{run_id}"
-            key = next(iter(self.tasks.cache.iterkeys(pattern=pattern)), None)
+        # Check hot cache first
+        with self.scheduler.lock:
+            pattern = f"{CACHE_TASK_NAMESPACE}:*:*:{identity.task_key}:{run_id}"
+            key = next(iter(self.scheduler.cache.iterkeys(pattern=pattern)), None)
             if key:
-                from apps.ingestion.src.core.orchestrator.enums import (
-                    TaskRef,  # Local import to avoid circular dependency
-                )
-
                 try:
-                    cached_ref = TaskRef.from_str(key)
-                    return cached_ref.status
+                    return TaskRef.from_str(key).status
                 except ValueError:
                     return ExecutionStatus.RUNNING
 
-        # 2. Check Database Registry
-        record = self.state_store.active_registry.get(run_id)
+        # Fall back to database
+        record = self.state.store.records.get(run_id)
         if record:
-            status_val = ExecutionStatus(record.JOB_STATUS)
-            if status_val.is_failure:
+            status = ExecutionStatus(record.JOB_STATUS)
+            if status.is_failure:
                 return ExecutionStatus.FAILED
 
         return ExecutionStatus.SUCCESS

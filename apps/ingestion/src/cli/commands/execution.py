@@ -17,14 +17,14 @@ from apps.ingestion.src.cli.utils import _write_signal_file
 from apps.ingestion.src.core.contexts import (
     ExecutionMode,
     TaskContextBuilder,
-    parse_set_options,
+    parse_cli_overrides,
 )
-from apps.ingestion.src.core.models.stages.enums import StageName
+from apps.ingestion.src.core.models.stages.enums import ALL_STAGES, Stage
 from apps.ingestion.src.core.models.task import Task
 from apps.ingestion.src.core.orchestrator.factory import assemble_runtime
 from apps.ingestion.src.core.orchestrator.modes.trigger import TriggerRuntime
-from apps.ingestion.src.utils.common import make_short_hash, setup_logger
-from libs.utils.dates import get_current_timestamp
+from apps.ingestion.src.utils.common import setup_logger, short_hash
+from libs.utils.dates import current_timestamp
 from loguru import logger
 
 
@@ -46,8 +46,8 @@ def _log_startup_msg(
     """
     msg = f"🚀 Initializing {dataset} for {partition_date.date()}"
     if from_stage or to_stage:
-        start_label = from_stage or StageName.first().label
-        end_label = to_stage or StageName.last().label
+        start_label = from_stage or Stage.first().value
+        end_label = to_stage or Stage.last().value
         msg += f" (Range: {start_label} ➔ {end_label})"
     typer.echo(msg)
 
@@ -105,7 +105,7 @@ def _get_trigger_runtime(
     """
     exec_mode = ExecutionMode.DEBUG if debug else ExecutionMode.NORMAL
     builder = TaskContextBuilder()
-    exec_ctx = builder.get_execution_context(mode=exec_mode)
+    exec_ctx = builder.build_execution_context(mode=exec_mode)
     exec_ctx.ray_mode = ray_mode
 
     runtime = assemble_runtime(exec_ctx, builder)
@@ -142,7 +142,7 @@ def _apply_run_overrides(
 
 
 def _validate_stage_label(label: str | None) -> str | None:
-    """Verifies that a provided stage label exists in the StageName registry.
+    """Verifies that a provided stage label exists in the Stage registry.
 
     Args:
         label: The string label to validate.
@@ -153,12 +153,11 @@ def _validate_stage_label(label: str | None) -> str | None:
     if not label:
         return None
     try:
-        StageName.from_label(label)
+        Stage(label)
         return label
     except (ValueError, KeyError):
-        valid_stages = [s.label for s in StageName]
         raise typer.BadParameter(
-            f"Invalid stage '{label}'. Valid stages: {', '.join(valid_stages)}"
+            f"Invalid stage '{label}'. Valid stages: {', '.join(ALL_STAGES)}"
         ) from None
 
 
@@ -181,7 +180,7 @@ def _resume_locally(
     during surgical repairs.
     """
     runtime = assemble_runtime(exec_ctx, builder)
-    folder = runtime.orchestrator.state_store.resolve_task_path(run_id)
+    folder = runtime.orchestrator.state.find_task_path(run_id)
 
     if not folder:
         typer.secho(f"❌ Error: Run ID {run_id} not found in workspace.", fg="red")
@@ -189,7 +188,7 @@ def _resume_locally(
 
     # Apply Surgical Overrides to the quarantined config before recovery
     if from_stage or overrides:
-        task = Task.from_folder(folder, exec_ctx)
+        task = Task.from_path(folder, exec_ctx)
         updates = {}
         if from_stage:
             updates["current_stage"] = from_stage
@@ -200,12 +199,12 @@ def _resume_locally(
             task.update_manifest(updates)
 
     typer.echo(f"🔧 Recovering task {run_id}...")
-    runtime.orchestrator.janitor.recover_task_by_path(folder)
+    runtime.orchestrator.janitor.recover_task(folder)
 
     # In Trigger mode, we must manually drive the engine to process the recovered task
     typer.echo("🚀 Starting execution engine...")
-    runtime.orchestrator.process_task_events()
-    runtime.orchestrator._drive_engine()
+    runtime.orchestrator.process_signals()
+    runtime.orchestrator.submit_tasks()
 
     logger.success(f"Manual resume of {run_id} completed.")
 
@@ -276,11 +275,10 @@ def execute_pipeline(
     try:
         # 1. Setup Environment
         overrides = _apply_run_overrides(
-            parse_set_options(settings), from_stage, to_stage
+            parse_cli_overrides(settings), from_stage, to_stage
         )
         setup_logger(
             log_dir=Path("./.workspace/logs"),
-            is_prod=not state["debug"],
             is_debug=state["debug"],
             filename=f"{job_id}.jsonl",
             enqueue=True,
@@ -293,11 +291,11 @@ def execute_pipeline(
         runtime.run(
             job_id=job_id,
             dataset_id=dataset,
-            partition_date_str=partition_date.strftime("%Y-%m-%d"),
+            partition_date=partition_date.strftime("%Y-%m-%d"),
             overrides=overrides,
         )
 
-        runtime.orchestrator.process_task_events()
+        runtime.orchestrator.process_signals()
 
     except ExceptionGroup as eg:
         _report_run_failures(eg)
@@ -348,7 +346,7 @@ def add_adhoc_run(
     loop.
     """
     builder = TaskContextBuilder(env=env)
-    exec_ctx = builder.get_execution_context()
+    exec_ctx = builder.build_execution_context()
 
     payload = {
         "job_id": job_id,
@@ -356,8 +354,8 @@ def add_adhoc_run(
         "dataset_id": dataset_id,
     }
 
-    timestamp = get_current_timestamp().strftime("%Y%m%d%H%M%S")
-    unique_id = make_short_hash(6)
+    timestamp = current_timestamp().strftime("%Y%m%d%H%M%S")
+    unique_id = short_hash(6)
     _write_signal_file(exec_ctx, f"ADD_{timestamp}_{unique_id}.cmd", payload)
 
 
@@ -397,12 +395,12 @@ def resume_failed_run(
     human intervention has resolved the root cause of the previous failure.
     """
     builder = TaskContextBuilder(env=env)
-    exec_ctx = builder.get_execution_context()
+    exec_ctx = builder.build_execution_context()
 
     _validate_stage_label(from_stage)
 
     # Process overrides if provided
-    overrides = parse_set_options(settings) if settings else {}
+    overrides = parse_cli_overrides(settings) if settings else {}
     payload = {"run_id": run_id, "from_stage": from_stage, "overrides": overrides}
 
     if exec_ctx.always_on:

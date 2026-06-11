@@ -1,93 +1,136 @@
+"""Base classes for pipeline execution stages."""
+
+import traceback
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from apps.ingestion.src.core.models.stages.enums import (
-    EXEC_STAGES,
-    STAGE_TERMINAL_SENTINEL,
-    StageName,
-)
+import msgspec
+from apps.ingestion.src.core.models.stages.enums import NO_MORE_STAGES, Stage
+from apps.ingestion.src.core.models.task.manifest import ErrorInfo, StagePayload
+from apps.ingestion.src.core.models.task.status import ExecutionStatus
 from apps.ingestion.src.utils.constants import DISK_THRESHOLD_HALT
 from libs.utils.system import get_disk_usage
 from loguru import logger
 
-if TYPE_CHECKING:
-    from apps.ingestion.src.core.models.task import Task
-
 LOG = logger
+
+if TYPE_CHECKING:
+    from apps.ingestion.src.core.models.task.base import Task
 
 
 class ExecutionStage(ABC):
-    """Base class for TaskStage classes."""
+    """Base class for all pipeline stages."""
 
-    def __init__(self, stage: StageName) -> None:
-        self.name = stage.label
-        self.bitmask = stage.bitmask
+    requires_disk_space: bool = True
 
-    def get_stage(self, offset: int) -> StageName:
-        """Retrieves a stage relative to the current one based on the global order."""
-        current_member = StageName.from_label(self.name)
-        idx = EXEC_STAGES.index(current_member)
-        if 0 <= idx + offset < len(EXEC_STAGES):
-            return EXEC_STAGES[idx + offset]
-        raise ValueError(f"Invalid offset: {offset}")
+    def __init__(self, stage: Stage):
+        self.stage = stage
+        if isinstance(stage.value, str):
+            self.name: str = stage.value
+            self.bitmask = stage.bitmask
+            self._config = None
+
+    def _bind_config(self, task: "Task") -> None:
+        """Bind stage config from task context."""
+        config_map = {
+            "extract": "extract",
+            "transform": "transform",
+            "write": "load",
+            "publish": "load",
+            "archive": "archive",
+        }
+
+        attr_name = config_map.get(self.name)
+        if not attr_name:
+            return
+
+        self._config = getattr(task.context, attr_name, None)
+        if self._config is None:
+            raise RuntimeError(
+                f"Stage '{self.name}' requires '{attr_name}' configuration"
+            )
+
+    @property
+    def config(self) -> Any:
+        """Get stage config (validated)."""
+        if self._config is None:
+            raise RuntimeError(f"Config not bound for stage '{self.name}'")
+        return self._config
+
+    def _check_disk_space(self, task: "Task") -> None:
+        """Verify sufficient disk space before execution."""
+        usage = get_disk_usage(task.exec_ctx.workspace_dir)
+        if usage.percent > DISK_THRESHOLD_HALT:
+            LOG.critical(f"Disk at {usage.percent:.1f}% - halting {self.name}")
+            raise OSError(f"Disk critical: {usage.percent:.1f}%")
 
     def pre_flight(self, task: "Task") -> None:
         """
-        Performs node-specific connectivity and resource checks.
-        Should raise an exception if requirements are not met.
-        """
-        # Check Disk Pressure before starting heavy IO (Threshold: 90%)
-        usage = get_disk_usage(task.exec_ctx.workspace_dir)
+        Pre-execution checks and configuration binding.
 
-        if usage.percent > DISK_THRESHOLD_HALT:
-            LOG.critical(
-                "Disk space critical - halting task",
-                used_pct=round(usage.percent, 2),
-                workspace=str(task.exec_ctx.workspace_dir),
-            )
-            raise OSError(
-                f"Disk usage is at {usage.percent:.1f}%. Halting to prevent corruption."
-            )
+        Decision: Config Binding.
+        Since TaskContext now supports optional stage blocks, we must assert
+        that the specific block required for this stage exists before starting
+        execution. Binding it to self.stage_config simplifies subclass logic.
+        """
+        if self.requires_disk_space:
+            self._check_disk_space(task)
+        self._bind_config(task)
 
     @abstractmethod
     def execute(self, task: "Task") -> str:
-        """Execute the current Task Stage logic."""
+        """Execute stage logic. Returns next stage name."""
         pass
 
-    def _transit(self, task: "Task") -> str:
-        """Transit the Task instance to the next stage."""
-        from apps.ingestion.src.core.models.stages.utils import get_stage_class_by_name
+    def _next_stage(self) -> str:
+        """Get next stage in pipeline."""
+        next_stage = self.stage.next()
+        return next_stage or NO_MORE_STAGES
 
-        next_label = StageName.next(self.name)
-        if next_label != STAGE_TERMINAL_SENTINEL:
-            task.set_stage(get_stage_class_by_name(next_label))
-
-        return next_label
-
-    def finalize(
+    def checkpoint(
         self,
         task: "Task",
         data_folder: Path | None = None,
-        results: dict[str, Any] | None = None,
-        exception: Exception | None = None,
+        payload: StagePayload | None = None,
+        error: Exception | None = None,
     ) -> None:
         """
-        DECISION: Deterministic Paths & Symlinking.
-        We avoid searching for 'latest' folders by using a static symlink
-        at active/{job_id}/{stage_name}.
+        Save stage results and update manifest.
+
+        Decision: Terminal Error Recording.
+        If an error is provided, we explicitly record the traceback and
+        set the manifest status to FAILED. This ensures the Task execution
+        loop halts immediately and the Orchestrator can provide a
+        detailed post-mortem.
         """
-        # If the stage failed, we do not want to overwrite the manifest with
-        # empty results, as this will destroy the schema validation for msgspec.
-        if exception:
+        if error:
+            err_payload = ErrorInfo(
+                stage=self.name,
+                error_type=type(error).__name__,
+                message=str(error),
+                traceback=traceback.format_exc(),
+            )
+            # Record failure immediately
+            task.update_manifest(
+                {
+                    "error": msgspec.to_builtins(err_payload),
+                    "status": ExecutionStatus.FAILED.value,
+                }
+            )
             return
 
-        results = results or {}
+        if not payload:
+            raise ValueError("Payload must be provided for successful checkpoints.")
 
-        # 1. SYMLINK (Pointer to immutable data)
+        # Create symlink to data folder if provided
         if data_folder:
-            task.workspace.create_stage_marker(self.name, data_folder)
+            task.workspace.create_symlink(self.name, data_folder)
 
-        # Persist stage results and bitmask for intermediate stages
-        new_mask = task.manifest.bitmask | self.bitmask
-        task.update_manifest({self.name: results, "bitmask": new_mask})
+        # Update manifest with results and bitmask
+        task.update_manifest(
+            {
+                self.name: msgspec.to_builtins(payload),
+                "bitmask": task.manifest.bitmask | self.bitmask,
+            }
+        )

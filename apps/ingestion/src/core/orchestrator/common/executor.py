@@ -1,403 +1,317 @@
-"""
-Task Execution Engine.
-
-This module defines the Executor responsible for running individual task
-stages. It manages process isolation, state transitions in the hot cache,
-and authoritative finalization of task outcomes.
-"""
+"""Task execution engine for running individual pipeline stages."""
 
 import os
 import subprocess
 import time
 import traceback
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from apps.ingestion.src.core.contexts import ExecutionContext
-from apps.ingestion.src.core.models.stages.enums import (
-    StageName,
-)
+from apps.ingestion.src.core.models.stages.enums import Stage
 from apps.ingestion.src.core.models.states import (
-    FailedState,
-    ProgressState,
-    RetryState,
-    SuccessState,
+    FailureOutcome,
+    ProgressOutcome,
+    SuccessOutcome,
 )
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task, TaskSignal
+from apps.ingestion.src.core.models.task import ExecutionStatus, Task
 from apps.ingestion.src.core.orchestrator.common.session import TaskSession
 from apps.ingestion.src.core.orchestrator.enums import TaskMetadata, TaskRef
 from apps.ingestion.src.services.factory import ServiceFactory
-from apps.ingestion.src.services.registry import ServiceRegistry
+from apps.ingestion.src.services.monitor import ServiceMonitor
 from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE
-from apps.ingestion.src.utils.exceptions import RetryTask, RewindTask
-from filelock import FileLock
+from apps.ingestion.src.utils.exceptions import RollbackRequired
 from libs.cache.factory import get_cache
-from libs.utils.exceptions import TransientError, install_exception_hooks
+from libs.utils.exceptions import install_exception_hooks
 from loguru import logger
 
-if TYPE_CHECKING:
-    from loguru import Logger
+LOG = logger
 
 
-# @ray.remote(max_restarts=3, max_task_retries=1)
 class Executor:
-    """Compute executor responsible for running specific task stages.
+    """The primary execution engine for processing individual pipeline stages.
 
-    The Executor acts as the bridge between the Orchestrator's queue and the
-    physical execution logic. It manages the task lifecycle on a worker node,
-    including state transitions in the hot cache, PEX-based execution,
-    and authoritative result finalization.
-
-    Decision: Shared State.
-    The Executor shares the same DiskCache configuration as the Orchestrator.
-    This allows Ray workers to communicate state changes (heartbeats, blocking
-    signals) back to the control plane without a centralized message broker.
+    This class handles the lifecycle of a stage run, including state
+    transitions in the hot cache, workspace session management, and
+    delegation to either internal logic or external PEX processes.
     """
 
     def __init__(self, worker_id: str, exec_ctx: ExecutionContext):
-        """Initializes the executor and connects to the shared state bus.
+        """Initializes the executor with local worker metadata.
 
-        Decision: Worker-Local Registry.
-        We configure the ServiceRegistry and SecretProvider locally on
-        initialization. This ensures that Ray workers maintain their own
-        connection pools and credential caches, preventing cross-node leakage.
+        Args:
+            worker_id: Unique identifier for this Ray worker process.
+            exec_ctx: The global execution context for environment settings.
+
+        Decision: Resource Locality.
+        We re-initialize the ServiceMonitor and Provider within the
+        constructor to ensure that database and secret connections are
+        established locally on the Ray worker node, avoiding the
+        serialization of active network handles.
         """
         self.worker_id = worker_id
         self.exec_ctx = exec_ctx
-
-        with FileLock(self.exec_ctx.lock_file):
-            # Pass primitives to factory to keep services/ independent of core/
-            self.cache = get_cache(
-                self.exec_ctx.workspace_dir, self.exec_ctx.cache_config
-            )
-
-            # Share the same cache path with ServiceRegistry so that circuit-breaker
-            # state (written by workers) is visible to the Orchestrator's registry.
-            ServiceRegistry.configure(
-                self.exec_ctx.workspace_dir, self.exec_ctx.cache_config
-            )
-
-        # Initialize the Secret Provider for this process using the context's config
-        ServiceFactory.get_provider(self.exec_ctx.env, self.exec_ctx.provider_config)
+        self.cache = self._init_cache()
         self.is_busy = False
 
-    def _transition_task(
-        self,
-        old_key: str,
-        new_status: ExecutionStatus,
-        next_stage: str | None = None,
-        last_hb_offset: float = 0,
-        meta_override: TaskMetadata | None = None,
-    ):
-        """Handles atomic cache updates during task state transitions.
+        ServiceMonitor.setup(self.exec_ctx.workspace_dir, self.exec_ctx.cache_config)
+        ServiceFactory.get_provider(self.exec_ctx.env, self.exec_ctx.provider_config)
+
+    def _init_cache(self):
+        """Initializes the shared state cache with a filesystem lock."""
+        return get_cache(self.exec_ctx.workspace_dir, self.exec_ctx.cache_config)
+
+    def execute_stage(self, cache_key: str) -> None:
+        """Coordinates the execution of a specific stage defined by a cache key.
 
         Args:
-            old_key: The current cache key representing the task.
-            new_status: The status being transitioned to.
-            next_stage: Optional label for the next execution stage.
-            last_hb_offset: Future offset for the next heartbeat (for retries).
-            meta_override: An already-updated TaskMetadata object to persist.
+            cache_key: The formatted string identifier for the task in the cache.
 
-        Decision: State Persistence.
-        By allowing a 'meta_override', we ensure that metadata updated during
-        the stage execution (like 'rewind_history') is preserved during
-        the transition even though the cache uses serialized copies.
+        Decision: Atomic Entry.
+        We transition the task state to RUNNING before entering the
+        TaskSession. This prevents the TaskManager from re-dispatching
+        the same task if the maintenance loop ticks while the worker
+        is still bootstrapping its local environment.
         """
-        # Use the override if provided, otherwise pop from cache
-        meta = meta_override or self.cache.pop(old_key, None)
-
-        # If using an override, we still must clear the old key from cache
-        if meta_override:
-            self.cache.pop(old_key, None)
-
-        # If the specific status-key is missing,
-        # attempt to find any key matching the Run ID via cache.
-        if meta is None:
-            run_id = TaskRef.from_str(old_key).identity.run_id
-            for k in list(
-                self.cache.iterkeys(
-                    pattern=f"{CACHE_TASK_NAMESPACE}:*:*:*:*:*:{run_id}"
-                )
-            ):
-                meta = self.cache.pop(k, None)
-                if meta:
-                    break
-
-        if meta is None:
-            return None
-        meta.status = new_status.value
-        if next_stage:
-            meta.current_stage = next_stage
-        meta.last_hb = time.time() + last_hb_offset
-        new_key = (
-            TaskRef.from_str(old_key)
-            .with_updates(status=new_status, stage=next_stage or meta.current_stage)
-            .build()
-        )
-        self.cache[new_key] = meta
-        return meta
-
-    def process_stage(self, key: str) -> None:
-        """Entry point for executing a single stage of a task.
-
-        Decision: Contextual Logging.
-        We use loguru's contextualize to inject worker_id and run_id
-        into every log line produced during the stage, significantly
-        improving troubleshooting in high-concurrency environments.
-        """
-        task_ref = TaskRef.from_str(key)
-        current_stage = task_ref.stage
-        run_id = task_ref.identity.run_id
-
-        log = logger.bind(worker_id=self.worker_id, stage=current_stage, run_id=run_id)
-
-        # 1. Atomic Check-in: Move from WAITING/DISPATCHED to RUNNING in cache
-        meta = self._transition_task(key, ExecutionStatus.RUNNING)
-        if not meta:
-            log.error("Executor failed to rehydrate task: key missing", key=key)
+        task_ref = TaskRef.from_str(cache_key)
+        metadata = self._update_task_state(cache_key, ExecutionStatus.RUNNING)
+        if not metadata:
+            LOG.error(f"Failed to load task metadata for {cache_key}")
             return
 
+        task = None
         try:
-            with (
-                logger.contextualize(run_id=run_id),
-                TaskSession(self, task_ref, log) as task,
-            ):
-                self.is_busy = True
-                self._run_task_payload(task, meta)
+            with TaskSession(self, task_ref, LOG) as session_task:
+                task = session_task
+                self._run_stage(session_task, metadata)
+        except RollbackRequired as e:
+            if task:
+                self._apply_rollback(task, e, LOG, metadata)
 
-        except RewindTask as rw:
-            if self.exec_ctx.disable_self_healing:
-                log.error(
-                    "Rewind requested but self-healing is disabled",
-                    target=rw.target_stage,
-                )
-                # Finalize with original rewind exception to move to HOLD/FAILED
-                # instead of attempting a logical rewind.
-                self.finalize_task_execution(task, runtime_exception=rw)
-                return
+    def _run_stage(self, task: Task, metadata: TaskMetadata) -> None:
+        """Dispatches the execution logic based on the environment configuration.
 
-            # Decision: State Mirroring.
-            # We pass 'meta' (the cache object) to the handler to ensure the
-            # rewind history is synchronized between the disk and the hot cache.
-            self._handle_rewind_task(task, rw, log, meta)
-        except Exception:
-            # Errors are handled by the TaskSession.__exit__ unless raised here
-            raise
-
-    def _run_task_payload(self, task: Task, meta: TaskMetadata) -> None:
-        """Decides between subprocess (PEX) or internal execution.
-
-        Decision: PEX Isolation (ADR 009).
-        If a PEX path is provided, we execute via subprocess. This provides
-        the strongest level of memory isolation and allows for shadow-running
-        different versions of the engine logic on the same worker node.
+        Decision: Execution Portability.
+        By supporting both direct execution and PEX-based subprocesses,
+        the engine can run candidate code in a completely isolated
+        Python environment. This is critical for regression testing where
+        the 'stable' baseline must run without contamination from
+        the 'candidate' library changes.
         """
-        if self.exec_ctx.code_pex_path and self.exec_ctx.code_pex_path.exists():
-            env = os.environ.copy()
-            if self.exec_ctx.deps_pex_path:
-                env["PEX_PATH"] = str(self.exec_ctx.deps_pex_path)
-
-            cmd = [
-                "python3",
-                str(self.exec_ctx.code_pex_path),
-                "run",
-                meta.partition_date,
-                "--job-id",
-                meta.job_id,
-                "--dataset",
-                meta.dataset_id,
-                "--stage",
-                task.task_ref.stage,
-            ]
-            subprocess.run(cmd, env=env, check=True, capture_output=False)
+        if self._should_use_pex():
+            self._run_via_pex(task, metadata)
         else:
             task.stage.pre_flight(task)
             task.execute()
 
-    def _handle_rewind_task(
-        self, task: Task, rw: RewindTask, log: "Logger", meta: TaskMetadata
-    ):
-        """Handles logical rewinds with a strict 'Max 1' attempt policy.
+    def _should_use_pex(self) -> bool:
+        """Determines if the executor should invoke an external PEX binary.
+
+        Returns:
+            bool: True if a valid PEX path is configured and exists.
+
+        Decision: Explicit Boolean Logic.
+        We cast the result to bool to resolve the type-checking error
+        where None | bool was being returned. This ensures the return
+        type strictly adheres to the `bool` hint.
+
+        Decision: PEX Isolation.
+        Using a PEX allows the execution of code in a completely isolated
+        Python environment, which is critical for regression testing where
+        the 'stable' baseline must run without contamination from
+        the 'candidate' library changes.
+        """
+        return bool(
+            self.exec_ctx.code_pex_path and self.exec_ctx.code_pex_path.exists()
+        )
+
+    def _run_via_pex(self, task: Task, metadata: TaskMetadata) -> None:
+        """Spawns a subprocess to execute the stage using a PEX binary.
 
         Args:
-            task: The task instance being rewound.
-            rw: The rewind exception containing the target stage.
-            log: The logger for the current execution.
-            meta: The TaskMetadata object from the hot cache.
+            task: The Task object representing the current execution.
+            metadata: The TaskMetadata from the cache.
 
-        Decision: Attempt-Scoped Self-Healing Gate.
-        Rewinds are treated as 'controlled failures'. To prevent infinite loops
-        (e.g., oscillating between Write and Transform), we limit rewinds to
-        exactly one attempt per target stage within a single attempt lifecycle.
-        This slate is reset if the task is manually resumed by an operator.
+        Decision: Environment Isolation.
+        By setting `PEX_PATH`, we ensure that the subprocess uses the
+        specified dependency PEX, providing a fully isolated and reproducible
+        runtime environment for the stage execution.
         """
-        # 1. AUTHORITATIVE CACHE CHECK
-        # Decision: Runtime Isolation.
-        # We check the 'meta' object (the Hot Cache). This ensures the
-        # constraint is enforced without polluting the manifest on disk.
-        if rw.target_stage in meta.rewind_history:
-            log.error(
-                "Maximum rewind limit (1) reached for stage. Converting to failure.",
-                target=rw.target_stage,
-                previous_attempt=meta.rewind_history[rw.target_stage],
-            )
-            self.finalize_task_execution(task, runtime_exception=rw)
+        env = os.environ.copy()
+        if self.exec_ctx.deps_pex_path:
+            env["PEX_PATH"] = str(self.exec_ctx.deps_pex_path)
+
+        cmd = [
+            "python3",
+            str(self.exec_ctx.code_pex_path),
+            "run",
+            metadata.partition_date,
+            "--job-id",
+            metadata.job_id,
+            "--dataset",
+            metadata.dataset_id,
+            "--stage",
+            task.task_ref.stage,
+        ]
+
+        subprocess.run(cmd, env=env, check=True, capture_output=False)
+
+    def _apply_rollback(
+        self, task: Task, exception: RollbackRequired, log: Any, metadata: TaskMetadata
+    ) -> None:
+        """Rewinds the task progress to a previous stage.
+
+        Decision: Finite Retry.
+        We limit rollbacks to one attempt per stage using the
+        rewind_history map. This prevents infinite cycles if a
+        transformation consistently fails due to persistent data drift.
+        """
+        target = task.task_ref.stage
+        if target in metadata.rewind_history:
+            log.error(f"Maximum rewind limit (1) reached for {target}")
+            self.conclude_task(task, runtime_exception=exception)
             return
 
-        # 2. Increment and Execute Rewind
-        from libs.utils.dates import get_current_timestamp
+        from libs.utils.dates import current_timestamp
 
-        log.warning(
-            "Task signaled REWIND",
-            to_stage=rw.target_stage,
-        )
-        # Update the Hot Cache only
-        meta.rewind_history[rw.target_stage] = get_current_timestamp().isoformat()
+        metadata.rewind_history[target] = current_timestamp().isoformat()
 
         task.update_manifest(
             {
                 "status": ExecutionStatus.WAITING.value,
-                rw.target_stage: None,
-                "current_stage": rw.target_stage,
+                target: None,
+                "current_stage": target,
             }
         )
-        self._transition_task(
+
+        self._update_task_state(
             task.task_ref.build(),
-            new_status=ExecutionStatus.WAITING,
-            next_stage=rw.target_stage,
-            meta_override=meta,
+            ExecutionStatus.WAITING,
+            next_stage=target,
+            metadata_override=metadata,
         )
 
-    def finalize_task_execution(
+    def conclude_task(
         self, task: Task, runtime_exception: Exception | None = None
     ) -> None:
+        """Finalizes a stage execution and calculates the next state.
+
+        Decision: Policy-Driven Completion.
+        By delegating the outcome to SuccessOutcome, FailureOutcome, and
+        ProgressOutcome classes, we decouple the execution engine from
+        the state machine's rules, allowing for easier maintenance of
+        complex terminal conditions.
         """
-        THE AUTHORITATIVE BORDER CLOSER: Resolves worker file state
-        and updates manifests deterministically based on data policies.
-        """
-        # 1. Deduce target policy rule based on the execution outcome
-        if SuccessState.is_applicable(task, runtime_exception):
-            policy = SuccessState
-        elif FailedState.is_applicable(task, runtime_exception):
-            policy = FailedState
-        elif runtime_exception is not None and RetryState.is_applicable(
-            task, runtime_exception
-        ):
-            # Explicitly delegate retry configurations and temporal backoffs
-            self._handle_retry_finalization(task, runtime_exception)
-            return
+        if SuccessOutcome.matches(task, runtime_exception):
+            policy = SuccessOutcome
+        elif FailureOutcome.matches(task, runtime_exception):
+            policy = FailureOutcome
         else:
-            policy = ProgressState
+            policy = ProgressOutcome
 
-        # 2. Apply updates sequentially based on policy fields
-        target_status = policy.target_status
-        payload: dict[str, Any] = {"status": target_status.value}
-        next_stage = None
+        target_status = policy.status
+        updates: dict[str, Any] = {"status": target_status.value}
 
-        if runtime_exception and policy == FailedState:
-            payload["error"] = {
+        if runtime_exception and policy == FailureOutcome:
+            updates["error"] = {
                 "stage": task.task_ref.stage,
                 "message": str(runtime_exception),
                 "error_type": type(runtime_exception).__name__,
                 "traceback": traceback.format_exc(),
             }
-        if policy == ProgressState:
-            next_stage = StageName.next(task.task_ref.stage or task.stage.name)
-            payload["current_stage"] = next_stage
-            # state=WAITING needed for task to be picked up for the next stage
+            LOG.exception(  # Use LOG.exception to include traceback
+                f"Task {task.run_id} FAILED at {task.task_ref.stage}. "
+                f"Error: {runtime_exception}"
+            )
+
+        next_stage = None
+        if policy == ProgressOutcome:
+            current_stage_enum = Stage(
+                (task.task_ref.stage or task.stage.name).casefold()
+            )
+            next_stage_enum = current_stage_enum.next()
+            next_stage = next_stage_enum.value if next_stage_enum else None
+            if not next_stage:
+                raise ValueError("No next stage found.")
+
             target_status = ExecutionStatus.WAITING
+            updates["current_stage"] = next_stage
+            updates["status"] = target_status.value
 
-        # 3. Persist the state change structurally down to the JSON manifest file
-        task.update_manifest(payload)
+        if policy.status == ExecutionStatus.RETRY:
+            LOG.warning(
+                f"Task {task.run_id} FAILED at {task.task_ref.stage}. "
+                f"Scheduling RETRY (Attempt {task.manifest.retry_count + 1}). "
+                f"Error: {runtime_exception}"
+            )
 
-        # 3. Request sync to drop the state flag file for the Orchestrator to collect
-        task.request_status_sync(policy.signal)
+        task.update_manifest(updates)
+        task.send_signal(policy.signal)
 
-        # 4. Synchronize Orchestrator Cache (Hot Cache)
-        # If successful completion, we pop. Otherwise, we transition.
         cache_key = task.task_ref.build(status=ExecutionStatus.RUNNING)
-        if policy == SuccessState:
+        if policy == SuccessOutcome:
             self.cache.pop(cache_key, None)
         else:
-            self._transition_task(
-                cache_key, new_status=target_status, next_stage=next_stage
-            )
+            self._update_task_state(cache_key, target_status, next_stage=next_stage)
 
-    def _handle_retry_finalization(
-        self, task: Task, exc: RetryTask | TransientError
-    ) -> None:
-        """Handles backoff scheduling configurations and writes operational markers."""
-        retry_count = task.manifest.retry_count
-        service_name = getattr(exc, "service_name", None)
-        message = str(exc)
+    def _update_task_state(
+        self,
+        old_key: str,
+        new_status: ExecutionStatus,
+        next_stage: str | None = None,
+        heartbeat_offset: float = 0,
+        metadata_override: Any | None = None,
+    ) -> TaskMetadata | None:
+        """Atomically updates task metadata and rotates the cache key.
 
-        if service_name:
-            # Circuit breakern write a .blocked file for external recovery checks
-            wait_secs = 0
-            task.workspace.touch_marker(".blocked")
-            task.workspace.remove_marker(".retrying")
-            target_status = ExecutionStatus.BLOCKED
-        else:
-            # Standard exponential backoff: 30s, 60s, 120s... maxing out at 10 minutes
-            wait_secs = min(600, (2**retry_count) * 30)
-            import msgspec
-            from libs.utils.dates import get_current_timestamp
+        Decision: Atomic Consistency.
+        The cache key encodes the status and stage. We pop the old key
+        and set the new one within the same operation to ensure that
+        the TaskManager's 'Tick' always sees a consistent view of
+        what stage is currently executing.
+        """
+        metadata = metadata_override or self.cache.pop(old_key, None)
 
-            retry_info = {
-                "retry_at": get_current_timestamp(strip_tz=True).isoformat(),
-                "reason": message,
-                "wait_seconds": wait_secs,
-                "attempt": retry_count + 1,
-            }
-            task.workspace.write_text(
-                ".retrying", msgspec.json.encode(retry_info).decode()
-            )
-            task.workspace.remove_marker(".blocked")
-            target_status = ExecutionStatus.RETRY
+        if metadata is None:
+            # Fallback logic to recover metadata if the key was externally rotated
+            try:
+                run_id = TaskRef.from_str(old_key).identity.run_id
+                pattern = f"{CACHE_TASK_NAMESPACE}:*:*:*:*:*:{run_id}"
+                for key in list(self.cache.iterkeys(pattern=pattern)):
+                    metadata = self.cache.pop(key, None)
+                    if metadata:
+                        break
+            except ValueError:
+                LOG.error(f"Invalid cache key format: {old_key}")
+                return None
 
-        task.update_manifest(
-            {
-                "status": target_status.value,
-                "error": {"message": message, "type": type(exc).__name__},
-                "retry_count": retry_count + 1,
-            }
+        if metadata is None:
+            return None
+
+        metadata.status = new_status.value
+        if next_stage:
+            metadata.current_stage = next_stage
+        metadata.last_hb = time.time() + heartbeat_offset
+
+        new_key = (
+            TaskRef.from_str(old_key)
+            .with_updates(status=new_status, stage=next_stage or metadata.current_stage)
+            .build()
         )
 
-        logger.info(
-            "Task transitioning to RETRY state",
-            job_id=task.job_id,
-            run_id=task.run_id,
-            attempt=task.manifest.retry_count,
-            wait_seconds=wait_secs,
-        )
-        task.request_status_sync(TaskSignal.RETRY)
-
-        # Update Hot Cache to reflect backoff
-        self._transition_task(
-            task.task_ref.build(status=ExecutionStatus.RUNNING),
-            new_status=target_status,
-            last_hb_offset=wait_secs,
-        )
-
-        # Bubble control flow out to Ray cluster mesh layer cleanly
-        if not isinstance(exc, RetryTask):
-            raise RetryTask(
-                reason=message, wait_seconds=wait_secs, service_name=service_name
-            ) from exc
-        raise exc
+        self.cache[new_key] = metadata
+        return metadata
 
 
-def process_stage_task(worker_id: str, exec_ctx: ExecutionContext, key: str):
-    """
-    This function spawns, executes, and dies automatically.
-    """
+def process_stage_task(worker_id: str, exec_ctx: ExecutionContext, cache_key: str):
+    """Entry point for Ray task execution."""
     install_exception_hooks()
-    worker = Executor(worker_id, exec_ctx)  # Initialize services locally
+    executor = Executor(worker_id, exec_ctx)
+
     try:
-        worker.process_stage(key)
-    except Exception:
-        # The global_exception_handler will handle logging,
-        # but we re-raise to ensure Ray registers the task failure.
-        raise
+        executor.execute_stage(cache_key)
     finally:
-        # Explicitly clean up any local resources before the process exits
-        logger.remove()
+        # logger.remove()
+        executor.is_busy = False
+        import gc
+
+        gc.collect()

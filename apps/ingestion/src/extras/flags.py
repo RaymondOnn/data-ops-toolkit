@@ -53,7 +53,7 @@ def feature_flag(flag_attr: str, context: "TaskContext") -> Generator[bool, None
     import time
 
     # 1. Resolve flag state from the current run context
-    is_active = getattr(context.feature_flags, flag_attr, False)
+    is_active = getattr(context.flags, flag_attr, False)
     start_time = time.perf_counter()
 
     if is_active:

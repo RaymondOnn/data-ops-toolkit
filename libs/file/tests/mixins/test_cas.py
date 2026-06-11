@@ -13,7 +13,7 @@ class MockCASClient(CASArchiveMixin):
     def __init__(self, fs, url):
         self.fs = fs
         self.url = url
-        self.opts = {}
+        self.options = {}
 
     def get_reader_context(self, path, file_pattern=None):
         """Mock implementation of the required crawler helper."""

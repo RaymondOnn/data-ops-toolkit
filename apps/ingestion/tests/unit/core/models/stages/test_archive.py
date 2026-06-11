@@ -2,18 +2,18 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from apps.ingestion.src.core.models.stages.archive import ArchiveStage
-from apps.ingestion.src.core.models.stages.enums import StageName
+from apps.ingestion.src.core.models.stages.enums import Stage
 
 
 @pytest.fixture
 def archive_stage():
-    return ArchiveStage(StageName.ARCHIVE)
+    return ArchiveStage(Stage.ARCHIVE)
 
 
 @pytest.fixture
 def mock_task(tmp_path):
     task = MagicMock()
-    task.folder = tmp_path
+    task.workspace.path = tmp_path
     task.run_id = "run-arch-999"
     task.job_id = "nightly_sync"
     task.dataset_id = "logs"
@@ -65,13 +65,13 @@ def test_archive_execute_success(archive_stage, mock_task, mock_archive):
         result = archive_stage.execute(mock_task)
 
         # Check archival call
-        mock_archive.archive_data.assert_called_once()
+        mock_archive.archive.assert_called_once()
 
         assert result == "FINISH"
-        mock_task.finalize.assert_called_once()
+        mock_task.checkpoint.assert_called_once()
 
         # Verify payload
-        args, kwargs = mock_task.finalize.call_args
+        args, kwargs = mock_task.checkpoint.call_args
         res = kwargs["results"]
         assert res["cleanup_verified"] is True
         assert "nightly_sync" in res["archival_path"]
@@ -81,7 +81,7 @@ def test_archive_execute_handles_failure(archive_stage, mock_task):
     """
     GIVEN a failure in the archival service (e.g. S3 Timeout)
     WHEN execute is called
-    THEN it should finalize with the exception so the job can be retried
+    THEN it should checkpoint with the exception so the job can be retried
     """
     with patch(
         "apps.ingestion.src.services.factory.ServiceFactory.get_archive",
@@ -90,5 +90,5 @@ def test_archive_execute_handles_failure(archive_stage, mock_task):
         with pytest.raises(RuntimeError, match="S3 Down"):
             archive_stage.execute(mock_task)
 
-        mock_task.finalize.assert_called_once()
-        assert "exception" in mock_task.finalize.call_args[1]
+        mock_task.checkpoint.assert_called_once()
+        assert "exception" in mock_task.checkpoint.call_args[1]

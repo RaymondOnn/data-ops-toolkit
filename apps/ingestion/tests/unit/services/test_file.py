@@ -118,11 +118,11 @@ class TestStorageSource:
             assert len(units) == 2
             assert len(units[0]["files"]) == 5
 
-    def test_fetch_data_concatenation(self, source):
+    def test_pull_concatenation(self, source):
         """
         GIVEN a work unit with multiple files
         THEN fetch each and return a concatenated LazyFrame
-        WHEN fetch_data is called
+        WHEN pull is called
         """
         mock_handler = MagicMock()
         # Each to_df returns a LazyFrame with 1 row
@@ -135,7 +135,7 @@ class TestStorageSource:
             patch.object(source, "_get_handler", return_value=mock_handler),
             patch.object(source, "client", MagicMock()),
         ):
-            result = source.fetch_data({"files": ["a.csv", "b.csv"]})
+            result = source.pull({"files": ["a.csv", "b.csv"]})
 
             assert isinstance(result, pl.LazyFrame)
             df = result.collect()
@@ -155,20 +155,20 @@ class TestStorageSink:
             storage_options={},
         )
 
-    def test_promote_data_idempotency(self, sink):
+    def test_promote_idempotency(self, sink):
         """
         GIVEN a target partition that already exists
         THEN remove the existing partition before moving the staged data
-        WHEN promote_data is called
+        WHEN promote is called
         """
         mock_client = MagicMock()
         mock_client.exists.return_value = True
 
         with patch.object(sink, "client", mock_client):
-            sink.promote_data(
-                staging_table="tmp/stage_123",
-                target_table="prod/orders",
-                partition_col="dt",
+            sink.promote(
+                staging_location="tmp/stage_123",
+                target_location="prod/orders",
+                partition_by="dt",
                 partition_val="2024-01-01",
             )
 

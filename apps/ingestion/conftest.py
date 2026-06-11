@@ -65,8 +65,8 @@ def mock_task(exec_ctx, tmp_path):
     task.job_id = "test-job"
     task.dataset_id = "test-dataset"
     task.partition_date = "2024-01-01"
-    task.folder = tmp_path / "active" / "test-run-uuid"
-    task.folder.mkdir(parents=True)
+    task.workspace.path = tmp_path / "active" / "test-run-uuid"
+    task.workspace.path.mkdir(parents=True)
     task.exec_ctx = exec_ctx
 
     # Initialize manifest mock with basic attributes
@@ -80,7 +80,7 @@ def clear_service_singletons():
     """
     GIVEN a suite of unit tests
     WHEN a test finishes
-    THEN clear the ServiceFactory and ServiceRegistry to prevent state leakage
+    THEN clear the ServiceFactory and ServiceMonitor to prevent state leakage
     """
     yield
     from apps.ingestion.src.services.factory import ServiceFactory
@@ -113,7 +113,7 @@ def mock_source():
     from apps.ingestion.src.services.base import Source
 
     source = MagicMock(spec=Source)
-    source.get_total_count.return_value = 1000
+    source.count_units.return_value = 1000
     return source
 
 
@@ -126,8 +126,8 @@ def mock_sink():
     from apps.ingestion.src.services.base import Sink
 
     sink = MagicMock(spec=Sink)
-    sink.get_total_count.return_value = 1000
-    sink.stage_data.return_value = ("stg_mock_table", 1000)
+    sink.count_units.return_value = 1000
+    sink.stage.return_value = ("stg_mock_table", 1000)
     return sink
 
 

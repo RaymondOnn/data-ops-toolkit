@@ -24,9 +24,9 @@ class AzureClient(FileSystemClient):
     def fs(self) -> fsspec.AbstractFileSystem:
         if not hasattr(self, "_fs") or self._fs is None:
             # Map generic 'password' to Azure-specific 'account_key'
-            if "password" in self.opts:
-                self.opts["account_key"] = self.opts.pop("password")
+            if "password" in self.options:
+                self.options["account_key"] = self.options.pop("password")
 
-            self._fs = fsspec.filesystem("abfs", **self.opts)
+            self._fs = fsspec.filesystem("abfs", **self.options)
 
         return self._fs

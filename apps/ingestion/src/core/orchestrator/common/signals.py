@@ -1,7 +1,10 @@
+"""Filesystem-based event detection for task orchestration."""
+
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, Protocol
 
+from apps.ingestion.src.core.models.task import TaskSignal
 from apps.ingestion.src.core.models.task.enums import (
     SUPPORTED_SIGNAL_EXTENSIONS,
     TaskIdentity,
@@ -12,123 +15,90 @@ from loguru import logger
 if TYPE_CHECKING:
     from apps.ingestion.src.core.contexts import ExecutionContext
 
-
 LOG = logger
 
 
-class InternalEventBus:
-    """
-    Thread-safe event signaling mechanism for orchestrator synchronization.
-
-    Used to bridge asynchronous worker events with the synchronous polling tick.
-    """
+class EventBus:
+    """Thread-safe event bus for orchestrator synchronization."""
 
     def __init__(self):
-        """Initializes the event bus with a fresh threading event."""
-        self._subscribers = []
-        self._change_event = threading.Event()
+        self._event = threading.Event()
 
-    def notify(self):
-        """Wakes up any threads waiting for a system state change."""
-        self._change_event.set()
+    def notify(self) -> None:
+        """Wake up waiting threads."""
+        self._event.set()
 
-    def wait_for_change(self, timeout: float | None = None) -> bool:
-        """
-        Blocks the calling thread until a notification is received.
-
-        Args:
-            timeout: Maximum time to wait in seconds.
-
-        Returns:
-            bool: True if the event was set, False if the timeout occurred.
-        """
-        signaled = self._change_event.wait(timeout=timeout)
-        self._change_event.clear()
+    def wait(self, timeout: float | None = None) -> bool:
+        """Wait for trigger or timeout."""
+        signaled = self._event.wait(timeout=timeout)
+        self._event.clear()
         return signaled
 
 
 class SignalEvent(NamedTuple):
-    """
-    Immutable data representing a detected task system event.
-
-    Carries the task identity and the nature of the signal found on disk.
-    """
+    """Detected task filesystem event."""
 
     identity: TaskIdentity
-    signal_type: str  # .done, .fail, .sync, etc.
+    signal_type: str  # .done, .fail, .sync
     folder_path: Path | None
 
 
-class SignalProcessor(InternalEventBus):
-    """
-    The 'Sensor' for filesystem-based events.
+class SignalHandler(Protocol):
+    def __call__(self, event: SignalEvent) -> None: ...
 
-    It parses zero-byte signal files into high-level event objects.
-    """
 
-    def __init__(
-        self,
-        exec_ctx: "ExecutionContext",
-    ):
-        """
-        Initializes the SignalProcessor.
+class SignalScanner(EventBus):
+    """Scans signal directory for task marker files."""
 
-        Args:
-            exec_ctx: The global execution context providing signal paths.
-        """
+    def __init__(self, exec_ctx: "ExecutionContext"):
         super().__init__()
         self.exec_ctx = exec_ctx
-
-        # Decentralized: SignalProcessor owns the signals directory
+        self._handlers: dict[TaskSignal, SignalHandler] = {}
         self.exec_ctx.signal_path.mkdir(parents=True, exist_ok=True)
 
-    def collect_events(
-        self, filter_run_ids: set[str] | None = None
-    ) -> list[SignalEvent]:
-        """
-        Scans the signal directory and converts file markers into SignalEvents.
+    def on(self, signal_type: TaskSignal, handler: SignalHandler) -> None:
+        """Register a handler for a signal type."""
+        self._handlers[signal_type] = handler
 
-        Cleans up (deletes) processed or invalid signal files to prevent
-        duplicate processing in subsequent ticks.
-
-        Args:
-            filter_run_ids: Optional set of run IDs to limit discovery.
-
-        Returns:
-            list[SignalEvent]: A list of detected task signals.
-        """
-        signal_path = self.exec_ctx.signal_path
-        events = []
-
-        for file in signal_path.iterdir():
-            if not file.is_file():
+    def dispatch(self, filter_run_ids: set[str] | None = None) -> None:
+        """Scan and dispatch signals to registered handlers."""
+        events_dispatched = False
+        for marker in self.exec_ctx.signal_path.iterdir():
+            if not marker.is_file():
                 continue
 
-            # Only process known signal types, ignore .cmd files here
-            if file.suffix not in SUPPORTED_SIGNAL_EXTENSIONS:
-                file.unlink()  # Delete unknown/unhandled files
+            if marker.suffix not in SUPPORTED_SIGNAL_EXTENSIONS:
+                marker.unlink()
                 continue
 
             try:
-                # Decouple parsing logic: Get Immutable Identity from the filename
-                identity = self.exec_ctx.get_task_id(file.stem)
+                signal_type = TaskSignal(marker.suffix.casefold().strip("."))
+                handler = self._handlers.get(signal_type)
 
+                if not handler:
+                    LOG.warning(f"No handler for signal: {signal_type}")
+                    marker.unlink()
+                    continue
+
+                identity = self.exec_ctx.parse_task_id(marker.stem)
                 if filter_run_ids and identity.run_id not in filter_run_ids:
                     continue
 
-                events.append(
-                    SignalEvent(
-                        identity=identity,
-                        signal_type=file.suffix,
-                        folder_path=find_path(
-                            self.exec_ctx.workspace_dir, identity.run_id
-                        ),
-                    )
+                event = SignalEvent(
+                    identity=identity,
+                    signal_type=signal_type,
+                    folder_path=find_path(self.exec_ctx.workspace_dir, identity.run_id),
                 )
 
-            except Exception:
-                LOG.exception("Failed to parse signal file", filename=file.name)
-            else:
-                file.unlink()
+                handler(event)
+                events_dispatched = True
 
-        return events
+            except ValueError:
+                LOG.exception(f"Unrecognized signal file: '{marker.suffix}'")
+            except Exception:
+                LOG.exception("Failed to process signal", file=marker.name)
+            finally:
+                marker.unlink()
+
+        if events_dispatched:
+            self.notify()  # Wake up the engine

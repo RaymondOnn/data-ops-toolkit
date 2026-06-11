@@ -5,7 +5,7 @@ from apps.ingestion.src.core.db.base import DBClient
 class SnowflakeADBCClient(DBClient):
     """Snowflake client using ADBC (bypasses slow row-based drivers)."""
 
-    def fetch_dataframe(self, query: str):
+    def pullframe(self, query: str):
         # Snowflake-specific optimization or logging
         print("❄️ Snowflake Optimized Fetch")
         with self.pool.connection() as conn:

@@ -2,10 +2,10 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from apps.ingestion.src.utils.common import (
+    deep_merge,
     find_path,
-    make_short_hash,
-    recursive_merge,
     setup_logger,
+    short_hash,
 )
 
 
@@ -33,26 +33,26 @@ class TestCommonUtils:
         result = find_path(tmp_path, "missing")
         assert result is None
 
-    def test_make_short_hash_format(self):
+    def test_short_hash_format(self):
         """
         GIVEN a request for a short hash
         THEN return a string of requested length containing only hex chars
-        WHEN make_short_hash is called
+        WHEN short_hash is called
         """
-        h = make_short_hash(length=12)
+        h = short_hash(length=12)
         assert len(h) == 12
         assert all(c in "0123456789abcdef" for c in h)
 
-    def test_recursive_merge_logic(self):
+    def test_deep_merge_logic(self):
         """
         GIVEN a base dictionary and an update dictionary with nested keys
         THEN the base dictionary should be updated in-place with deep merging
-        WHEN recursive_merge is invoked
+        WHEN deep_merge is invoked
         """
         base = {"a": 1, "meta": {"status": "init", "count": 0}, "list": [1]}
         upd = {"b": 2, "meta": {"status": "updated"}, "list": [1, 2]}
 
-        recursive_merge(base, upd)
+        deep_merge(base, upd)
 
         assert base["a"] == 1
         assert base["b"] == 2

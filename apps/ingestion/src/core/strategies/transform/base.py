@@ -1,3 +1,5 @@
+"""Base classes for transformation logic."""
+
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -7,28 +9,35 @@ from msgspec import Struct
 
 
 class TransformContext(Struct):
-    options: dict[str, Any]
-    source_dir: Path
-    destination_dir: Path
-    output_format: str = "parquet"
-    type: str = "DefaultTransformer"
+    """Context for transformation execution."""
+
+    job_id: str
+    dataset_id: str
+    params: dict[str, Any]
+    source: Path  # Source directory (was source_dir)
+    target: Path  # Target directory (was destination_dir)
+    format: str = "parquet"  # Output format (was output_format)
+    logic: str = "default"
+
+
+class TransformLogic(ABC):
+    """Base class for all transformers."""
+
+    def __init__(self, **kwargs: Any):
+        self.job_id = kwargs.get("job_id")
+        self.dataset_id = kwargs.get("dataset_id")
+        self._params = kwargs
+
+    @abstractmethod
+    def apply(self, df: pl.LazyFrame, ctx: TransformContext) -> pl.LazyFrame:
+        """Apply transformation to lazy frame (no collect!)."""
+        pass
 
 
 class Transformer(ABC):
-    """
-    The 'Contract' for all transformation logic.
-    """
-
-    def __init__(self, **kwargs: Any):
-        # Store metadata for use in logging or logic
-        self.job_id = kwargs.get("job_id")
-        self.dataset_id = kwargs.get("dataset_id")
-        self.kwargs = kwargs
+    """Base class for distributed transformation execution."""
 
     @abstractmethod
-    def apply(self, lf: pl.LazyFrame, ctx: TransformContext) -> pl.LazyFrame:
-        """
-        Add transformation stages to the lazy plan.
-        Do NOT call .collect() here!
-        """
-        raise NotImplementedError("Subclasses must implement this method")
+    def transform(self, context: TransformContext) -> tuple[int, dict[str, str]]:
+        """Execute distributed transformation and return (row_count, schema)."""
+        pass

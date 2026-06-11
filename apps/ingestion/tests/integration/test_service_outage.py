@@ -2,7 +2,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 from apps.ingestion.src.core.models.task import ExecutionStatus, Task
-from apps.ingestion.src.services.registry import ServiceRegistry
+from apps.ingestion.src.services.monitor import ServiceMonitor
 from libs.clients.base import ClientCantConnect
 
 
@@ -18,7 +18,7 @@ def test_circuit_breaker_blocks_and_recovers(runtime, tmp_path):
     overrides = {
         "extract": {
             "source_type": "clickhouse_db",
-            "source_identifier": "test_db.test_table",
+            "resource": "test_db.test_table",
         }
     }
 
@@ -30,7 +30,7 @@ def test_circuit_breaker_blocks_and_recovers(runtime, tmp_path):
     # 2. Simulate Service Failure: Patch the service's client to raise ClientCantConnect
     # We need to patch the actual service instance that the factory would return
     mock_ch_service = MagicMock()
-    mock_ch_service.get_total_count.side_effect = ClientCantConnect("DB is down")
+    mock_ch_service.count_units.side_effect = ClientCantConnect("DB is down")
     mock_ch_service.config = {"type": "clickhouse_db"}  # Mimic real config
 
     with patch(
@@ -45,18 +45,18 @@ def test_circuit_breaker_blocks_and_recovers(runtime, tmp_path):
 
         # 4. Verification (BLOCKED state)
         task_path = runtime.orchestrator.state_store.resolve_task_path(run_id)
-        task = Task.from_folder(task_path, runtime.exec_ctx)
+        task = Task.from_path(task_path, runtime.exec_ctx)
         assert task.manifest.status == ExecutionStatus.BLOCKED
-        assert ".blocked" in [f.name for f in task.folder.iterdir()]
-        assert ServiceRegistry.is_healthy("clickhouse_db") is False
+        assert ".blocked" in [f.name for f in task.workspace.path.iterdir()]
+        assert ServiceMonitor.is_healthy("clickhouse_db") is False
 
         # 5. Simulate Service Recovery: Remove the side_effect
-        mock_ch_service.get_total_count.side_effect = None
-        mock_ch_service.get_total_count.return_value = 100
+        mock_ch_service.count_units.side_effect = None
+        mock_ch_service.count_units.return_value = 100
 
         # Manually clear the circuit breaker state for the service
-        # In a real daemon, this would happen after recovery_timeout
-        ServiceRegistry.clear_breaker("clickhouse_db")
+        # In a real daemon, this would happen after timeout_secs
+        ServiceMonitor.clear_breaker("clickhouse_db")
 
         # 6. Drive the engine again: Task should now retry
         # We need to ensure the task is picked up from BLOCKED and re-queued
@@ -66,10 +66,10 @@ def test_circuit_breaker_blocks_and_recovers(runtime, tmp_path):
             time.sleep(0.1)
 
         # 7. Verification (RETRY/PENDING state)
-        task = Task.from_folder(task_path, runtime.exec_ctx)
+        task = Task.from_path(task_path, runtime.exec_ctx)
         assert task.manifest.status == ExecutionStatus.PENDING
-        assert ".blocked" not in [f.name for f in task.folder.iterdir()]
-        assert ServiceRegistry.is_blocked("clickhouse_db") is False
+        assert ".blocked" not in [f.name for f in task.workspace.path.iterdir()]
+        assert ServiceMonitor.is_blocked("clickhouse_db") is False
 
         # Ensure it eventually completes (mocking the rest of the pipeline)
         # For this test, we just need to see it unblock and re-enter the queue

@@ -1,8 +1,8 @@
-from .manager import ForceAdmission, NullMaintenance
+from .manager import NoOpMaintenance, OverwriteAdmission
 from .runtime import TriggerRuntime
 
 __all__ = [
-    "ForceAdmission",
-    "NullMaintenance",
+    "NoOpMaintenance",
+    "OverwriteAdmission",
     "TriggerRuntime",
 ]

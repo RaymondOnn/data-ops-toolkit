@@ -96,10 +96,10 @@ class TestMaintenancePolicy:
 
         # 2. Verify marker cleanup (relative to task folder)
         # Mock division returns another mock
-        mock_task.folder.__truediv__.return_value.unlink.assert_called()
+        mock_task.workspace.path.__truediv__.return_value.unlink.assert_called()
 
         # 3. Verify Cache Reconciliation
         # Key should have been popped and replaced with new identity
         assert key not in cache
         assert any("WAITING:EXTRACT" in k for k in cache)
-        mock_task.request_status_sync.assert_called_with(TaskSignal.SYNC)
+        mock_task.send_signal.assert_called_with(TaskSignal.SYNC)

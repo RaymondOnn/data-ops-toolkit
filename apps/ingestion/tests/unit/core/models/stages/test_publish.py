@@ -1,14 +1,14 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from apps.ingestion.src.core.models.stages.enums import StageName
+from apps.ingestion.src.core.models.stages.enums import Stage
 from apps.ingestion.src.core.models.stages.publish import PublishStage
-from apps.ingestion.src.utils.exceptions import RewindTask
+from apps.ingestion.src.utils.exceptions import RollbackRequired
 
 
 @pytest.fixture
 def publish_stage():
-    return PublishStage(StageName.PUBLISH)
+    return PublishStage(Stage.PUBLISH)
 
 
 @pytest.fixture
@@ -19,8 +19,8 @@ def mock_publish_task(mock_task):
 
     # Setup context
     mock_task.context.load.sink_type = "clickhouse"
-    mock_task.context.load.sink_identifier = "prod.orders"
-    mock_task.context.load.partition_col = "dt"
+    mock_task.context.load.destination = "prod.orders"
+    mock_task.context.load.partition_by = "dt"
     mock_task.context.load.partition_value = "2024-01-01"
 
     # Mock manifest
@@ -34,48 +34,48 @@ def test_publish_pre_flight_missing_write_metadata(publish_stage, mock_publish_t
     """
     GIVEN a task where the WRITE stage failed to produce metadata
     WHEN pre_flight is called for PUBLISH
-    THEN it should raise a RewindTask to the WRITE stage
+    THEN it should raise a RollbackRequired to the WRITE stage
     """
     mock_publish_task.manifest.write = None
 
     with patch("apps.ingestion.src.services.factory.ServiceFactory.get_sink"):
-        with pytest.raises(RewindTask) as exc:
+        with pytest.raises(RollbackRequired) as exc:
             publish_stage.pre_flight(mock_publish_task)
-        assert exc.value.target_stage == StageName.WRITE.label
+        assert exc.value.target_stage == Stage.WRITE.value
 
 
 def test_publish_execute_success(publish_stage, mock_task, mock_sink):
     """
     GIVEN valid staging metadata and a working sink
     WHEN execute is called
-    THEN it should promote the data via atomic swap and finalize with success
+    THEN it should promote the data via atomic swap and checkpoint with success
     """
     # Mock the count check after promotion
-    mock_sink.get_total_count.return_value = 500
+    mock_sink.count_units.return_value = 500
 
     with (
         patch(
             "apps.ingestion.src.services.factory.ServiceFactory.get_sink",
             return_value=mock_sink,
         ),
-        patch.object(publish_stage, "_transit", return_value=StageName.ARCHIVE.label),
+        patch.object(publish_stage, "_transit", return_value=Stage.ARCHIVE.value),
     ):
         result = publish_stage.execute(mock_task)
 
-        # Verify promote_data was called with correct parameters
-        mock_sink.promote_data.assert_called_once_with(
-            staging_table="stg_orders_123",
-            target_table="prod.orders",
-            partition_col="dt",
+        # Verify promote was called with correct parameters
+        mock_sink.promote.assert_called_once_with(
+            staging_location="stg_orders_123",
+            target_location="prod.orders",
+            partition_by="dt",
             partition_val="2024-01-01",
             expected_count=500,
         )
 
-        assert result == StageName.ARCHIVE.label
-        mock_task.finalize.assert_called_once()
+        assert result == Stage.ARCHIVE.value
+        mock_task.checkpoint.assert_called_once()
 
         # Verify payload results
-        args, kwargs = mock_task.finalize.call_args
+        args, kwargs = mock_task.checkpoint.call_args
         res = kwargs["results"]
         assert res["final_count"] == 500
         assert res["final_destination"] == "prod.orders"
@@ -87,7 +87,7 @@ def test_publish_execute_data_loss_detection(publish_stage, mock_task, mock_sink
     WHEN execute is called
     THEN it should raise a ValueError to prevent silent data loss
     """
-    mock_sink.get_total_count.return_value = 450  # Mismatch! (Expected 500)
+    mock_sink.count_units.return_value = 450  # Mismatch! (Expected 500)
 
     with (
         patch(

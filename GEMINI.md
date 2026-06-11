@@ -42,7 +42,7 @@ This document defines the architectural guardrails, coding standards, and monore
 
 ### Paths & Time
 - **UPath**: Never use `os.path` or `pathlib.Path` for data paths. Use `upath.UPath` to ensure compatibility with `s3://` and local paths.
-- **UTC Only**: All timestamps must be UTC. Use `libs.utils.dates.get_current_timestamp()`.
+- **UTC Only**: All timestamps must be UTC. Use `libs.utils.dates.current_timestamp()`.
 
 ### Concurrency
 - When using Ray, ensure tasks are idempotently retryable.

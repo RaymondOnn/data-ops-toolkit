@@ -1,53 +1,21 @@
+"""Advanced datetime utilities with pendulum."""
+
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pendulum
 
-if TYPE_CHECKING:
-    from pendulum.interval import Interval
 
-
-def get_current_timestamp(
-    timezone: str | None = None,
-    strip_tz: bool = False,
-) -> datetime:
-    """
-    Generates a current timestamp with robust support for pipeline logic.
-
-    Args:
-        timezone: The timezone name (e.g., 'UTC', 'Asia/Singapore').
-        strip_tz: If True, returns a naive datetime object.
-
-    Returns:
-        datetime: The current timestamp.
-    """
-    # Pendulum handles None by using the system local timezone automatically
+def current_timestamp(timezone: str | None = None, naive: bool = False) -> datetime:
+    """Get current timestamp, optionally naive."""
     now = pendulum.now(timezone)
-
-    # Optionally strip the timezone info (Naive for ClickHouse)
-    if strip_tz:
-        return now.naive()
-
-    return now
+    return now.naive() if naive else now
 
 
-def standardize_timestamp(
-    ts: Any, timezone: str | None = None, force_naive: bool = True
+def parse_timestamp(
+    ts: Any, timezone: str | None = None, naive: bool = True
 ) -> pendulum.DateTime:
-    """
-    Standardizes various datetime inputs into a pendulum instance.
-
-    Args:
-        ts: The timestamp input (string, int, float, or datetime).
-        timezone: Optional target timezone for aware datetimes.
-        force_naive: If True, strips timezone info before returning.
-
-    Returns:
-        pendulum.DateTime: A standardized pendulum datetime object.
-
-    Raises:
-        ValueError: If the input cannot be parsed as a valid datetime.
-    """
+    """Parse various timestamp formats into pendulum.DateTime."""
     if isinstance(ts, str):
         dt = pendulum.parse(ts)
     elif isinstance(ts, int | float):
@@ -55,31 +23,15 @@ def standardize_timestamp(
     else:
         dt = pendulum.instance(ts)
 
-    # If it's not a full DateTime, we can't safely proceed
     if not isinstance(dt, pendulum.DateTime):
-        raise ValueError(f"Input '{ts}' is a {type(dt).__name__}, not a full DateTime.")
+        raise ValueError(f"Cannot parse {ts} as DateTime")
 
-    if timezone:
-        return dt.in_tz(timezone)
-
-    return dt.naive() if force_naive else dt
+    dt = dt.in_tz(timezone) if timezone else dt
+    return dt.naive() if naive else dt
 
 
-def diff_seconds(ts1: Any, ts2: Any, timezone: str | None = None) -> float:
-    """
-    Safely calculates (ts1 - ts2) in seconds, handling naive/aware mismatches
-    by standardizing both to the same reference.
-
-    Args:
-        ts1: The first timestamp (minuend).
-        ts2: The second timestamp (subtrahend).
-        timezone: Contextual timezone for standardization.
-
-    Returns:
-        float: The difference in seconds.
-    """
-    dt1 = standardize_timestamp(ts1, timezone=timezone)
-    dt2 = standardize_timestamp(ts2, timezone=timezone)
-
-    diff: Interval[datetime] = dt1 - dt2
-    return diff.total_seconds()
+def seconds_diff(ts1: Any, ts2: Any, timezone: str | None = None) -> float:
+    """Calculate (ts1 - ts2) in seconds."""
+    dt1 = parse_timestamp(ts1, timezone=timezone)
+    dt2 = parse_timestamp(ts2, timezone=timezone)
+    return (dt1 - dt2).total_seconds()

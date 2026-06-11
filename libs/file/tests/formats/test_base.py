@@ -48,18 +48,18 @@ class TestFormatHandler:
             handler = MockFormatHandler()
             mock_fsspec.assert_called_once_with("file")
             assert isinstance(handler.fs, MagicMock)
-            assert handler.opts == {}
+            assert handler.options == {}
 
-    def test_init_with_custom_fs_and_opts(self, mock_fs):
+    def test_init_with_custom_fs_and_options(self, mock_fs):
         """
         GIVEN a custom filesystem and storage options
         THEN it should initialize with the provided values
         WHEN FormatHandler is instantiated
         """
-        custom_opts = {"key": "value"}
-        handler = MockFormatHandler(fs=mock_fs, storage_options=custom_opts)
+        custom_options = {"key": "value"}
+        handler = MockFormatHandler(fs=mock_fs, storage_options=custom_options)
         assert handler.fs == mock_fs
-        assert handler.opts == custom_opts
+        assert handler.options == custom_options
 
     def test_is_splittable_default(self):
         """

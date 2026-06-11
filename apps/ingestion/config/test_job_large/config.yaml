@@ -25,7 +25,9 @@ default:
         params:
       load:
         service_ref: "clickhouse"
-        sink_identifier: TEST.SIM_DATA
+        sink_params:
+          type: database
+          destination: TEST.SIM_DATA
       archive:
         enable_archival: true    # per-dataset archival override
         service_ref: "s3_archive"

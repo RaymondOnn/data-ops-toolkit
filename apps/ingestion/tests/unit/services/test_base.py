@@ -5,7 +5,7 @@ from apps.ingestion.src.services.base import Service
 class MockService(Service):
     """Concrete implementation for testing Service ABC."""
 
-    def get_total_count(self, target: str, filter_condition: str | None = None) -> int:
+    def count_units(self, target: str, filter_condition: str | None = None) -> int:
         return 100
 
 

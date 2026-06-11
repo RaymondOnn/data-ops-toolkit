@@ -141,7 +141,7 @@ graph TD
 
     subgraph "Execution (active/)"
         Queue --> Executor[Executor Picks Up: PROVISIONING]
-        Executor --> Init[Task.from_folder: Rehydrate]
+        Executor --> Init[Task.from_path: Rehydrate]
         Init --> Process[Task.execute: RUNNING]
         Process --> Mark[Marker + Update Manifest: SUCCESS]
     end

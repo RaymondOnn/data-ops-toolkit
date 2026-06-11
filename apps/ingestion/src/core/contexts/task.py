@@ -1,152 +1,352 @@
+"""Task configuration and context models for pipeline execution."""
+
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal, Self
 
 import msgspec
-from apps.ingestion.src.core.models.stages.enums import StageName
+from apps.ingestion.src.core.models.stages.enums import Stage
 from apps.ingestion.src.extras.flags import FeatureFlags
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME
+from loguru import logger
 
-if TYPE_CHECKING:
-    from apps.ingestion.src.core.orchestrator.enums import JobRecord
+LOG = logger
 
 
-class SchemaRow(msgspec.Struct):
-    """
-    Represents the strict structure of a schema.csv row.
-    Used to validate configurations before regression runs.
-    """
+# =============================================================================
+# Schema Definition
+# =============================================================================
 
-    source_col: str | None
+
+class ColumnMapping(msgspec.Struct):
+    """Column mapping and transformation rule."""
+
     target_col: str
-    source_dtype: str | None
-    target_dtype: str
-    source_length: Any = None
-    source_scale: Any = None
+    target_type: str = "string"
     target_length: Any = None
     target_scale: Any = None
+    source_col: str | None = None
+    source_type: str | None = None
+    source_length: Any = None
+    source_scale: Any = None
     masking: str | None = None
-    internal_flag: bool = False
-    primary_key: bool = False
+    internal: bool = False
+    is_primary_key: bool = False
+
+    @classmethod
+    def from_csv_row(cls, row: dict[str, str]) -> "ColumnMapping":
+        """Create ColumnMapping from CSV row."""
+        return cls(
+            source_col=cls._none_if_empty(row.get("source_col")),
+            target_col=row.get("target_col", ""),
+            source_type=cls._none_if_empty(row.get("source_dtype")),
+            target_type=row.get("target_dtype", ""),
+            source_length=cls._to_int(row.get("source_length")),
+            source_scale=cls._to_int(row.get("source_scale")),
+            target_length=cls._to_int(row.get("target_length")),
+            target_scale=cls._to_int(row.get("target_scale")),
+            masking=cls._none_if_empty(row.get("masking")),
+            internal=cls._to_bool(row.get("internal_flag", "false")),
+            is_primary_key=cls._to_bool(row.get("primary_key", "false")),
+        )
+
+    @staticmethod
+    def _none_if_empty(value: str | None) -> str | None:
+        return None if not value or value.lower() == "none" else value
+
+    @staticmethod
+    def _to_int(value: str | None) -> int | None:
+        if not value or value.lower() == "none":
+            return None
+        try:
+            return int(float(value))
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _to_bool(value: str) -> bool:
+        return value.lower().strip() in ("true", "1", "t", "yes", "y")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert config to dictionary (excludes None values)."""
+        return msgspec.to_builtins(self)
 
 
-class ExtractConfig(msgspec.Struct):
-    """Configuration for data extraction/ingestion."""
+# =============================================================================
+# Stage Configurations
+# =============================================================================
 
-    source_type: str  # e.g. "postgres", "s3", "local"
-    source_identifier: str | None  # path, table, or API endpoint
-    num_workers: int = 10  # parallelism level
+
+class BaseConfig(msgspec.Struct):
+    """Base class for all config classes."""
+
+    @classmethod
+    def from_params(cls, *args: Any, **kwargs: Any) -> Any:
+        """Abstract factory method for creating configuration from raw parameters."""
+        raise NotImplementedError(f"from_params must be implemented by {cls.__name__}")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert config to dictionary (excludes None values)."""
+        return msgspec.to_builtins(self)
+
+
+class ExtractConfig(BaseConfig):
+    """Configuration for data extraction."""
+
+    type: str  # "postgres", "s3", "local", etc.
+    resource: str | None  # Table name, path, or endpoint
+    num_workers: int = 10
     load_mode: Literal["snapshot", "delta"] = "snapshot"
-    source_config: dict[str, Any] = msgspec.field(
-        default_factory=dict
-    )  # connection / credentials
-    source_params: dict[str, Any] = msgspec.field(
-        default_factory=dict
-    )  # extraction-specific options (filters, etc.)
-    schema_items: list[SchemaRow] = msgspec.field(default_factory=list)
+    service: dict[str, Any] = msgspec.field(default_factory=dict)
+    params: dict[str, Any] = msgspec.field(default_factory=dict)
+    schema: list[ColumnMapping] = msgspec.field(default_factory=list)
 
-    def post_init(self) -> None:
-        """Post-initialization validation."""
-        self.validate_schema_pk(self.source_identifier or "unknown_dataset")
-
-    def validate_schema_pk(self, dataset_id: str) -> None:
-        """Ensures at least one column is marked as primary_key."""
-        if not any(col.primary_key for col in self.schema_items):
+    def __post_init__(self) -> None:
+        """Validate schema has primary key."""
+        if not self.resource or self.resource == "N/A" or not self.schema:
+            return
+        if not any(col.is_primary_key for col in self.schema):
             raise ValueError(
-                f"Invalid schema for '{dataset_id}': No primary key defined. "
-                "Ingestion requires at least one primary key for idempotent publishing."
+                f"No primary key defined for dataset '{self.resource}'. "
+                "At least one column must be marked as primary_key."
             )
 
+    @classmethod
+    def from_params(
+        cls,
+        source_params: dict[str, Any],
+        service: dict[str, Any],
+        schema: list[ColumnMapping],
+        **overrides,
+    ) -> Self:
+        """Create ExtractConfig from raw source parameters."""
+        params = source_params.copy()
+        source_type = params.pop("type")
 
-class TransformConfig(msgspec.Struct):
+        # Resolve resource based on source type
+        if source_type == "database":
+            resource = params.pop("table_name", "")
+        elif source_type == "api":
+            resource = params.pop("endpoint", "")
+        elif source_type in ("flat_file", "file"):
+            resource, file_pattern = cls._resolve_file_resource(params)
+            if file_pattern is not None:
+                params["file_pattern"] = file_pattern
+        else:
+            resource = ""
+            LOG.warning(f"Unknown source type: {source_type}")
+
+        LOG.debug(
+            f"Creating ExtractConfig: type={source_type}, resource={resource}, params={params}"
+        )
+        return cls(
+            type=service["type"].casefold(),
+            resource=resource,
+            num_workers=overrides["num_workers"],
+            load_mode=overrides["load_mode"],
+            service=service,
+            params=params,
+            schema=schema,
+        )
+
+    @staticmethod
+    def _resolve_file_resource(params: dict) -> tuple[str, str | None]:
+        """Resolve resource for file sources.
+
+        Case 1: file_path with wildcards
+            Input: file_path = './mock_data/*.parquet', archive=None
+            Output: folder='./mock_data', pattern='*.parquet'
+
+        Case 2: direct file path
+            Input: file_path = './mock_data/sample_orders.csv', archive=None
+            Output: folder='./mock_data', pattern='sample_orders.csv'
+
+        Case 3: folder only (no file_path, just context.resource)
+            Input: context.resource = './mock_data', file_path=None
+            Output: folder='./mock_data', pattern='' or None? Let's say pattern=None
+
+        Returns:
+            tuple[str, str | None]: (resource_path, file_pattern)
+        """
+        file_pattern = params.pop("file_pattern", {})
+        archive = file_pattern.get("archive")
+        glob_pattern = file_pattern.get("glob", "")
+
+        if archive:
+            # Archive file: archive is the resource
+            return archive, glob_pattern if glob_pattern else None
+
+        if not glob_pattern:
+            return "", None
+
+        # Check if it's a pattern with wildcards
+        if "*" in glob_pattern or "?" in glob_pattern:
+            # Pattern - split into directory and pattern
+            path = Path(glob_pattern)
+            resource = str(path.parent) if path.parent != path else "."
+            return resource, path.name
+
+        # Direct file
+        return glob_pattern, None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        result = super().to_dict()
+        # Convert schema items to dicts if needed
+        if self.schema:
+            result["schema"] = [
+                col.to_dict() if hasattr(col, "to_dict") else col for col in self.schema
+            ]
+        return result
+
+
+class TransformConfig(BaseConfig):
     """Configuration for data transformation."""
 
-    transform_type: str  # e.g. "default", "bitmask", "custom"
-    source_dir: str | None = None  # directory to be used for regression testing
-    transform_params: dict[str, Any] = msgspec.field(default_factory=dict)
+    type: str = "default"  # "default", "bitmask", "custom"
+    params: dict[str, Any] = msgspec.field(default_factory=dict)
+    source_dir: str | None = None  # For regression testing
+
+    @classmethod
+    def from_params(
+        cls,
+        transform_type: str,
+        transform_params: dict[str, Any],
+        **overrides,
+    ) -> Self:
+        """Create TransformConfig from raw parameters."""
+        LOG.debug(
+            f"Creating TransformConfig: type={transform_type}, params={transform_params}, overrides={overrides}"
+        )
+        return cls(
+            type=transform_type,
+            params=transform_params,
+            source_dir=overrides.get("source_dir"),
+        )
 
 
-class LoadConfig(msgspec.Struct):
-    """Configuration for data loading/sinking."""
+class LoadConfig(BaseConfig):
+    """Configuration for data loading."""
 
-    sink_type: str  # e.g. "clickhouse", "snowflake"
-    sink_identifier: str  # target table name or path
-    partition_col: str
+    type: str  # "clickhouse", "snowflake", etc.
+    destination: str  # Target table or path
+    partition_by: str
     partition_value: str
-    sink_config: dict[str, Any] = msgspec.field(default_factory=dict)
-    load_params: dict[str, Any] = msgspec.field(default_factory=dict)
+    service: dict[str, Any] = msgspec.field(default_factory=dict)
+    params: dict[str, Any] = msgspec.field(default_factory=dict)
+
+    @classmethod
+    def from_params(
+        cls,
+        sink_params: dict[str, Any],
+        service: dict[str, Any],
+        **overrides,
+    ) -> Self:
+        """Create LoadConfig from raw parameters."""
+        params = sink_params.copy()
+
+        # Resolve destination from params
+        partition_by = overrides.get("partition_by") or params.pop("partition_by", "")
+        partition_value = overrides.get("partition_value") or params.pop(
+            "partition_value", ""
+        )
+
+        return cls(
+            type=service["type"].casefold(),
+            destination=params["destination"],
+            partition_by=partition_by,
+            partition_value=partition_value,
+            service=service,
+            params=params,
+        )
 
 
-class ArchiveConfig(msgspec.Struct, omit_defaults=True):
-    """Configuration for data governance and archival."""
+class ArchiveConfig(BaseConfig, omit_defaults=True):
+    """Configuration for data archival."""
 
     enabled: bool
-    retention_days: int | None
-    base_path: str | None
-    type: str | None
-    config: dict[str, Any] | None = msgspec.field(default_factory=dict)
+    retention_days: int | None = None
+    base_path: str | None = None
+    type: str | None = None
+    service: dict[str, Any] = msgspec.field(default_factory=dict)
+
+    @classmethod
+    def from_params(
+        cls,
+        archive_params: dict[str, Any],
+        service: dict[str, Any],
+        archive_enabled: bool = False,
+        **overrides,
+    ) -> Self:
+        """Create ArchiveConfig from raw parameters."""
+        params = archive_params.copy()
+        archive_type = overrides.get("type") or params.pop("type", None)
+
+        if not archive_enabled:
+            return cls(
+                enabled=archive_enabled,
+                retention_days=None,
+                base_path=None,
+                type=archive_type,
+                service=service,
+            )
+
+        return cls(
+            enabled=archive_enabled,
+            retention_days=overrides.get("retention_days")
+            or params.pop("retention_days", None),
+            base_path=overrides.get("base_path") or params.pop("base_path", None),
+            type=service["type"].casefold(),
+            service=service,
+        )
 
 
-class TaskContext(msgspec.Struct):
-    # Sub-Configurations (Must come first as they don't have defaults)
-    extract: ExtractConfig
-    transform: TransformConfig
-    load: LoadConfig
-    archive: ArchiveConfig
+# =============================================================================
+# Pipeline Context
+# =============================================================================
 
-    # Core identifiers
+
+class TaskContext(msgspec.Struct, kw_only=True):
+    """Complete pipeline configuration for a task run."""
+
+    # Stage configurations
+    extract: ExtractConfig | None = None
+    transform: TransformConfig | None = None
+    load: LoadConfig | None = None
+    archive: ArchiveConfig | None = None
+
+    # Identity
     job_id: str
     dataset_id: str
     partition_date: str
 
+    # Execution boundaries
+    from_stage: str = Stage.first().value
+    to_stage: str = Stage.last().value
+
     # Paths
-    output_path: str
+    output_path: str = ""
 
-    # Runtime Details
-
-    from_stage: str = StageName.first().label
-    to_stage: str = StageName.last().label
-
-    # Logic-wide Metadata
-    audit_cols: list[str] = msgspec.field(
+    # Metadata
+    audit_columns: list[str] = msgspec.field(
         default_factory=lambda: ["_partition", "_run_id", "_source"]
     )
-    validation_cmd: str = "validation-app"
+    validation_command: str = "validation-app"
     expires_at: float | None = None
-    custom_overrides: dict[str, Any] = msgspec.field(default_factory=dict)
+    overrides: dict[str, Any] = msgspec.field(default_factory=dict)
     extras: dict[str, Any] = msgspec.field(default_factory=dict)
-    # Feature Flags: The 'One Spot' to manage toggles
-    feature_flags: FeatureFlags = msgspec.field(default_factory=FeatureFlags)
-
-    @classmethod
-    def create_placeholder(cls, run: "JobRecord") -> "TaskContext":
-        """Creates a synthetic context for audit logging of untriggered/expired jobs."""
-        return cls(
-            job_id=run.JOB_ID,
-            dataset_id=run.DATASET_ID,
-            partition_date=str(run.PARTITION_DATE),
-            output_path="",
-            extract=ExtractConfig(source_type="N/A", source_identifier="N/A"),
-            transform=TransformConfig(transform_type="N/A"),
-            load=LoadConfig(
-                sink_type="N/A",
-                sink_identifier="N/A",
-                partition_col="N/A",
-                partition_value="N/A",
-            ),
-            archive=ArchiveConfig(
-                enabled=False, retention_days=None, base_path=None, type=None
-            ),
-            feature_flags=FeatureFlags(),
-        )
+    flags: FeatureFlags = msgspec.field(default_factory=FeatureFlags)
 
 
-def load_task_context(folder: Path) -> TaskContext:
-    """
-    Standardized utility to load a TaskContext from a physical workspace folder.
-    """
+# =============================================================================
+# Loading Utility
+# =============================================================================
+
+
+def load_context(folder: Path) -> TaskContext:
+    """Load pipeline context from workspace folder."""
     config_path = folder / CONFIG_FILENAME
     if not config_path.exists():
         raise FileNotFoundError(f"Missing {CONFIG_FILENAME} in {folder}")
 
-    with config_path.open(mode="rb") as f:
+    with config_path.open("rb") as f:
         return msgspec.json.decode(f.read(), type=TaskContext)

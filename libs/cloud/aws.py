@@ -1,4 +1,5 @@
 import logging
+import os
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -12,7 +13,7 @@ LOG = logging.getLogger(__name__)
 
 
 @dataclass
-class AWSClientConfig:
+class AWSConfig:
     """
     Configuration for AWS Infrastructure and identity.
 
@@ -29,132 +30,90 @@ class AWSClientConfig:
     """
 
     region: str
-    sts_endpoint_url: str | None = None
+    sts_endpoint: str | None = None
     role_arn: str | None = None
-    profile_name: str | None = None
-    aws_access_key_id: str | None = None
-    aws_secret_access_key: str | None = None
+    profile: str | None = None
+    access_key: str | None = None
+    secret_key: str | None = None
 
     def validate(self) -> None:
-        """
-        Validates that a valid identity combination is provided.
+        """Validate credential configuration."""
 
-        Requirement: Either profile_name OR (access_key AND secret_key)
-        must be present.
+        def normalize(v):
+            if v is None:
+                return None
+            if isinstance(v, str):
+                s = v.strip().lower()
+                if s in ("null", "none", ""):
+                    return None
+            return v
 
-        Raises:
-            ValueError: If an incomplete set of access keys is provided.
-        """
-        # Handle potential 'null' or empty strings from YAML expansion
-        p_name = None if self.profile_name in (None, "null", "") else self.profile_name
-        a_key = (
-            None
-            if self.aws_access_key_id in (None, "null", "")
-            else self.aws_access_key_id
-        )
-        s_key = (
-            None
-            if self.aws_secret_access_key in (None, "null", "")
-            else self.aws_secret_access_key
-        )
+        self.profile = normalize(self.profile)
+        self.access_key = normalize(self.access_key)
+        self.secret_key = normalize(self.secret_key)
 
-        # Logic: If they attempt to provide keys, they must provide BOTH.
-        # If both are missing/None, boto3 will naturally fall back to
-        # Environment Variables or IAM Roles.
-        if a_key and not s_key:
-            raise ValueError(
-                "AWS Configuration Error: "
-                "'aws_access_key_id' provided without 'aws_secret_access_key'."
-            )
-        if s_key and not a_key:
-            raise ValueError(
-                "AWS Configuration Error: "
-                "'aws_secret_access_key' provided without 'aws_access_key_id'."
-            )
-
-        if p_name:
-            LOG.debug(f"AWS Identity initialized via CLI Profile: {p_name}")
-        elif a_key:
-            LOG.debug("AWS Identity initialized via Explicit Access Keys")
-        else:
-            LOG.info("AWS Identity initialized via Default Credential Chain (Env/IAM)")
+        if self.access_key and not self.secret_key:
+            raise ValueError("aws_access_key_id provided without aws_secret_access_key")
+        if self.secret_key and not self.access_key:
+            raise ValueError("aws_secret_access_key provided without aws_access_key_id")
 
 
 class AWSClient:
-    """
-    Singleton AWS Client that manages a unified boto3 session.
-    Handles STS AssumeRole with self-refreshing credentials.
-    """
+    """Singleton AWS client with credential management."""
 
     _instance = None
     _lock = threading.Lock()
 
     def __new__(cls, *args, **kwargs):
-        """Implements the Singleton pattern using a thread-safe lock."""
         if not cls._instance:
             with cls._lock:
                 if not cls._instance:
                     cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(
-        self,
-        config: AWSClientConfig | None = None,
-    ):
-        """
-        Initializes the AWSClient singleton.
-
-        Args:
-            config: Strictly typed configuration object.
-
-        Raises:
-            ValueError: If the config object is not provided.
-        """
-        # Ensure init only runs once for the singleton
+    def __init__(self, config: AWSConfig | None = None):
         if hasattr(self, "_initialized"):
             return
 
-        if config is None:
-            raise ValueError("AWSClient must be initialized with an AWSClientConfig.")
+        if not config:
+            raise ValueError("AWSClient requires config")
 
-        # Enforce identity validation before creating the session
+        # Aggressively sanitize environment variables to prevent "null" string pollution.
+        for var in [
+            "AWS_PROFILE",
+            "AWS_DEFAULT_PROFILE",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_DEFAULT_REGION",
+        ]:
+            val = os.environ.get(var)
+            if val is not None and str(val).strip().lower() in ("null", "none", ""):
+                LOG.debug(f"Unsetting poisoned env var: {var}='{val}'")
+                del os.environ[var]
+
         config.validate()
-
         self.config = config
 
-        # Sanitize inputs: Convert empty/null strings to None to allow
-        # boto3's internal credential provider chain to function.
-        profile = config.profile_name
-        if profile in (None, "null", ""):
-            profile = None
-
-        access_key = config.aws_access_key_id
-        if access_key in (None, "null", ""):
-            access_key = None
-
-        secret_key = config.aws_secret_access_key
-        if secret_key in (None, "null", ""):
-            secret_key = None
-
+        # boto3.Session follows a prioritized fallback chain:
+        # 1. Explicit parameters (aws_access_key_id, etc.)
+        # 2. Environment variables (AWS_ACCESS_KEY_ID, etc.)
+        # 3. Environment variable AWS_PROFILE (checks this even if profile_name=None)
+        # 4. Shared credentials file (~/.aws/credentials)
+        # 5. Shared config file (~/.aws/config)
+        # 6. ECS/IAM Instance Role metadata
+        # We pass explicit values only when they exist to allow natural fallback
+        # to IAM Roles in cloud environments.
         self._base_session = boto3.Session(
             region_name=config.region,
-            profile_name=profile,
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
+            profile_name=config.profile,
+            aws_access_key_id=config.access_key,
+            aws_secret_access_key=config.secret_key,
         )
         self._session = None
         self._initialized = True
 
-    def get_session(self, session_name: str = "IngestionEngine") -> boto3.Session:
-        """
-        Returns the active session, initializing STS refresh if a role is set.
-
-        Args:
-            session_name: Logical identifier for the STS session.
-
-        Returns:
-            boto3.Session: An initialized and potentially refreshable session.
-        """
+    def get_session(self, role_session_name: str = "IngestionEngine") -> boto3.Session:
+        """Get AWS session (with STS assume-role if configured)."""
         if self._session:
             return self._session
 
@@ -162,116 +121,76 @@ class AWSClient:
             self._session = self._base_session
             return self._session
 
-        self._session = self._create_refreshable_session(
-            self.config.role_arn, session_name
+        self._session = self._create_sts_session(
+            self.config.role_arn, role_session_name
         )
         return self._session
 
     def get_async_session(self):
-        """
-        Returns an aiobotocore session for async libraries like s3fs.
+        """Get async session for aiobotocore."""
+        session = get_aio_session()
+        creds = self.get_session()._session.get_credentials()
 
-        Returns:
-            AioSession: An asynchronous AWS session.
-        """
-        aio_session = get_aio_session()
-
-        # Get the credentials object from your existing sync session
-        sync_session = self.get_session()
-        creds = sync_session._session.get_credentials()
-
-        # Patch the missing method s3fs expects (as we discussed)
+        # Add missing method expected by s3fs
         if not hasattr(creds, "get_account_id"):
             creds.get_account_id = lambda: None
 
-        # Inject the credentials into the async session
-        aio_session._credentials = creds
-        aio_session.set_config_variable("region", self.config.region)
+        session._credentials = creds
+        session.set_config_variable("region", self.config.region)
+        return session
 
-        return aio_session
+    def get_client(self, service: str, endpoint: str | None = None) -> Any:
+        """Get boto3 client for service."""
+        session = self.get_session()
+        return session.client(
+            service, region_name=self.config.region, endpoint_url=endpoint
+        )
 
-    def _create_refreshable_session(
-        self, role_arn: str, session_name: str
-    ) -> boto3.Session:
-        """
-        Creates a botocore session that automatically refreshes credentials.
+    def _create_sts_session(self, role_arn: str, session_name: str) -> boto3.Session:
+        """Create session with auto-refreshing STS credentials."""
 
-        Uses STS AssumeRole to periodically rotate tokens in the background.
+        def refresh():
+            LOG.info(f"Refreshing STS credentials for role {role_arn}")
 
-        Args:
-            role_arn: The full IAM Role ARN to assume.
-            session_name: The name used for the assumed role session.
+            # Build STS client kwargs
+            sts_kwargs = {
+                "service_name": "sts",
+                "region_name": self.config.region,
+            }
+            if self.config.sts_endpoint:
+                sts_kwargs["endpoint_url"] = self.config.sts_endpoint
 
-        Returns:
-            boto3.Session: A session object containing refresh logic.
-        """
+            sts = self._base_session.client(**sts_kwargs)
+            resp = sts.assume_role(RoleArn=role_arn, RoleSessionName=session_name)
+            creds = resp["Credentials"]
 
-        def refresh_credentials():
-            """Internal method to trigger the STS assume_role call."""
-            LOG.info("Refreshing temporary STS credentials", extra={"role": role_arn})
-            sts = self._base_session.client(
-                service_name="sts",
-                region_name=self.config.region,
-                endpoint_url=self.config.sts_endpoint_url,
-            )
-
-            response = sts.assume_role(RoleArn=role_arn, RoleSessionName=session_name)
-
-            credentials = response["Credentials"]
             return {
-                "access_key": credentials["AccessKeyId"],
-                "secret_key": credentials["SecretAccessKey"],
-                "token": credentials["SessionToken"],
-                "expiry_time": credentials["Expiration"].isoformat(),
+                "access_key": creds["AccessKeyId"],
+                "secret_key": creds["SecretAccessKey"],
+                "token": creds["SessionToken"],
+                "expiry_time": creds["Expiration"].isoformat(),
             }
 
-        session_credentials = RefreshableCredentials.create_from_metadata(
-            metadata=refresh_credentials(),
-            refresh_using=refresh_credentials,
+        refreshable = RefreshableCredentials.create_from_metadata(
+            metadata=refresh(),
+            refresh_using=refresh,
             method="sts-assume-role",
         )
 
-        # s3fs/aiobotocore expects this method to exist on the credentials object
-        if not hasattr(session_credentials, "get_account_id"):
-            session_credentials.get_account_id = lambda: None
+        # Add missing method for compatibility
+        if not hasattr(refreshable, "get_account_id"):
+            refreshable.get_account_id = lambda: None
 
         bc_session = get_session()
         bc_session.set_config_variable("profile", None)
-        bc_session._credentials = session_credentials
+        bc_session._credentials = refreshable
         bc_session.set_config_variable("region", self.config.region)
 
         return boto3.Session(botocore_session=bc_session)
 
-    def get_client(self, service_name: str, endpoint_url: str | None = None) -> Any:
-        """
-        Returns a service-specific client from the singleton session.
-
-        Args:
-            service_name: Name of the AWS service (e.g., 's3', 'sts').
-            endpoint_url: Optional override for the service endpoint.
-
-        Returns:
-            Any: A configured boto3 client instance.
-        """
-        session = self.get_session()
-        return session.client(
-            service_name,
-            region_name=self.config.region,
-            endpoint_url=endpoint_url,
-        )
-
-    def get_current_credentials(self) -> Any:
-        """
-        Returns the raw credentials object from the active session.
-
-        Returns:
-            Any: The botocore credentials instance.
-        """
+    def get_credentials(self) -> Any:
+        """Get current credentials."""
         creds = self.get_session()._session.get_credentials()
-
-        # LocalStack fix: Force the account ID to 0s
-        # S3FS/Botocore uses this to resolve the bucket owner
         if not hasattr(creds, "get_account_id") or creds.get_account_id() is None:
             creds.get_account_id = lambda: "000000000000"
-
         return creds

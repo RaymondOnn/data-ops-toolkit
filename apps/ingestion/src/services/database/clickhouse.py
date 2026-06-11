@@ -1,3 +1,5 @@
+"""ClickHouse service implementation."""
+
 import re
 from collections.abc import Sequence
 from functools import cached_property
@@ -7,7 +9,7 @@ from typing import Any
 from apps.ingestion.src.services.database.base import DatabaseSink, DatabaseSource
 from apps.ingestion.src.services.factory import ServiceFactory
 from libs.database.clients.clickhouse import ClickhouseClient
-from libs.utils.dates import get_current_timestamp
+from libs.utils.dates import current_timestamp
 from loguru import logger
 
 LOG = logger
@@ -17,444 +19,201 @@ LOG = logger
 class ClickHouseService(DatabaseSource, DatabaseSink):
     @cached_property
     def client(self) -> ClickhouseClient:
-        """
-        Lazily initializes the ClickhouseClient.
-
-        Resolves the password from a `Secret` object if present in the config,
-        otherwise uses the plaintext password.
-
-        Returns:
-            ClickhouseClient: An initialized ClickhouseClient instance.
-        """
-        # 1. Resolve Password safely
-        # If 'secret_key' was used, 'password' is a Secret object.
-        # If 'password' was a string in YAML, it stays a string.
-        raw_password = self._config.get("password", "")
-        resolved_password = (
-            raw_password.resolve(sanitize=True)
-            if hasattr(raw_password, "resolve")
-            else str(raw_password)
+        raw_pwd = self._config.get("password", "")
+        password = (
+            raw_pwd.resolve(url_encode=True)
+            if hasattr(raw_pwd, "resolve")
+            else str(raw_pwd)
         )
         return ClickhouseClient(
             host=self._config.get("host"),
             port=self._config.get("port", 8123),
             user=self._config.get("user"),
-            password=resolved_password,
+            password=password,
             database=self._config.get("database"),
         )
 
     def close(self) -> None:
-        """
-        Closes the underlying ClickhouseClient connection and clears the cache.
-
-        This ensures that on next access, the client property will re-initialize
-        the connection, which is useful for handling stale connections.
-        """
-        # The cached_property stores the client in self.__dict__
         if "client" in self.__dict__:
-            client_instance = self.__dict__["client"]
-            if client_instance:
+            if client := self.__dict__["client"]:
                 try:
-                    client_instance.close()
-                    LOG.info("Closed ClickHouse client connection", service=self.name)
+                    client.close()
+                    LOG.info("Closed ClickHouse client", service=self.name)
                 except Exception as e:
-                    LOG.warning(
-                        "Error closing ClickHouse client connection",
-                        service=self.name,
-                        error=str(e),
-                    )
-            del self.__dict__["client"]  # Clear the cached property
-            LOG.debug("Cleared cached ClickHouse client for re-initialization.")
+                    LOG.warning(f"Error closing ClickHouse: {e}")
+            del self.__dict__["client"]
 
-    def get_total_count(self, target: str, filter_condition: str | None = None) -> int:
-        """Implementation required for resource-aware scaling in ExtractStage."""
-        return self.get_row_count(target, filter_condition)
-
-    def stage_data(
+    def stage(
         self,
         source_dir: Path,
-        target_table: str,
+        target: str,
         expected_count: int,
         file_ext: str = "parquet",
         audit_values: dict[str, Any] | None = None,
     ) -> tuple[str, int]:
-        """
-        Stages data from local files into a temporary ClickHouse table.
+        parts = target.split(".", 1)
+        db = parts[0] if len(parts) > 1 else None
+        table = parts[-1]
 
-        Args:
-            source_dir: Local directory containing files to load.
-            target_table: The final destination table name.
-            expected_count: The number of rows expected to be staged.
-            file_ext: The format of the source files (e.g., 'parquet').
-            audit_values: Dictionary of audit columns and their values to inject.
+        timestamp = current_timestamp(naive=True).strftime("%Y%m%d%H%M%S")
+        staging = f"stg_{table}_{timestamp}"
+        full_staging = f"{db}.{staging}" if db else staging
 
-        Returns:
-            tuple[str, int]: The name of the temporary staging table and the
-                number of rows successfully staged.
-        """
-        # Extract database and table names to fully qualify the staging table
-        parts = target_table.split(".", 1)
-        db_name = parts[0] if len(parts) > 1 else None
-        table_name = parts[-1]
-
-        timestamp = get_current_timestamp(strip_tz=True).strftime("%Y%m%d%H%M%S")
-        staging_table_name = f"stg_{table_name}_{timestamp}"
-        staging_table = (
-            f"{db_name}.stg_{table_name}_{timestamp}" if db_name else staging_table_name
-        )
-
-        audit_values = audit_values or {}
         success = False
         try:
-            # Different stages use separate sessions.
-            # Hence, TEMP Table approach not feasible.
-            tmp_sql = f"""CREATE OR REPLACE TABLE {staging_table}
+            self.client.sql(
+                f"""
+                    CREATE OR REPLACE TABLE {full_staging}
                     ENGINE = MergeTree()
                     ORDER BY tuple()
-                    AS {target_table}
+                    AS {target}
                 """
-            LOG.debug(
-                "Creating staging table from target",
-                staging_table=staging_table,
-                target_table=target_table,
             )
-            self.client.sql(tmp_sql)
-
             self.client.copy_from_file(
-                table=staging_table,
+                table=full_staging,
                 source_dir=str(source_dir),
                 file_ext=file_ext,
-                audit_values=audit_values,
+                audit_values=audit_values or {},
             )
-            rows_staged = self.get_row_count(staging_table)
+            rows = self.count_rows(full_staging)
 
-            LOG.info(
-                "Staged data to ClickHouse",
-                table=staging_table,
-                rows=rows_staged,
-            )
-
-            if rows_staged != expected_count:
+            if rows != expected_count:
                 raise ValueError(
-                    f"Row count mismatch after staging. "
-                    f"Expected {expected_count}, got {rows_staged}."
+                    f"Row count mismatch: expected {expected_count}, got {rows}"
                 )
 
             success = True
-            return staging_table, rows_staged
+            return full_staging, rows
 
-        except Exception as exc:
-            LOG.exception("Error during staging data to ClickHouse")
-            raise exc
+        except Exception:
+            LOG.exception("Staging failed")
+            raise
         finally:
-            # CRITICAL: Only drop on failure.
-            # On success, the table must persist for the PublishStage to find it.
             if not success:
-                drop_sql = f"DROP TABLE IF EXISTS {staging_table}"
-                self.client.sql(drop_sql)
-                LOG.warning(
-                    "Staging failed. Cleaned up table {table}", table=staging_table
-                )
+                self.client.sql(f"DROP TABLE IF EXISTS {full_staging}")
+                LOG.warning(f"Cleaned up failed staging: {full_staging}")
 
-    def promote_data(
+    def promote(
         self,
-        staging_table: str,
-        target_table: str,
-        partition_col: str,
-        partition_val: str,
+        staging: str,
+        target: str,
+        partition_by: str,
+        partition_value: str,
         expected_count: int,
     ) -> None:
-        """
-        Promotes data from a staging table to the final target table.
-
-        Performs a schema audit, deletes existing partitions in the target,
-        inserts data from the staging table, and verifies row counts.
-        The staging table is dropped upon successful promotion.
-
-        Args:
-            staging_table: The temporary table containing staged data.
-            target_table: The destination production table.
-            partition_col: The column used for partitioning in the target table.
-            partition_val: The specific partition value to promote.
-            expected_count: The number of rows expected to be promoted.
-
-        Raises:
-            ValueError: If schema or row count mismatches are detected.
-        """
-        """
-        Atomic metadata swap.
-        ClickHouse moves the actual data parts on disk
-        Note: {partition_val} must match the internal ClickHouse partition ID format.
-        """
-        # 1. Schema & Partition Audit for Debugging
-        target_schema = self.client.sql(f"DESCRIBE TABLE {target_table}")
-        staging_schema = self.client.sql(f"DESCRIBE TABLE {staging_table}")
-
-        # Convert schema results to dictionaries: {column_name: data_type}
-        target_cols = {row[0]: row[1] for row in target_schema}
-        staging_cols = {row[0]: row[1] for row in staging_schema}
+        # Validate schema
+        target_cols = {row[0]: row[1] for row in self.fetch(f"DESCRIBE TABLE {target}")}
+        staging_cols = {
+            row[0]: row[1] for row in self.fetch(f"DESCRIBE TABLE {staging}")
+        }
 
         if target_cols != staging_cols:
-            missing_in_staging = set(target_cols.keys()) - set(staging_cols.keys())
-            extra_in_staging = set(staging_cols.keys()) - set(target_cols.keys())
-            type_mismatches = {
-                col: {"target": target_cols[col], "staging": staging_cols[col]}
-                for col in set(target_cols.keys()) & set(staging_cols.keys())
-                if target_cols[col] != staging_cols[col]
-            }
-
-            LOG.error(
-                "Schema mismatch detected during promotion",
-                target_table=target_table,
-                staging_table=staging_table,
-                missing_in_staging=list(missing_in_staging),
-                extra_in_staging=list(extra_in_staging),
-                type_mismatches=type_mismatches,
-            )
-            raise ValueError(
-                f"Cannot promote {staging_table} to {target_table}: Schema mismatch. "
-                f"Missing: {missing_in_staging}, Extra: {extra_in_staging}, "
-                "Mismatches: {type_mismatches}"
-            )
-
-        LOG.info("Schema audit successful", target=target_table, staging=staging_table)
+            missing = set(target_cols) - set(staging_cols)
+            extra = set(staging_cols) - set(target_cols)
+            raise ValueError(f"Schema mismatch - missing: {missing}, extra: {extra}")
 
         success = False
         try:
-            delete_sql = (
-                f"DELETE FROM {target_table} WHERE {partition_col} = '{partition_val}'"
+            self.client.sql(
+                f"DELETE FROM {target} WHERE {partition_by} = '{partition_value}'"
             )
-            self.client.sql(delete_sql)
-            LOG.debug(
-                "Deleted existing partition from target table",
-                table=target_table,
-                partition_col=partition_col,
-                partition_val=partition_val,
-                sql=delete_sql,
-            )
-
-            insert_sql = f"INSERT INTO {target_table} SELECT * FROM {staging_table}"
-            self.client.sql(insert_sql)
-            LOG.info(
-                "Promoted data to ClickHouse",
-                table=target_table,
-                partition=partition_val,
-                sql=insert_sql,
-            )
-
-            rows_promoted = self.get_row_count(
-                target=target_table,
-                filter_condition=f"{partition_col} = '{partition_val}'",
-            )
-            if rows_promoted != expected_count:
+            self.client.sql(f"INSERT INTO {target} SELECT * FROM {staging}")
+            promoted = self.count_rows(target, f"{partition_by} = '{partition_value}'")
+            if promoted != expected_count:
                 raise ValueError(
-                    "Row count mismatch after promotion. "
-                    f"Expected {expected_count}, got {rows_promoted}."
+                    f"Row count mismatch after promotion: "
+                    f"expected {expected_count}, got {promoted}"
                 )
-
-            LOG.success(
-                "Promoted {partition_col}={partition_val} to {table}",
-                table=target_table,
-                partition_col=partition_col,
-                partition_val=partition_val,
-            )
             success = True
+            LOG.success(f"Promoted {partition_by}={partition_value} to {target}")
 
-        except Exception:
-            LOG.exception(
-                "Error during promotion to ClickHouse table: {table}",
-                table=target_table,
-            )
-            raise
         finally:
-            # Always drop the staging table after the swap attempt
             if success:
-                drop_sql = f"DROP TABLE IF EXISTS {staging_table}"
-                self.client.sql(drop_sql)
-                LOG.info(
-                    "Promotion successful. Cleaning up staging table.",
-                    staging_table=staging_table,
-                    sql=drop_sql,
-                )
+                self.client.sql(f"DROP TABLE IF EXISTS {staging}")
+                LOG.info(f"Cleaned up staging: {staging}")
 
     def is_equal(
         self,
-        reference: str,
+        ref: str,
         other: str,
         exclude_columns: set[str] | None = None,
     ) -> bool:
-        """
-        Compares two ClickHouse tables for data equality.
-
-        Uses a tiered validation approach:
-        1. Row Counts (fastest)
-        2. Checksum (high-speed hash fingerprint)
-        3. Set-Difference (full deterministic check using `EXCEPT`)
-
-        Args:
-            reference: The baseline table name.
-            other: The candidate table name.
-            exclude_columns: Optional set of columns to exclude from comparison.
-
-        Returns:
-            bool: True if the tables are identical, False otherwise.
-        """
-        """
-        Identity check using a tiered validation pyramid.
-        """
-        # Tier 1: Row Counts (Near-instant)
-        if self.get_row_count(reference) != self.get_row_count(other):
+        if self.count_rows(ref) != self.count_rows(other):
             return False
-
-        # Tier 2: Checksum (High-speed hash fingerprint)
-        if self.get_checksum(reference) == self.get_checksum(other):
+        if self._get_checksum(ref) == self._get_checksum(other):
             return True
+        return self._minus(ref, other, exclude_columns) == 0
 
-        # Tier 3: Set-Difference (Full deterministic check)
-        return self.minus(reference, other, exclude_columns) == 0
+    def clone(self, source: Any, dest: Any) -> None:
+        self.client.sql(f"""
+                CREATE TABLE OR REPLACE {dest}
+                ENGINE = MergeTree() AS
+                    SELECT * FROM {source}
+                    WHERE 1=0
+            """)
+        LOG.info(f"Cloned {source} -> {dest}")
 
-    def minus(
-        self, reference: str, other: str, exclude_columns: set[str] | None = None
+    def _minus(
+        self,
+        ref: str,
+        other: str,
+        exclude_columns: set[str] | None = None,
     ) -> int:
-        """
-        Calculates the count of rows in the reference table that do not exist
-        in the other table.
-
-        Args:
-            reference: The baseline table name.
-            other: The table to compare against.
-            exclude_columns: Optional set of columns to exclude from comparison.
-
-        Returns:
-            int: The count of rows unique to the reference table.
-        """
-        """Calculates the count of rows in reference that are missing from other."""
-        exclude_columns = exclude_columns or set()
-
-        # Schema discovery to handle evolution/alignment
+        exclude = exclude_columns or set()
         cols_ref = {
-            row[0].decode("utf-8") if isinstance(row[0], bytes) else str(row[0])
-            for row in self.fetch(f"DESCRIBE TABLE {reference}")
+            row[0].decode() if isinstance(row[0], bytes) else row[0]
+            for row in self.fetch(f"DESCRIBE TABLE {ref}")
         }
         cols_other = {
-            row[0].decode("utf-8") if isinstance(row[0], bytes) else str(row[0])
+            row[0].decode() if isinstance(row[0], bytes) else row[0]
             for row in self.fetch(f"DESCRIBE TABLE {other}")
         }
 
-        compare_cols = (cols_ref & cols_other) - exclude_columns
-        if not compare_cols:
-            LOG.error("No common columns found between tables for comparison.")
-            return 999_999_999  # Sentinel for "Totally different"
-
-        # Explicitly sort to ensure positional alignment in EXCEPT
-        col_selection = ", ".join(sorted(compare_cols))
-
-        sql = f"""
-            SELECT count() FROM (
-                SELECT {col_selection} FROM {reference}
-                EXCEPT
-                SELECT {col_selection} FROM {other}
+        common = (cols_ref & cols_other) - exclude
+        if not common:
+            raise ValueError(
+                f"No common columns found. " f"ref: {cols_ref}, other: {cols_other}"
             )
-        """
-        res = self.client.sql(sql)
-        return int(res[0][0]) if res else 0
 
-    def clone(self, reference: str, other: str) -> None:
-        """
-        Clones the schema of a ClickHouse table to a new table.
+        cols = ", ".join(sorted(common))
+        result = self.client.sql(f"""
+            SELECT count() FROM (
+                SELECT {cols} FROM {ref}
+                EXCEPT
+                SELECT {cols} FROM {other}
+            )""")
+        return int(result[0][0]) if result else 0
 
-        Args:
-            reference: The source table to clone from.
-            other: The destination table to create.
-        """
-        sql = f"""
-            CREATE TABLE IF NOT EXISTS {other}
-            ENGINE = MergeTree() AS
-                SELECT * FROM {reference}
-                WHERE 1 = 0
-        """
-        LOG.info("Cloning table structure", source=reference, destination=other)
-        self.client.sql(sql)
-
-    def get_checksum(self, identifier: str, columns: list[str] | None = None) -> str:
-        """
-        Generates a unique, order-independent fingerprint for the data in a table.
-
-        Uses ClickHouse's `cityHash64` for hashing and `groupBitXor` for
-        aggregating hashes in an order-independent manner.
-
-        Args:
-            identifier: The table name.
-            columns: Optional list of columns to include in the checksum.
-
-        Returns:
-            str: A hexadecimal string representing the checksum.
-        """
-        """
-        Generates a 64-bit table fingerprint.
-        Uses cityHash64 for speed and groupBitXor for order-independence.
-        """
-        col_expr = ", ".join(columns) if columns else "*"
-        # We wrap in hex() for a readable string representation
-        query = f"SELECT hex(groupBitXor(cityHash64({col_expr}))) FROM {identifier}"
+    def _get_checksum(self, name: str, columns: list[str] | None = None) -> str:
+        cols = ", ".join(columns) if columns else "*"
         try:
-            res = self.client.sql(query)
-            return str(res[0][0]) if res else "0"
-        except Exception as e:
-            LOG.error(f"Checksum calculation failed for {identifier}: {e}")
+            result = self.client.sql(
+                f"SELECT hex(groupBitXor(cityHash64({cols}))) FROM {name}"
+            )
+            return str(result[0][0]) if result else "0"
+        except Exception:
+            LOG.exception(f"Checksum failed for {name}")
             return "ERROR"
 
-    def drop(self, identifier: str) -> None:
-        """
-        Physically removes a table from ClickHouse.
+    def delete(self, target: str) -> None:
+        self.client.sql(f"DROP TABLE IF EXISTS {target}")
+        LOG.warning(f"Dropped table: {target}")
 
-        Args:
-            identifier: The name of the table to drop.
-        """
-        sql = f"DROP TABLE IF EXISTS {identifier}"
-        LOG.warning("Dropping table from ClickHouse", table=identifier)
-        self.client.sql(sql)
-
-    def get_row_count(self, target: str, filter_condition: str | None = None) -> int:
-        """
-        Returns the total number of rows for a target table, optionally filtered.
-
-        Args:
-            target: The table name to count rows from.
-            filter_condition: Optional WHERE clause to apply.
-
-        Returns:
-            int: The total number of rows.
-        """
-        # 1. Clean the where clause (Case-Insensitive)
-        clean_where = "1=1"
-        if filter_condition and filter_condition.strip():
-            # Removes "where " or "WHERE " from the start
-            clean_where = re.sub(r"(?i)^where\s+", "", filter_condition.strip())
-
-        # Protect table_name by wrapping in backticks and removing existing ones
-        # safe_table = '"{}"'.format(table_name.replace('"', '""'))
-
-        query = f"SELECT COUNT(*) FROM {target} WHERE {clean_where.rstrip('; ')}"
-
+    def count_rows(
+        self, target: str, filter_condition: str | None = None, **kwargs
+    ) -> int:
+        where = (
+            re.sub(r"(?i)^where\s+", "", filter_condition.strip())
+            if filter_condition
+            else "1=1"
+        )
+        query = f"SELECT COUNT(*) FROM {target} WHERE {where.rstrip('; ')}"
         try:
-            res = self.client.sql(query)
-            return int(res[0][0]) if res and len(res) > 0 else 0
+            result = self.client.sql(query)
+            return int(result[0][0]) if result else 0
         except Exception:
-            # Log error using Loguru!
-            # logger.error(f"Query failed: {e}")
-            LOG.exception("Failed to get row count", table=target, query=query)
+            LOG.exception(f"Count failed for {target}")
             return 0
 
     def fetch(self, query: str) -> list[Sequence[Any]]:
-        """
-        Executes a query and returns results as raw tuples.
-
-        Args:
-            query: The SQL query string.
-
-        Returns:
-            list[Sequence[Any]]: A list of row tuples.
-        """
-        """Proxy to the client's sql method for standard DB access."""
         return self.client.sql(query)

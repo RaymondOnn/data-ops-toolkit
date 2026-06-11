@@ -78,7 +78,7 @@ default:
 local:
   workspace_dir: "./.workspace/"
   secret_provider:
-    type: "env_file"
+    type: "local_file"
     path: "./apps/ingestion/infra/environments/local/.secrets.json"
     master_key: "SECRET_MASTER_KEY" # This can be an env var name or plain text for local dev
   archive:

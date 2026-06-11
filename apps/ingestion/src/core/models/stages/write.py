@@ -1,127 +1,97 @@
+"""Write stage for loading transformed data to staging."""
+
 from typing import TYPE_CHECKING, cast
 
-import msgspec
-from apps.ingestion.src.core.models.task.manifest import (
-    TransformPayload,
-    WritePayload,
-)
-from apps.ingestion.src.core.strategies.load.load import LoadContext, Loader
+from apps.ingestion.src.core.models.task.manifest import WritePayload
+from apps.ingestion.src.core.strategies.load.load import LoadContext, LoaderFactory
 from apps.ingestion.src.services.factory import ServiceFactory
-from apps.ingestion.src.utils.exceptions import RewindTask
-from libs.utils.dates import get_current_timestamp
+from apps.ingestion.src.utils.exceptions import RollbackRequired
+from libs.utils.dates import current_timestamp
 from loguru import logger
 
 from .base import ExecutionStage
-from .enums import StageName
+from .enums import Stage
+from .utils import stage
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.task import Task
-
+    from apps.ingestion.src.core.models.task.manifest import TransformPayload
 
 LOG = logger
 
 
+@stage(Stage.WRITE.value)
 class WriteStage(ExecutionStage):
-    name = StageName.WRITE.label
-    manifest: WritePayload
+    """Stage for loading transformed data to staging area."""
+
+    requires_disk_space: bool = False
 
     def pre_flight(self, task: "Task") -> None:
-        """Verify sink connectivity from the execution node."""
+        """Verify sink connectivity and transform artifacts."""
         super().pre_flight(task)
 
-        # Factory initialization already validates basic params and Secret resolution
-        self.service = ServiceFactory.get_sink(
-            task.context.load.sink_type, **task.context.load.sink_config
-        )
+        self.sink = ServiceFactory.get_sink(self.config.type, **self.config.service)
 
-        # 1. Gate: Transform Metadata must exist
-        transform_meta = task.manifest.transform
-        if transform_meta is None:
-            raise RewindTask(
-                StageName.TRANSFORM.label, "Transformation metadata missing."
-            )
+        # Verify transform metadata exists
+        if task.manifest.transform is None:
+            raise RollbackRequired(Stage.TRANSFORM.value, "Missing transform metadata")
 
-        # 2. Gate: Transform Marker/Folder must exist
-        transform_path = task.workspace.run_path / StageName.TRANSFORM.label
+        # Verify transform data exists
+        transform_path = task.workspace.path / Stage.TRANSFORM.value
         if not transform_path.exists():
-            raise RewindTask(
-                StageName.TRANSFORM.label, "Transformation data marker missing."
-            )
+            raise RollbackRequired(Stage.TRANSFORM.value, "Missing transform data")
 
-        # 3. Gate: Physical artifact verification
-        # If the manifest indicates rows were processed, they must be present on disk
-        if transform_meta.output_row_count > 0 and not any(
-            transform_path.glob("*.parquet")
-        ):
-            raise RewindTask(
-                StageName.TRANSFORM.label, "Transformed physical artifacts missing."
-            )
+        # Verify parquet files exist if rows were expected
+        transform = task.manifest.transform
+        if transform.output_count and not any(transform_path.glob("*.parquet")):
+            raise RollbackRequired(Stage.TRANSFORM.value, "Missing parquet files")
 
     def execute(self, task: "Task") -> str:
-        start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
-        task_ctx = task.context
-        extract_meta = task.manifest.extract
-        transform_meta = task.manifest.transform
-
-        # Note: transform_meta is guaranteed by pre_flight at this point
-        transform_meta = cast("TransformPayload", transform_meta)
+        """Load transformed data to staging."""
+        start_ts = current_timestamp(naive=True).isoformat(sep=" ")
+        extract = task.manifest.extract
+        transform = cast("TransformPayload", task.manifest.transform)
 
         try:
-            # 1. Resolve logical input (The partitioned parquet files)
-            source_dir = (task.workspace.run_path / StageName.TRANSFORM.label).resolve()
+            source_dir = (task.workspace.path / Stage.TRANSFORM.value).resolve()
 
-            LOG.info(
-                "Starting load into {target}",
-                stage=self.name,
-                sink_type=task_ctx.load.sink_type,
-                target=task_ctx.load.sink_identifier,
+            LOG.info(f"Loading to {self.config.destination}")
+
+            loader = LoaderFactory.get_loader(self.config.type)
+            load_ctx = LoadContext(
+                target=self.config.destination,
+                partition_by=self.config.partition_by,
+                partition_value=self.config.partition_value,
+                expected_count=transform.output_count,
             )
 
-            # 2. Get the behavioral Strategy
-            loader = Loader()
-
-            # 3. Create Context
-            context = LoadContext(
-                sink_identifier=task_ctx.load.sink_identifier,
-                partition_col=task_ctx.load.partition_col,
-                partition_value=task_ctx.load.partition_value,
-                expected_count=transform_meta.output_row_count or 0,
-            )
-
-            # 2. PHASE 1: LOAD TO STAGING
-            audit_values = {
-                "_partition": task_ctx.load.partition_value,
+            audit = {
+                "_partition": load_ctx.partition_value,
                 "_run_id": task.run_id,
-                "_source": (extract_meta.source_identifier if extract_meta else None)
-                or task_ctx.extract.source_identifier,
+                "_source": (extract.resource if extract else None),
             }
-            staging_artifact, rows_loaded = loader.load(
-                service=self.service,
+
+            staging_id, rows = loader.stage(
+                sink=self.sink,
                 source_dir=source_dir,
-                load_ctx=context,
-                audit_values=audit_values,
+                context=load_ctx,
+                audit=audit,
             )
 
-            # 3. Finalize Manifest
             payload = WritePayload(
-                sink_identifier=task_ctx.load.sink_identifier,
-                sink_type=task_ctx.load.sink_type,
-                staging_artifact=staging_artifact,
-                rows_inserted=int(rows_loaded),
-                partition_col=task_ctx.load.partition_col or "",
-                partition_value=task_ctx.load.partition_value or "",
-                start_timestamp=start_ts,
+                destination=self.config.destination,
+                sink_type=self.config.type,
+                staging_artifact=staging_id,
+                write_count=rows,
+                partition_by=self.config.partition_by or "",
+                partition_value=self.config.partition_value or "",
+                start_time=start_ts,
             )
 
-            self.finalize(task, results=msgspec.to_builtins(payload))
-            LOG.info(
-                "Load complete",
-                stage=self.name,
-                rows=int(rows_loaded),
-                staging_artifact=staging_artifact,
-            )
-            return str(self._transit(task))
+            self.checkpoint(task, payload=payload)
+            LOG.info(f"Load complete: {rows:_} rows staged to {staging_id}")
+            return self._next_stage()
 
-        except Exception as exc:
-            self.finalize(task, exception=exc)
-            raise exc
+        except Exception as e:
+            self.checkpoint(task, error=e)
+            raise

@@ -32,7 +32,7 @@ datasets:
         type: database
         table_name: "production.orders"
         # For delta load mode
-        filter_sql: "status = 'COMPLETED' AND updated_at >= {{partition_date}}"
+        filter_condition: "status = 'COMPLETED' AND updated_at >= {{partition_date}}"
 
         # API Source
         type: api
@@ -68,11 +68,7 @@ datasets:
     load:
       service_ref: "clickhouse"
       sink_params:
-        type: database
-        identifier: "TEST.ORDERS"
-
-        type: blob
-        folder_path: "s3://bucket/processed/orders/"
+        destination: "TEST.ORDERS" # file: "s3://bucket/processed/orders/"
 
 
 
@@ -96,7 +92,7 @@ datasets:
       wrap_quotes: true
     raw:
       source_type: "api"
-      source_identifier: "/v1/ledger"
+      resource: "/v1/ledger"
       load_mode: snapshot
       params:
         query_params:
@@ -111,7 +107,7 @@ datasets:
 
     load:
       type: clickhouse
-      sink_identifier: "ledger_entries"
+      destination: "ledger_entries"
       params:
 
     # OVERRIDE: Specific archival for this dataset
@@ -129,7 +125,7 @@ datasets:
       wrap_quotes: true
     raw:
       source_type: "api"
-      source_identifier: "/v1/logs"
+      resource: "/v1/logs"
       load_mode: snapshot
       params:
         query_params:
@@ -144,7 +140,7 @@ datasets:
 
     load:
       type: clickhouse
-      sink_identifier: "internal_logs"
+      destination: "internal_logs"
       params:
 
     archive:

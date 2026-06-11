@@ -1,12 +1,12 @@
-from .base import Reader, ReaderContext
-from .data import DataReader
-from .factory import ReaderFactory
+from .base import ExtractContext, Extractor
+from .data import DataExtractor
+from .factory import ExtractorFactory
 from .file import FileIngest
 
 __all__ = [
-    "DataReader",
+    "DataExtractor",
+    "ExtractContext",
+    "Extractor",
+    "ExtractorFactory",
     "FileIngest",
-    "Reader",
-    "ReaderContext",
-    "ReaderFactory",
 ]

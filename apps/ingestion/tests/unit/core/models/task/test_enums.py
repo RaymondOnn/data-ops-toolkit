@@ -59,11 +59,10 @@ def test_task_ref_from_signal_stem():
 def test_task_ref_properties(sample_ref):
     """
     GIVEN a TaskRef
-    WHEN identifier or composite_key is accessed
+    WHEN identifier is accessed
     THEN it should return the correctly formatted subsets of the identity
     """
-    assert sample_ref.identifier == "daily_sales:orders:2024-01-01"
-    assert sample_ref.composite_key == "daily_sales:orders"
+    assert sample_ref.task_key == "daily_sales:orders:2024-01-01"
 
 
 def test_task_ref_build(sample_ref):
@@ -81,7 +80,10 @@ def test_task_ref_build(sample_ref):
 
     # Override build
     key_updated = sample_ref.build(status="SUCCESS", stage="transform")
-    expected_updated = f"{CACHE_TASK_NAMESPACE}:SUCCESS:transform:daily_sales:orders:2024-01-01:abc-123"
+    expected_updated = (
+        f"{CACHE_TASK_NAMESPACE}:SUCCESS:transform:daily_sales:"
+        f"orders:2024-01-01:abc-123"
+    )
     assert key_updated == expected_updated
 
 
@@ -89,7 +91,8 @@ def test_task_ref_with_updates_immutability(sample_ref):
     """
     GIVEN a frozen TaskRef
     WHEN with_updates is called
-    THEN it should return a NEW instance with updated fields, leaving the original unchanged
+    THEN it should return a NEW instance with updated fields, leaving
+    the original unchanged
     """
     new_ref = sample_ref.with_updates(status="FAILED")
 

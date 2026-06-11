@@ -44,7 +44,7 @@ class TestTaskSession:
         """
         mock_task = mock_task_cls.return_value
         mock_task.workspace.exists.return_value = True
-        mock_task.workspace.run_path = "/tmp/run"
+        mock_task.workspace.path = "/tmp/run"
         mock_task.id = "job:ds:date"
         mock_task.run_id = "run_uuid"
 
@@ -65,7 +65,7 @@ class TestTaskSession:
 
         assert entered_task == mock_task
 
-    def test_session_exit_finalizes_executor(self, mock_executor, task_ref):
+    def test_session_exit_checkpoints_executor(self, mock_executor, task_ref):
         """
         GIVEN an active TaskSession
         THEN it should notify the executor of finalization and release busy status
@@ -77,7 +77,7 @@ class TestTaskSession:
 
         session.__exit__(None, None, None)
 
-        mock_executor.finalize_task_execution.assert_called_once_with(
+        mock_executor.conclude_task_execution.assert_called_once_with(
             session.task, runtime_exception=None
         )
         assert mock_executor.is_busy is False

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from apps.ingestion.src.core.models.stages.enums import StageName
+from apps.ingestion.src.core.models.stages.enums import Stage
 from apps.ingestion.src.core.models.task import ExecutionStatus, Task
 
 
@@ -15,18 +15,18 @@ def test_manual_rewind_recovery(runtime, tmp_path):
     run_ids = runtime.orchestrator._trigger_job("test_job", "test_dataset")
     run_id = next(iter(run_ids))
     folder = runtime.orchestrator.state_store.resolve_task_path(run_id)
-    task = Task.from_folder(folder, runtime.exec_ctx)
+    task = Task.from_path(folder, runtime.exec_ctx)
 
     # Simulate completed extract
     data_path = task.workspace.get_data_path("extract")
     data_path.mkdir(parents=True, exist_ok=True)
     (data_path / "old_data.parquet").write_text("old")
-    task.workspace.create_stage_marker("extract", data_path)
+    task.workspace.create_symlink("extract", data_path)
     task.update_manifest(
-        {"extract": {"file_count": 1}, "bitmask": StageName.EXTRACT.bitmask}
+        {"extract": {"file_count": 1}, "bitmask": Stage.EXTRACT.bitmask}
     )
 
-    assert (task.folder / "extract").exists()
+    assert (task.workspace.path / "extract").exists()
 
     # 2. Trigger Surgical Recovery (Rewind to Extract)
     # Patch manifest to simulate CLI 'resume --from extract'
@@ -43,11 +43,11 @@ def test_manual_rewind_recovery(runtime, tmp_path):
     new_task_path = runtime.orchestrator.state_store.resolve_task_path(run_id)
     assert "active" in str(new_task_path)
 
-    recovered_task = Task.from_folder(new_task_path, runtime.exec_ctx)
+    recovered_task = Task.from_path(new_task_path, runtime.exec_ctx)
 
     # GAP CHECK: Did the marker get deleted?
     assert not (
-        recovered_task.folder / "extract"
+        recovered_task.workspace.path / "extract"
     ).exists(), "Stale marker was not purged during recovery"
     assert recovered_task.manifest.bitmask == 0, "Bitmask was not reset during rewind"
     assert recovered_task.manifest.status == ExecutionStatus.PENDING
@@ -67,8 +67,7 @@ def test_recovery_max_retries_limit(runtime, tmp_path):
 
     from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
 
-    (folder / MANIFEST_FILENAME).write_text(
-        """
+    (folder / MANIFEST_FILENAME).write_text("""
         {
             "job_id":"j",
             "run_id":"exhausted-run",
@@ -78,8 +77,7 @@ def test_recovery_max_retries_limit(runtime, tmp_path):
             "current_stage": "extract",
             "bitmask": 0
         }
-        """
-    )
+        """)
     (folder / CONFIG_FILENAME).write_text('{"options": {"max_retries": 3}}')
 
     # 2. Run daemon recovery sweep

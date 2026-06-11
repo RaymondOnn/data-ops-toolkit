@@ -27,10 +27,10 @@ This document defines how the Ingestion Engine handles infrastructure failures, 
 
 **Scenario:** An external database (Oracle) or storage layer (S3) becomes unreachable.
 
-* **Detection:** The `Executor` catches a `TransientError` and increments the failure count in the global `ServiceRegistry`.
+* **Detection:** The `Executor` catches a `TransientError` and increments the failure count in the global `ServiceMonitor`.
 * **Action:** Once the threshold (3 failures) is hit, the breaker trips to `OPEN`. Affected tasks are transitioned to `BLOCKED`.
 * **Marker:** A physical `.blocked` file is created in the task workspace.
-* **Behavior (Daemon):** The `Orchestrator` periodically calls `ServiceRegistry.probe()`. Once the service is reachable, the breaker closes, and tasks are automatically resumed.
+* **Behavior (Daemon):** The `Orchestrator` periodically calls `ServiceMonitor.probe()`. Once the service is reachable, the breaker closes, and tasks are automatically resumed.
 * **Behavior (Trigger):** The run finishes other healthy tasks and exits with a summary of blocked runs.
 
 ### 3. Task Retries (Exponential Backoff)
@@ -126,7 +126,7 @@ resilience:
   zombie_heartbeat_threshold_sec: 300
   circuit_breaker:
     failure_threshold: 3
-    recovery_timeout_sec: 300
+    timeout_secs_sec: 300
 
 janitor:
   default_ttl_days: 7

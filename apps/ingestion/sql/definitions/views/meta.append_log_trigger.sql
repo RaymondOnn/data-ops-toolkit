@@ -29,7 +29,6 @@ SELECT
     , cast(NULL, 'LowCardinality(Nullable(String))') AS CURRENT_STAGE
     , cast(0, 'UInt16') AS JOB_BITMASK
     , cast(1, 'UInt8') AS IS_SCHEDULED
-    , CS.WATCH_FILE_PATH AS WATCH_FILE_PATH
     , cast(NULL, 'Nullable(String)') AS RUNTIME_OVERRIDES
     , cast(0, 'UInt8') AS RETRY_ATTEMPTS
     , cast(NULL, 'Nullable(UInt64)') AS SOURCE_ROW_COUNT

@@ -7,7 +7,8 @@ def test_full_pipeline_lifecycle(runtime, tmp_path):
     """
     GIVEN a valid local CSV source file and a job configuration
     WHEN the orchestrator triggers the job and drives the engine to completion
-    THEN the task should transition to SUCCESS, markers should be created, and data should be archived.
+    THEN the task should transition to SUCCESS, markers should be created,
+        and data should be archived.
     """
     # 1. Setup Mock Source Data
     source_dir = tmp_path / "landing"
@@ -20,9 +21,9 @@ def test_full_pipeline_lifecycle(runtime, tmp_path):
     overrides = {
         "extract": {
             "source_type": "flat_file",
-            "source_identifier": str(source_dir),
+            "resource": str(source_dir),
         },
-        "load": {"sink_type": "clickhouse_db", "sink_identifier": "test.orders"},
+        "load": {"sink_type": "clickhouse_db", "destination": "test.orders"},
     }
 
     run_ids = runtime.orchestrator._trigger_job(
@@ -43,7 +44,7 @@ def test_full_pipeline_lifecycle(runtime, tmp_path):
         # Check manifest status on disk
         task_path = runtime.orchestrator.state_store.resolve_task_path(run_id)
         if task_path:
-            task = Task.from_folder(task_path, runtime.exec_ctx)
+            task = Task.from_path(task_path, runtime.exec_ctx)
             if task.manifest.status == ExecutionStatus.SUCCESS:
                 completed = True
                 break
@@ -54,10 +55,10 @@ def test_full_pipeline_lifecycle(runtime, tmp_path):
     assert task_path is not None
 
     # Verify Physical State (Markers/Symlinks)
-    task = Task.from_folder(task_path, runtime.exec_ctx)
+    task = Task.from_path(task_path, runtime.exec_ctx)
     assert task.manifest.bitmask > 0
-    assert (task.folder / "extract").is_symlink()
-    assert (task.folder / "transform").is_symlink()
+    assert (task.workspace.path / "extract").is_symlink()
+    assert (task.workspace.path / "transform").is_symlink()
 
     # Verify Data Vault Hierarchy
     extract_data = task.workspace.get_data_path("extract")

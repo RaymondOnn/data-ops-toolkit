@@ -1,14 +1,15 @@
+import copy
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
-from apps.ingestion.src.utils.exceptions import RetryTask
+from apps.ingestion.src.utils.exceptions import TryAgainLater
 from libs.auth.factory import AuthFactory, SecretProvider
 from libs.auth.secret import Secret
 from libs.cache.base import KeyValueCache
 from libs.clients.base import ClientCantConnect
-from libs.resilience.circuit_breaker import CircuitBreakerTripped
-from libs.utils.dict import find_keys_by_pattern, update_nested_key
+from libs.resilience.circuit_breaker import CircuitOpen
+from libs.utils.dict import find_keys_by_pattern, set_nested_key
 from libs.utils.exceptions import AuthFailure, HostUnreachable
 from loguru import logger
 
@@ -23,29 +24,10 @@ class ServiceNotFound(Exception):
 
 class ServiceFactory:
     # Registry of Classes (Populated by @register)
-    _SERVICES: ClassVar[dict[str, type]] = {}
+    _registry: ClassVar[dict[str, type]] = {}
     # Registry of Singleton Instances (Populated at Runtime)
-    _INSTANCES: ClassVar[dict[str, Any]] = {}
+    _instances: ClassVar[dict[str, Any]] = {}
     _provider: ClassVar[SecretProvider | None] = None
-
-    @staticmethod
-    def _make_hashable(value: Any) -> Any:
-        """
-        Recursively converts a dictionary or list into a hashable structure.
-
-        Args:
-            value: The nested object to convert.
-
-        Returns:
-            Any: A structure composed of frozensets and tuples.
-        """
-        if isinstance(value, dict):
-            return frozenset(
-                (k, ServiceFactory._make_hashable(v)) for k, v in value.items()
-            )
-        if isinstance(value, list | tuple):
-            return tuple(ServiceFactory._make_hashable(v) for v in value)
-        return value
 
     @classmethod
     def register(cls, name: str) -> Callable[[type], type]:
@@ -59,9 +41,9 @@ class ServiceFactory:
             Callable: The decorator wrapper.
         """
 
-        def wrapper(wrapped_class: type) -> type:
-            cls._SERVICES[name.casefold()] = wrapped_class
-            return wrapped_class
+        def wrapper(wrapped: type) -> type:
+            cls._registry[name.casefold()] = wrapped
+            return wrapped
 
         return wrapper
 
@@ -77,210 +59,115 @@ class ServiceFactory:
         cls._provider = AuthFactory.get_provider(env=env, **config)
 
     @classmethod
-    def get_service(
-        cls, service_type: str, flags: Any | None = None, **config: Any
-    ) -> Any:
-        """
-        Retrieves or creates a singleton service instance.
+    def _make_hashable(cls, value: Any) -> Any:
+        """Convert dict/list to hashable structure."""
+        if isinstance(value, dict):
+            return frozenset((k, cls._make_hashable(v)) for k, v in value.items())
+        if isinstance(value, list | tuple):
+            return tuple(cls._make_hashable(v) for v in value)
+        return value
 
-        Handles service registration lookup, benchmark-mode swapping,
-        secret resolution for 'password' fields, and connection retry logic.
-
-        Args:
-            service_type: The registered name of the service.
-            flags: Optional object containing 'benchmark_mode' toggles.
-            **config: Driver-specific configuration parameters.
-
-        Returns:
-            Any: An initialized service instance.
-
-        Raises:
-            ServiceNotFound: If the service_type is not registered.
-            RetryTask: On transient connectivity failures during init.
-            AuthFailure: On terminal credential issues.
-        """
-        # FEATURE TOGGLE: Cost/Tool Benchmarking
-        # If benchmark_mode is on, we can swap the requested service
-        # for an experimental one
+    @classmethod
+    def get(cls, service_type: str, flags: Any | None = None, **config) -> Any:
+        """Get or create a service instance with feature flag support."""
         effective_type = service_type
-        if (
-            flags
-            and getattr(flags, "benchmark_mode", False)
-            and (experimental := getattr(flags, "experimental_sink_type", None))
+
+        # FEATURE TOGGLE: Benchmark mode swaps service for experimental one
+        if (flags and getattr(flags, "benchmark_mode", False)) and (
+            experimental := getattr(flags, "experimental_sink_type", None)
         ):
             effective_type = experimental
             LOG.info(f"🚀 BENCHMARK MODE: Swapping {service_type} -> {effective_type}")
 
-        config_hash = hash(cls._make_hashable(config))
-        instance_key = f"{effective_type}:{config_hash}"
+        key = effective_type.casefold()
+        if key not in cls._registry:
+            raise ServiceNotFound(f"No service registered for: {key}")
 
-        if instance_key not in cls._INSTANCES:
-            LOG.debug(
-                "Creating new service instance",
-                service_type=service_type,
-                instance_key=instance_key,
-            )
-            LOG.debug(
-                "Available services in registry",
-                services=list(cls._SERVICES.keys()),
-            )
-            service_cls = cls._SERVICES.get(effective_type.casefold())
-            if not service_cls:
-                raise ServiceNotFound(f"No service found for {effective_type}")
+        # Hash config for caching (exclude flags from cache key)
+        config_hash = cls._make_hashable(config)
+        instance_key = f"{key}:{config_hash}"
 
-            # --- CENTRALIZED SECRET LOGIC ---
-            # If 'secret_key' (the ID) is present, wrap it in a Secret object.
-            # This 'Secret' object is what gets sent to Ray workers.
-            for path, value in find_keys_by_pattern(
-                config, pattern="secret_key", ignore_case=True
-            ):
-                if path:
-                    if cls._provider is None:
-                        raise ValueError(
-                            "Secret provider not configured in ServiceFactory. "
-                            f"Cannot resolve secret for '{path}'."
-                        )
-                    update_nested_key(
-                        data=config,
-                        path=path,
-                        new_key="password",
-                        new_value=Secret(value, provider=cls._provider),
-                    )
+        if instance_key not in cls._instances:
+            cls._instances[instance_key] = cls._create(key, config)
 
-            try:
-                cls._INSTANCES[instance_key] = service_cls(name=instance_key, **config)
-            except (HostUnreachable, ClientCantConnect, CircuitBreakerTripped) as e:
-                LOG.error(
-                    "Transient connectivity failure during service initialization",
-                    service_type=service_type,
-                    error=str(e),
-                )
-                raise RetryTask(
-                    reason=f"Service {service_type} unavailable: {e!s}",
-                    service_name=service_type,
-                    wait_seconds=300,  # Default cooldown for service outages
-                ) from e
-            except AuthFailure:
-                # Let terminal AuthFailures bubble up to be handled by FailedState
-                raise
-        else:
-            LOG.debug(
-                "Returning cached service instance",
-                service_type=service_type,
-                instance_key=instance_key,
-            )
-
-        return cls._INSTANCES[instance_key]
+        return cls._instances[instance_key]
 
     @classmethod
-    def _get_typed_service(
-        cls, service_type: str, interface: type, flags: Any | None = None, **config: Any
-    ) -> Any:
+    def _create(cls, key: str, config: dict) -> Any:
+        """Create new service instance with secret resolution."""
+        # Use deepcopy to ensure nested configuration changes don't leak
+        config_copy = copy.deepcopy(config)
+
+        # Automatically resolve secret identifiers into Secret objects
+        for path, value in list(
+            find_keys_by_pattern(
+                config_copy, pattern="secret|password", ignore_case=True
+            )
+        ):
+            # If we have a provider and the value is a string, wrap it
+            if isinstance(value, str):
+                if not cls._provider:
+                    raise ValueError(f"SecretProvider required to resolve: {value}")
+                secret_obj = Secret(secret_id=value, provider=cls._provider)
+                set_nested_key(config_copy, path, "password", secret_obj)
+            # Ensure existing Secret instances are mapped to the 'password' key
+            elif isinstance(value, Secret):
+                set_nested_key(config_copy, path, "password", value)
+
+        try:
+            return cls._registry[key](name=key, **config_copy)
+        except (HostUnreachable, ClientCantConnect, CircuitOpen) as e:
+            raise TryAgainLater(
+                reason=f"Service {key} unavailable: {e}",
+                service_name=key,
+                wait_seconds=300,
+            ) from e
+        except AuthFailure:
+            raise
+
+    @classmethod
+    def is_file_source(cls, service_type: str) -> bool:
         """
-        Ensures the retrieved service adheres to a specific interface.
+        Checks if a registered service type is a file-based storage service.
 
         Args:
-            service_type: The registered name of the service.
-            interface: The expected class or protocol (Source/Sink/Archive).
-            flags: Optional feature flags.
-            **config: Driver configuration.
-
-        Returns:
-            Any: The validated service instance.
-
-        Raises:
-            TypeError: If the service does not implement the interface.
+            service_type: The key used to register the service.
         """
-        service = cls.get_service(service_type, flags=flags, **config)
-        if not isinstance(service, interface):
-            raise TypeError(
-                f"Service {service_type} does not implement {interface.__name__}."
-            )
-        return service
+        from .file import StorageSource
+
+        target_cls = cls._registry.get(service_type.casefold())
+        return target_cls is not None and issubclass(target_cls, StorageSource)
 
     @classmethod
     def get_source(
-        cls, service_type: str, flags: Any | None = None, **config: Any
+        cls, service_type: str, flags: Any | None = None, **config
     ) -> Source:
-        """
-        Specialized factory for Data Sources.
-
-        Args:
-            service_type: Registered source name.
-            flags: Optional flags.
-            **config: Connection settings.
-
-        Returns:
-            Source: An object implementing the Source interface.
-        """
-        return cls._get_typed_service(service_type, Source, flags, **config)
-        # return cast(Source, service)
+        """Get a Source service."""
+        return cls.get(service_type, flags=flags, **config)
 
     @classmethod
-    def get_sink(
-        cls, service_type: str, flags: Any | None = None, **config: Any
-    ) -> Sink:
-        """
-        Specialized factory for Data Sinks.
-
-        Args:
-            service_type: Registered sink name.
-            flags: Optional flags.
-            **config: Connection settings.
-
-        Returns:
-            Sink: An object implementing the Sink interface.
-        """
-        return cls._get_typed_service(service_type, Sink, flags, **config)
+    def get_sink(cls, service_type: str, flags: Any | None = None, **config) -> Sink:
+        """Get a Sink service."""
+        return cls.get(service_type, flags=flags, **config)
 
     @classmethod
     def get_archive(
-        cls, service_type: str, flags: Any | None = None, **config: Any
+        cls, service_type: str, flags: Any | None = None, **config
     ) -> Archive:
-        """
-        Specialized factory for Archival services.
-
-        Args:
-            service_type: Registered archive name.
-            flags: Optional flags.
-            **config: Connection settings.
-
-        Returns:
-            Archive: An object implementing the Archive interface.
-        """
-        return cls._get_typed_service(service_type, Archive, flags, **config)
+        """Get an Archive service."""
+        return cls.get(service_type, flags=flags, **config)
 
     @classmethod
-    def get_cache(cls, workspace_dir: Path, cache_cfg: dict[str, Any]) -> KeyValueCache:
-        """
-        Creates a normalized KeyValueCache instance.
-
-        Supports Redis for distributed environments and tuned DiskCache for
-        local execution with reduced SQLite contention.
-
-        Args:
-            workspace_dir: Physical directory for local storage.
-            cache_cfg: Configuration containing 'type' (redis/diskcache).
-
-        Returns:
-            KeyValueCache: A concrete cache implementation.
-        """
+    def get_cache(cls, workspace: Path, config: dict) -> KeyValueCache:
+        """Get cache implementation."""
         from libs.cache import DiskCache, RedisCache
 
-        if cache_cfg["type"] == "redis":
-            # Return a Redis client or a wrapper that matches the diskcache API
+        if config.get("type") == "redis":
             return RedisCache(
-                host=cache_cfg.get("host", "localhost"),
-                port=cache_cfg.get("port", 6379),
-                db=cache_cfg.get("db", 0),
+                host=config.get("host", "localhost"),
+                port=config.get("port", 6379),
+                db=config.get("db", 0),
             )
 
-        # Default to lean mode (Diskcache)
-        cache_filepath = cache_cfg.get("filepath", ".cache")
-        # Tuning: Use 8 shards to reduce SQLite write contention.
-        # timeout=0.01 reduces the 'Database is locked' retry delay.
-        return DiskCache(
-            cache_path=(workspace_dir / cache_filepath).resolve(),
-            shards=8,
-            timeout=0.01,
-        )
+        cache_path = (workspace / config.get("filepath", ".cache")).resolve()
+        return DiskCache(cache_path=cache_path, shards=8, timeout=0.01)

@@ -2,287 +2,238 @@ import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import msgspec
 import polars as pl
 from apps.ingestion.src.core.models.task.manifest import ExtractPayload, FileInfo
 from apps.ingestion.src.core.strategies.extract import (
-    Reader,
-    ReaderContext,
-    ReaderFactory,
+    ExtractContext,
+    Extractor,
+    ExtractorFactory,
 )
 from apps.ingestion.src.services.factory import ServiceFactory
 from libs.clients.base import ClientCantConnect
-from libs.resilience.circuit_breaker import CircuitBreakerTripped
-from libs.utils.dates import get_current_timestamp
+from libs.resilience.circuit_breaker import CircuitOpen
+from libs.utils.dates import current_timestamp, seconds_diff
 from loguru import logger
 
 from .base import ExecutionStage
-from .enums import StageName
+from .enums import Stage
+from .utils import stage
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.task import Task
 
-
 LOG = logger
 
 
+@stage(Stage.EXTRACT.value)
 class ExtractStage(ExecutionStage):
-    """Stage responsible for acquiring raw data from external sources.
-
-    Decision: Contract-Aware Extraction.
-    We apply schema casting and column normalization during the extraction
-    phase inside Ray workers. This ensures that 'data at rest' in our vault
-    is already sanitized and follows the organization's data contract.
-    """
-
-    name = StageName.EXTRACT.label
-    manifest: ExtractPayload
+    """Extract raw data using a registered Extractor."""
 
     def pre_flight(self, task: "Task") -> None:
-        """Verify source connectivity and initialize the service handle.
-
-        Decision: Fail-Fast Connectivity.
-        By resolving the service in pre-flight, we ensure credentials are
-        valid before committing compute resources or Ray slots to the job.
-        """
         super().pre_flight(task)
-        task_ctx = task.context
-        self.service = ServiceFactory.get_source(
-            task_ctx.extract.source_type, **task_ctx.extract.source_config
+        LOG.debug(f"  Task context: job_id={task.job_id}, dataset_id={task.dataset_id}")
+        LOG.debug(
+            f"  Extract config: type={self.config.type}, "
+            f"resource={self.config.resource}"
         )
+        try:
+            self.service = ServiceFactory.get_source(
+                self.config.type, **self.config.service
+            )
+            LOG.info(f"PRE-FLIGHT: Service {self.config.type} initialized successfully")
+        except Exception:
+            LOG.exception("PRE-FLIGHT: Failed to initialize service")
+            raise
 
     def execute(self, task: "Task") -> str:
-        """Orchestrates the distributed extraction of data.
-
-        Args:
-            task: The Task instance to execute.
-
-        Returns:
-            str: The label of the next stage.
-
-        Decision: Resource-Aware Scaling.
-        We calculate the 'Width Factor' of the dataset (Columns vs Rows)
-        to determine the optimal number of Ray workers. This maintains
-        the 2GB RAM ceiling by reducing row-count per worker for wide tables.
-        """
-        task_ctx = task.context
-        start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
+        LOG.info(f"EXECUTE: ExtractStage starting for task {task.run_id}")
+        start_ts = current_timestamp(naive=True)
 
         try:
-            # 1. Prepare Reader Context
-            # This object is serialized and sent to Ray workers.
-            # We include the schema_items from the manifest so workers
-            # are 'Contract-Aware'
-
-            # Resolve partition_date in filter_sql
-            options = task_ctx.extract.source_params.copy()
-
-            # Unified lookup: Support both the new semantic name and the legacy SQL name
-            condition = options.get("filter_condition") or options.get("filter_sql")
-
-            if condition:
-                # Resolve dynamic template variables
-                condition = condition.replace(
-                    "{partition_date}", task_ctx.partition_date
+            options = self.config.params.copy()
+            if condition := options.get("filter_condition"):
+                original = condition
+                options["filter_condition"] = condition.replace(
+                    "{partition_date}", task.partition_date
                 )
-                options["filter_condition"] = condition
+                LOG.debug(f"  Filter condition: {original} -> {condition}")
 
-            # Decision: Delegated Scaling.
-            # We no longer calculate workers here. We pass the configuration
-            # directly to the ReaderContext. The Service Layer (Source) is now
-            # the authority on resource-aware scaling based on its metadata.
-            ctx = ReaderContext(
-                source_type=task_ctx.extract.source_type,
-                source_identifier=task_ctx.extract.source_identifier,
-                num_workers=task_ctx.extract.num_workers,
-                schema_items=task_ctx.extract.schema_items,
+            if "file" in self.config.type:
+                print("Adding workspace to options")
+                options["workspace"] = str(task.workspace.path)
+                options["cleanup"] = False
+
+            ctx = ExtractContext(
+                kind=self.config.type,
+                resource=self.config.resource,
+                num_workers=self.config.num_workers,
+                schema=self.config.schema,
                 run_id=task.run_id,
-                partition_date=task_ctx.partition_date,
+                partition_date=task.partition_date,
                 job_id=task.job_id,
-                workspace_dir=str(task.exec_ctx.workspace_dir),
-                options=options,
+                workspace=str(task.exec_ctx.workspace_dir),
+                params=options,
             )
-
-            # 2. Extract & Guard (The Ray Orchestration)
-            # Decision: DataReader.fetch uses the functional apply_schema_contract
-            # inside the Ray workers to prevent double-handling.
-            reader: Reader = ReaderFactory.get_reader(ctx.source_type)
             LOG.info(
-                "Executing ingestion strategy",
-                stage=self.name,
-                strategy=ctx.source_type,
-                source=ctx.source_identifier,
+                f"  Extract context: type={ctx.kind}, source={ctx.resource}, "
+                f"workers={ctx.num_workers}, params={ctx.params}"
             )
 
-            # 3. Get the deterministic physical folder from the workspace
-            data_store = task.workspace.clear_stage_data(self.name)
+            # Get extractor
+            extractor = ExtractorFactory.get(self.config.type)
+            LOG.info(f"  Extractor type: {type(extractor).__name__}")
 
-            # 4. Execute the Ingestion
-            # This calls reader.fetch() which:
-            #   a. Asks service for work units (SQL queries/File paths)
-            #   b. Distributes tasks to Ray workers
-            #   c. Workers call service.fetch_stream() [Protected by Circuit Breaker]
-            #   d. Workers call _apply_schema_contract
-            #   e. Streams results to Parquet files (keeping RAM < 2GB)
-            extracted_files = reader.fetch(
-                service=self.service,
-                target_folder=data_store,
-                context=ctx,
-            )
+            # Get data folder
+            data_store = task.workspace.reset_data_dir(self.name)
+            LOG.info(f"  Data store: {data_store}")
 
-            if not extracted_files:
-                LOG.warning(
-                    "Ingestion returned no data",
-                    stage=self.name,
-                    source=ctx.source_identifier,
-                    job_id=task.job_id,
-                    run_id=task.run_id,
-                )
-
+            # Extract and stream results
+            LOG.info("  Starting extraction...")
             file_infos = []
-            rows_aggregated = 0
-            all_schemas = []
+            total_rows = 0
+            schemas = []
 
-            for i, f in enumerate(extracted_files):
-                path = f["path"]
+            for i, file_data in enumerate(
+                extractor.extract(self.service, ctx, data_store)
+            ):
+                path = file_data["path"]
+                rows = file_data["rows"]
+                LOG.info(f"  📄 File {i}: {path.name} ({rows:_} rows)")
 
-                # A. Calculate Checksum (MD5 or SHA256)
-                checksum = self._calculate_checksum(f["path"])
+                checksum = self._calculate_checksum(path)
+                schema = pl.read_parquet_schema(path)
+                schemas.append(schema)
 
-                # Use Polars to get the schema of this specific file
-                # This is fast as it only reads the parquet metadata
-                file_schema = pl.read_parquet_schema(path)
-                all_schemas.append(file_schema)
-
-                # B. Build FileInfo
                 file_infos.append(
                     FileInfo(
-                        path=str(f["path"]),
+                        path=str(path),
                         checksum=checksum,
-                        row_count=f["rows"],
-                        size_bytes=f["path"].stat().st_size,
+                        row_count=rows,
+                        size_bytes=path.stat().st_size,
                     )
                 )
-                rows_aggregated += f["rows"]
+                total_rows += rows
 
-                # C. Checkpoint: Update manifest every 1 files (Optimization)
-                # This updates the 'last_modified' timestamp on disk,
-                # providing a physical heartbeat for the engine.
-                if i % 1 == 0:
+                # Progress update every 5 files
+                if i % 5 == 0:  # checkpoint every 5 files
+                    elapsed = seconds_diff(start_ts, current_timestamp(naive=True))
+                    rate = total_rows / elapsed if elapsed > 0 else 0
+                    LOG.info(
+                        f"  📊 Progress: {i} files, {total_rows:_} rows "
+                        f"({rate:,.0f} rows/sec)"
+                    )
                     task.update_manifest(
                         {
                             "extract": {
-                                "source_row_count": rows_aggregated,
+                                "source_count": total_rows,
                                 "file_count": len(file_infos),
                             }
                         }
                     )
+                LOG.info(
+                    f"  ✅ Extraction complete: {len(file_infos):_} files, "
+                    f"{total_rows:_} rows"
+                )
 
-            # c. CALCULATE FINAL SCHEMA (The "Union" of all files)
-            # This identifies all columns across all files, handling API drift.
-            final_schema_dict = self._merge_schemas(all_schemas)
+            final_schema = self._merge_schemas(schemas)
+            audit_identity = self.resolve_resource_identify(task, extractor)
+            LOG.info(f"  Audit identity: {audit_identity}")
 
-            # 5. Resolve Final Audit Identity
-            # The service layer is the authority on how to name the source audit.
-            source_files = getattr(reader, "source_files", [])
-            audit_identity = self.service.resolve_identity(
-                str(task_ctx.extract.source_identifier), source_files
-            )
-
-            # 6. Create Payload and Finalize
-            # We map the strategy output to our ExtractPayload schema
             payload = ExtractPayload(
-                artifact_folder=str(data_store),
-                source_identifier=audit_identity,
-                source_files=source_files,
                 file_count=len(file_infos),
                 files=file_infos,
-                source_row_count=rows_aggregated,
-                # Grab schema from the last file processed
-                schema_signature={k: str(v) for k, v in final_schema_dict.items()},
-                start_timestamp=start_ts,
+                artifact_folder=str(data_store),
+                source_files=getattr(extractor, "source_files", []),
+                resource=audit_identity,
+                source_count=total_rows,
+                schema={k: str(v) for k, v in final_schema.items()},
+                start_time=start_ts.isoformat(sep=" "),
             )
 
-            self.finalize(
-                task, data_folder=data_store, results=msgspec.to_builtins(payload)
-            )
+            self.checkpoint(task, data_folder=data_store, payload=payload)
             LOG.info(
-                "Reader completed",
-                stage=self.name,
-                file_count=len(file_infos),
-                total_rows=rows_aggregated,
+                f"EXTRACT COMPLETED: {len(file_infos):_} files, {total_rows:_} rows"
             )
+            return self._next_stage()
 
-            # 4. State Transition
-            return str(self._transit(task))
-        except (ClientCantConnect, CircuitBreakerTripped) as e:
-            LOG.warning(f"Ingestion halted: {e}", stage=self.name)
-            self.finalize(task, exception=e)
+        except (ClientCantConnect, CircuitOpen) as e:
+            LOG.warning(f"Extraction halted: {e}")
+            self.checkpoint(task, error=e)
             raise
         except Exception as e:
-            LOG.exception("Extract Step failed", stage=self.name)
-            self.finalize(task, exception=e)
+            LOG.exception("Extract failed")
+            self.checkpoint(task, error=e)
             raise
 
-    def _calculate_checksum(self, path: Path) -> str:
-        """
-        Calculate the MD5 checksum of a file.
-        Important to ensure data integrity and can be used for deduplication
-        """
-        LOG.debug("Calculating checksum", stage=self.name, file=str(path))
-        hash_md5 = hashlib.md5()
+    @staticmethod
+    def _calculate_checksum(path: Path) -> str:
+        hasher = hashlib.md5()
         with path.open("rb") as f:
-            for chunk in iter(lambda: f.read(4096), b""):
-                hash_md5.update(chunk)
-        return hash_md5.hexdigest()
+            for chunk in iter(lambda: f.read(8192), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
 
-    def _resolve_audit_identity(
-        self, context: ReaderContext, source_files: list[str]
-    ) -> str:
-        """
-        Determines the string identifier used for the '_source' audit column.
+    def _merge_schemas(
+        self, schemas: list[dict[str, pl.DataType]]
+    ) -> dict[str, pl.DataType]:
+        LOG.debug("  Merging schemas...")
+        if not schemas:
+            return {}
 
-        Rules:
-        1. If exactly one source file was found, use its filename.
-        2. If multiple files (batch) or a database table, use the name
-           of the source identifier (the folder name or table name).
-        """
-        if len(source_files) == 1:
-            return Path(source_files[0]).name
+        _priority = {
+            pl.Utf8: 100,
+            pl.Float64: 90,
+            pl.Float32: 80,
+            pl.Int64: 70,
+            pl.Int32: 60,
+            pl.Int16: 50,
+            pl.Int8: 40,
+            pl.UInt64: 35,
+            pl.UInt32: 30,
+            pl.UInt16: 25,
+            pl.UInt8: 20,
+        }
 
-        # For batches or DBs, we take the terminal portion of the identifier
-        # rstrip handles trailing slashes for folders
-        base_ident = context.source_identifier or ""
-        return Path(base_ident.rstrip("/")).name or base_ident
+        def priority(dtype: pl.DataType) -> int:
+            return (
+                -1
+                if isinstance(dtype, pl.Struct | pl.List | pl.Array)
+                else _priority.get(type(dtype), 0)
+            )
 
-    def _merge_schemas(self, schemas: list[dict[str, str]]) -> dict[str, str]:
-        """
-        Unions all schemas found in the source files to create a
-        master schema for the Transform stage.
-        """
-        LOG.debug(
-            "Merging schemas from extracted files",
-            stage=self.name,
-            file_count=len(schemas),
-        )
+        def promote(t1: pl.DataType, t2: pl.DataType) -> pl.DataType:
+            match (t1, t2):
+                case (a, b) if a is b:
+                    return a
+                case (pl.String, _) | (_, pl.String) | (pl.Utf8, _) | (_, pl.Utf8):
+                    return pl.String()
+                case (pl.Float64, _) | (_, pl.Float64):
+                    return pl.Float64()
+                case (pl.Float32, pl.Int64) | (pl.Int64, pl.Float32):
+                    return pl.Float64()
+                case _:
+                    return t1 if priority(t1) >= priority(t2) else t2
 
-        merged = {}
+        result = {}
         for schema in schemas:
             for col, dtype in schema.items():
-                dtype_str = str(dtype)
-                if col not in merged:
-                    merged[col] = dtype_str
-                    continue
+                result[col] = promote(result[col], dtype) if col in result else dtype
 
-                # When dtype of the same column differs across files
-                # we favor string or UTF-8 or float types to avoid data loss.
-                current = merged[col].lower()
-                new = dtype_str.lower()
+        LOG.debug(f"  Final schema: {len(result)} columns")
+        return result
 
-                if current != new:
-                    if "float" in new or "double" in new:
-                        merged[col] = dtype_str
-                    elif "string" in new or "utf8" in new:
-                        merged[col] = dtype_str  # String wins over everything
+    def resolve_resource_identify(self, task: "Task", extractor: "Extractor") -> str:
+        """
+        Delegate to service for source-specific identity.
 
-        return merged
+        The service knows best how to name the source.
+        """
+        source_files = getattr(extractor, "source_files", [])
+
+        # Pass additional context for better naming
+        return self.service.resolve_identity(
+            target=str(self.config.resource),
+            items=source_files,
+            source_type=self.config.type,
+            params=self.config.params,
+        )

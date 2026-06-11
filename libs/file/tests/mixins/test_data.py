@@ -4,21 +4,21 @@ from unittest.mock import MagicMock, patch
 import polars as pl
 import pytest
 from fsspec import AbstractFileSystem
-from libs.file.mixins.data import FlatFileMixin
+from libs.file.mixins.data import FileMixin
 
 
-class MockDataClient(FlatFileMixin):
+class MockDataClient(FileMixin):
     """Concrete class to test the Data Ingestion Mixin."""
 
     def __init__(self, fs):
         self.fs = fs
-        self.opts = {}
+        self.options = {}
         # Mock the abstract requirement of the client
         self.resolve_path = MagicMock(side_effect=lambda x: x)
 
 
-class TestFlatFileMixin:
-    """Unit tests for the FlatFileMixin."""
+class TestFileMixin:
+    """Unit tests for the FileMixin."""
 
     @pytest.fixture
     def mock_fs(self):

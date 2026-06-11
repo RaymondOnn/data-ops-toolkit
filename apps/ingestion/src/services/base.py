@@ -25,9 +25,7 @@ class Service(ABC):
         self.config = config
 
     @abstractmethod
-    def get_total_count(
-        self, target: str, filter_condition: str | None = None, **kwargs: Any
-    ) -> int:
+    def count_units(self, target: str, filter_condition: str | None = None) -> int:
         """
         Returns total row/item count for resource calculation or validation.
 
@@ -37,21 +35,6 @@ class Service(ABC):
 
         Returns:
             int: The total number of items or rows found.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def resolve_identity(
-        self, target: str, discovered_items: list[str] | None = None
-    ) -> str:
-        """Resolves a human-readable identifier for auditing purposes.
-
-        Args:
-            target: The primary resource identifier (Path, URL, or Table).
-            discovered_items: Optional list of physical files or artifacts found.
-
-        Returns:
-            str: A string representing the 'Source' of the data.
         """
         raise NotImplementedError()
 
@@ -85,12 +68,12 @@ class Service(ABC):
         """
         raise NotImplementedError("Service does not support fetch_df()")
 
-    def exists(self, identifier: str) -> bool:
+    def exists(self, target: str) -> bool:
         """
         Base signature for checking if an artifact/table exists.
 
         Args:
-            identifier: The unique name of the artifact to check.
+            target: The unique name of the artifact to check.
 
         Returns:
             bool: True if it exists, False otherwise.
@@ -103,6 +86,21 @@ class Service(ABC):
 
 class Source(Service, ABC):
     """Base class for all data sources (e.g., databases, file systems)."""
+
+    @abstractmethod
+    def resolve_identity(
+        self, target: str, items: list[str] | None = None, **kwargs
+    ) -> str:
+        """Resolves a human-readable identifier for auditing purposes.
+
+        Args:
+            target: The primary resource identifier (Path, URL, or Table).
+            items: Optional list of physical files or artifacts found.
+
+        Returns:
+            str: A string representing the 'Source' of the data.
+        """
+        raise NotImplementedError()
 
     @abstractmethod
     def parallelize(
@@ -126,7 +124,7 @@ class Source(Service, ABC):
         pass
 
     @abstractmethod
-    def fetch_data(self, unit: Any) -> "pl.DataFrame | pl.LazyFrame":
+    def pull(self, unit: Any) -> "pl.DataFrame | pl.LazyFrame":
         """
         Fetches data for a given work unit.
 
@@ -143,10 +141,10 @@ class Sink(Service, ABC):
     """Base class for all data sinks (e.g., data lakes, databases)."""
 
     @abstractmethod
-    def stage_data(
+    def stage(
         self,
         source_dir: Any,
-        target_table: str,
+        target: str,
         expected_count: int,
         file_ext: str = "parquet",
         audit_values: dict[str, Any] | None = None,
@@ -156,7 +154,7 @@ class Sink(Service, ABC):
 
         Args:
             source_dir: The directory containing data to stage.
-            target_table: The final destination table name.
+            target: The final destination table name.
             expected_count: The number of rows expected to be loaded.
             file_ext: The format of the source files.
             audit_values: Global constants to inject into the staging layer.
@@ -167,22 +165,22 @@ class Sink(Service, ABC):
         pass
 
     @abstractmethod
-    def promote_data(
+    def promote(
         self,
-        staging_table: str,
-        target_table: str,
-        partition_col: str,
-        partition_val: str,
+        staging: str,
+        target: str,
+        partition_by: str,
+        partition_value: str,
         expected_count: int,
     ) -> None:
         """
         Phase 2: Moves data from staging to production.
 
         Args:
-            staging_table: The identifier for the staged data.
-            target_table: The destination production table.
-            partition_col: The column to use for partitioning/replacement.
-            partition_val: The specific partition value topromote.
+            staging: The identifier for the staged data.
+            target: The destination production table.
+            partition_by: The column to use for partitioning/replacement.
+            partition_value: The specific partition value topromote.
             expected_count: Verification count for promotion.
         """
         pass
@@ -190,7 +188,7 @@ class Sink(Service, ABC):
     @abstractmethod
     def is_equal(
         self,
-        reference: Any,
+        ref: Any,
         other: Any,
         exclude_columns: set[str] | None = None,
     ) -> bool:
@@ -208,13 +206,42 @@ class Sink(Service, ABC):
         pass
 
     @abstractmethod
-    def clone(self, reference: str, other: str) -> None:
+    def clone(self, source: Any, dest: Any) -> None:
         """
         Clones a dataset structure or data to a new identifier.
 
         Args:
-            reference: The source to clone from.
-            other: The destination to create.
+            source: The source to clone from.
+            dest: The destination to create.
+        """
+        pass
+
+    # @abstractmethod
+    # def minus(
+    #     self,
+    #     reference: str,
+    #     other: str,
+    #     exclude_columns: set[str] | None = None,
+    # ) -> int:
+    #     """
+    #     Performs a MINUS or EXCEPT operation to check for differences.
+
+    #     Args:
+    #         left: The first dataset identifier.
+    #         right: The second dataset identifier.
+    #         exclude_columns: Columns to ignore during comparison.
+    #     Returns:
+    #         bool: True if there are differences, False if datasets are identical.
+    #     """
+    #     pass
+
+    @abstractmethod
+    def delete(self, target: str) -> None:
+        """
+        Drops or deletes a dataset or table.
+
+        Args:
+            target: The name of the table or object to drop.
         """
         pass
 
@@ -223,7 +250,7 @@ class Archive(Service, ABC):
     """Base class for archival and backup services."""
 
     @abstractmethod
-    def archive_data(self, source_dir: Any, archive_path: str) -> None:
+    def store(self, source_dir: Any, archive_path: str) -> None:
         """
         Moves or copies data to a persistent archival destination.
 

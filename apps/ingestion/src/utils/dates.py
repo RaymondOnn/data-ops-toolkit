@@ -2,7 +2,7 @@ from datetime import datetime
 from datetime import time as dt_time
 
 
-def get_end_of_day_ts() -> float:
+def end_of_day_timestamp() -> float:
     """Returns the Unix timestamp for 23:59:59 of the current day.
 
     This is typically used to set 'expires_at' values for snapshot jobs,
@@ -47,5 +47,4 @@ def iso_to_epoch(iso_str: str) -> float:
     Returns:
         float: The Unix timestamp (seconds since epoch).
     """
-    dt = datetime.fromisoformat(iso_str)
-    return dt.timestamp()
+    return datetime.fromisoformat(iso_str).timestamp()

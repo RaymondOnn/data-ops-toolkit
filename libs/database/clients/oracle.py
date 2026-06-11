@@ -46,18 +46,20 @@ class OracleClient(DBClient):
         self,
         table_name: str,
         num_workers: int = 10,
-        filter_sql: str | None = None,
+        filter_condition: str | None = None,
     ) -> set[str]:
         """
         Uses ORA_HASH to create N virtual partitions without needing a PK.
         """
-        filter_sql = filter_sql.replace("WHERE", "") if filter_sql else ""
+        filter_condition = (
+            filter_condition.replace("WHERE", "") if filter_condition else ""
+        )
         queries = []
         for i in range(num_workers):
             # ORA_HASH(rowid, N) creates N buckets based on physical location
             sql = f"""
                 SELECT * FROM {table_name}
-                WHERE {filter_sql}
+                WHERE {filter_condition}
                 AND ORA_HASH(rowid, {num_workers - 1}) = {i}
             """
             queries.append(sql)

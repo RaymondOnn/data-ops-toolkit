@@ -36,21 +36,21 @@ def test_disk_full_halts_task_execution(runtime, tmp_path):
 
             task_path = runtime.orchestrator.state_store.resolve_task_path(run_id)
             if task_path:
-                task = Task.from_folder(task_path, runtime.exec_ctx)
+                task = Task.from_path(task_path, runtime.exec_ctx)
                 if task.manifest.status == ExecutionStatus.FAILED:
                     break
 
     # 4. Assertions
     assert task_path is not None
-    task = Task.from_folder(task_path, runtime.exec_ctx)
+    task = Task.from_path(task_path, runtime.exec_ctx)
     assert task.manifest.status == ExecutionStatus.FAILED
     assert task.manifest.error is not None
     assert "Disk usage is at" in task.manifest.error.message
     assert "Halt" in task.manifest.error.message
 
     # Verify the task was moved to the FAILED directory
-    assert "FAILED" in str(task.folder)
-    assert not (runtime.exec_ctx.active_path / task.folder.name).exists()
+    assert "FAILED" in str(task.workspace.path)
+    assert not (runtime.exec_ctx.active_path / task.workspace.path.name).exists()
 
     # Cleanup: Ensure the mock doesn't affect other tests
     # (though autouse fixtures should handle this)

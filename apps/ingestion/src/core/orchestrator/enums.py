@@ -1,3 +1,5 @@
+"""Core enums and data structures for task orchestration state management."""
+
 import time
 from datetime import datetime
 from typing import Any, Self
@@ -7,38 +9,46 @@ from apps.ingestion.src.core.models.task.enums import TaskRef
 from apps.ingestion.src.core.models.task.status import ExecutionStatus
 from apps.ingestion.src.utils.constants import (
     CACHE_TASK_NAMESPACE,
-    MISFIRE_GRACE_PERIOD_SECS,
     STRIP_TZ_FOR_DB,
 )
-from libs.utils.dates import diff_seconds, standardize_timestamp
+from libs.utils.dates import parse_timestamp
+from loguru import logger
+
+LOG = logger
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
 
 
 def to_ch_datetime(ts: Any) -> str | None:
     """
-    Forces input into 'YYYY-MM-DD HH:MM:SS.SSS' format.
-    Explicitly removes 'T' and timezone offsets (+08:00, Z)
-    to satisfy ClickHouse DateTime64(3) requirements.
+    Convert timestamp to ClickHouse DateTime64(3) format.
+
+    Returns 'YYYY-MM-DD HH:MM:SS.SSS' without timezone.
     """
-    if ts is None or ts == "":
+    if not ts:
         return None
 
     try:
-        # Leverage standardize_timestamp to handle parsing and naive conversion
-        dt = standardize_timestamp(ts, force_naive=STRIP_TZ_FOR_DB)
+        dt = parse_timestamp(ts, naive=STRIP_TZ_FOR_DB)
         return dt.format("YYYY-MM-DD HH:mm:ss.SSS")
-    except Exception as e:
-        print(f"FAILED_TO_PARSE_TS: {ts} | Error: {e}")
-        # Last ditch effort: regex-style strip
+    except Exception:
+        # Fallback: brute-force strip
         return str(ts).replace("T", " ").split("+")[0].split("Z")[0]
 
 
-class TaskMetadata(msgspec.Struct):
-    """Typed metadata for a job in the task queue.
+# =============================================================================
+# TaskMetadata - Hot Cache Entry
+# =============================================================================
 
-    Decision: Persistence of Intent.
-    By including rewind_history here, we ensure that the 'One-Time Rewind'
-    constraint is enforced even if the orchestrator reboots, as the hot cache
-    on disk preserves this state.
+
+class TaskMetadata(msgspec.Struct):
+    """
+    Runtime metadata for a task in the hot cache.
+
+    Persisted on disk to survive orchestrator restarts.
     """
 
     job_id: str
@@ -58,7 +68,7 @@ class TaskMetadata(msgspec.Struct):
     def from_ref(
         cls, ref: "TaskRef", config_file: str, expires_at: float | None = None
     ) -> "TaskMetadata":
-        """Standardized factory to create metadata from a reference."""
+        """Create metadata from a TaskRef."""
         return cls(
             job_id=ref.identity.job_id,
             run_id=ref.identity.run_id,
@@ -72,7 +82,7 @@ class TaskMetadata(msgspec.Struct):
         )
 
     def to_ref(self) -> TaskRef:
-        """Converts metadata back into a TaskRef identity handle."""
+        """Convert back to TaskRef."""
         from apps.ingestion.src.core.models.task.enums import TaskIdentity
 
         return TaskRef(
@@ -88,109 +98,103 @@ class TaskMetadata(msgspec.Struct):
         )
 
 
-class JobRecord(msgspec.Struct, kw_only=True):
-    """Typed record representing a job definition from the database."""
+# =============================================================================
+# TaskRecord - Database Source Record
+# =============================================================================
+
+
+class TaskRecord(msgspec.Struct, kw_only=True):
+    """Job record from the database source table."""
 
     JOB_ID: str
+    RUN_ID: str
     DATASET_ID: str
     SCHEDULED_TIMESTAMP_LC: datetime
     JOB_STATUS: str
+
     PARTITION_DATE: str | None = None
+    START_TIMESTAMP_LC: datetime | None = None
+    END_TIMESTAMP_LC: datetime | None = None
+    LAST_UPDATED_AT_TS_LC: datetime | None = None
     CURRENT_STAGE: str | None = None
     JOB_BITMASK: str | None = None
     IS_SCHEDULED: int = 0
-    RETRY_ATTEMPTS: int = 0
-    RUN_ID: str
-    LAST_UPDATED_AT_TS_LC: datetime | None = None
-    START_TIMESTAMP_LC: datetime | None = None
-    END_TIMESTAMP_LC: datetime | None = None
-    WATCH_FILE_PATH: str | None = None
+    ERRORS: dict[str, str] | None = None
     RUNTIME_OVERRIDES: dict[str, Any] | None = None
-    TRIGGER_TYPE: str = "CRON"
-    MISFIRE_GRACE_SECS: int = MISFIRE_GRACE_PERIOD_SECS
-    SOURCE_ROW_COUNT: int | None = None
-    FINAL_ROW_COUNT: int | None = None
-    FINAL_MANIFEST: str | None = None
-    IS_SNAPSHOT: bool = False
+    RETRY_ATTEMPTS: int = 0
     EXPIRATION_THRESHOLD: datetime | None = None
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Self:
-        """Factory method to create a JobRecord from a dictionary."""
-        return msgspec.convert(data, cls)
+    IS_SNAPSHOT: bool = False
 
     def __post_init__(self) -> None:
-        """Normalize state fields and validate identity."""
+        """Normalize state fields."""
         if not self.JOB_ID or not self.DATASET_ID:
-            raise ValueError(f"Invalid JobRecord: Missing ID for {self}")
+            raise ValueError(f"Invalid TaskRecord: missing IDs for {self}")
 
-        for field in ["CURRENT_STAGE", "JOB_STATUS"]:
+        for field in ("CURRENT_STAGE", "JOB_STATUS"):
             val = getattr(self, field, None)
             if isinstance(val, str):
                 super().__setattr__(field, val.upper())
 
-    @property
-    def has_been_triggered(self) -> bool:
-        """
-        Indicates if the Orchestrator has started the provisioning process.
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        """Create from dictionary."""
+        return msgspec.convert(data, cls)
 
-        A 'PENDING' status implies the record is an untriggered intent.
-        Any status like PROVISIONED, QUEUED, or RUNNING implies that
-        physical artifacts (folders/configs) have been created.
-        """
-        return self.JOB_STATUS not in [
+    @property
+    def is_triggered(self) -> bool:
+        """Whether this job has been triggered (has workspace artifacts)."""
+        return self.JOB_STATUS not in (
             ExecutionStatus.PENDING.value,
             ExecutionStatus.UNKNOWN.value,
-        ]
+        )
 
-    def is_misfired(self, now: datetime) -> bool:
-        """
-        Checks if the job has missed its allowed execution window (grace period).
-
-        Misfire Policy is handled here based on GRACE_PERIOD_SECS:
-        -1: Fire Immediately (Always True)
-        0 : Skip (Always False if delay > 0)
-        >0: Grace Period (True if within bounds)
-        """
-        if self.MISFIRE_GRACE_SECS == -1:
-            return False
-
-        # Safely calculate delay regardless of input types or timezone awareness
-        # For ClickHouse-centric apps, we keep it naive.
-        # For Aware apps, we would pass timezone=self.exec_ctx.timezone
-        delay = diff_seconds(now, self.SCHEDULED_TIMESTAMP_LC, timezone=None)
-
-        return delay > self.MISFIRE_GRACE_SECS
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict with datetime objects converted to strings."""
+        result = {}
+        for field in self.__struct_fields__:
+            value = getattr(self, field)
+            if isinstance(value, datetime):
+                result[field] = value.isoformat()
+            else:
+                result[field] = value
+        return result
 
 
-class JobUpdate(msgspec.Struct, kw_only=True):
-    """
-    Typed subset of columns used for partial state transitions and heartbeats.
-    """
+# =============================================================================
+# TaskUpdate - State Transition Record
+# =============================================================================
+
+
+class TaskUpdate(msgspec.Struct, kw_only=True):
+    """State update to be written to the execution log."""
 
     JOB_ID: str
     DATASET_ID: str
     PARTITION_DATE: str
     JOB_STATUS: str
     LAST_UPDATED_AT_TS_LC: str
-    RETRY_ATTEMPTS: int = 0
-    CURRENT_STAGE: str | None = None
-    JOB_BITMASK: str | None = None
-    SOURCE_ROW_COUNT: int | None = None
-    FINAL_ROW_COUNT: int | None = None
-    REMARKS: str | None = None
-    FINAL_MANIFEST: str | None = None
+
+    SCHEDULED_TIMESTAMP_LC: str | None = None
     START_TIMESTAMP_LC: str | None = None
     END_TIMESTAMP_LC: str | None = None
+    CURRENT_STAGE: str | None = None
+    JOB_BITMASK: str | None = None
+    IS_SCHEDULED: int = 1
+    ERRORS: dict[str, str] | None = None
     RUNTIME_OVERRIDES: dict[str, Any] | None = None
+    RETRY_ATTEMPTS: int = 0
+    SOURCE_ROW_COUNT: int | None = None
+    FINAL_ROW_COUNT: int | None = None
+    FINAL_MANIFEST: str | None = None
+    REMARKS: str | None = None
 
     def __post_init__(self) -> None:
-        """Declarative data normalization for database compatibility."""
-        # 1. Normalize Stage Naming
+        """Normalize timestamps and stage names."""
+        # Normalize stage
         if self.CURRENT_STAGE:
             super().__setattr__("CURRENT_STAGE", self.CURRENT_STAGE.upper())
 
-        # 2. Bulk Timestamp Sanitization
+        # Normalize timestamp fields
         for field in self.__struct_fields__:
             if "TIMESTAMP" in field or field.endswith("_LC"):
                 val = getattr(self, field)

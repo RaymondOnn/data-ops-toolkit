@@ -1,229 +1,116 @@
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+"""Trigger management for job scheduling and execution."""
+
+from typing import TYPE_CHECKING, Literal
 
 import msgspec
-from apps.ingestion.src.core.contexts.task import TaskContext, load_task_context
+from apps.ingestion.src.core.contexts.task import TaskContext, load_context
 from apps.ingestion.src.core.models.states import ExpiredState
 from apps.ingestion.src.core.models.task import ExecutionStatus
 from apps.ingestion.src.core.models.task.enums import TaskIdentity
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, STRIP_TZ_FOR_DB
-from libs.utils.dates import get_current_timestamp, standardize_timestamp
+from libs.utils.dates import current_timestamp, parse_timestamp
 from loguru import logger
 
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.contexts import ExecutionContext
-    from apps.ingestion.src.core.orchestrator.enums import JobRecord
+    from apps.ingestion.src.core.orchestrator.enums import TaskRecord
 
 LOG = logger
 
 
-def resolve_task_context(
-    exec_ctx: "ExecutionContext", run: "JobRecord"
-) -> TaskContext | None:
-    """
-    Attempts to locate and load a TaskContext from either the dispatched
-    workspace or the pending config in the active root.
-    """
-    identity = TaskIdentity(
-        job_id=run.JOB_ID,
-        dataset_id=run.DATASET_ID,
-        partition_date=str(run.PARTITION_DATE),
-        run_id=run.RUN_ID,
-    )
-    job_path = exec_ctx.get_run_path(identity)
-    pending_config = (
-        exec_ctx.active_path / f"{identity.identifier}:{run.RUN_ID}_{CONFIG_FILENAME}"
-    )
-
-    try:
-        if job_path.exists():
-            return load_task_context(job_path)
-        if pending_config.exists():
-            with pending_config.open("rb") as f:
-                return msgspec.json.decode(f.read(), type=TaskContext)
-    except Exception:
-        pass
-    return None
-
-
 class TriggerDecision(msgspec.Struct):
-    """The outcome of a policy evaluation."""
+    """Result of trigger evaluation."""
 
     action: Literal["trigger", "purge", "wait"]
-    rule_name: str
-    record: "JobRecord"
+    reason: str
+    record: "TaskRecord"
     context: TaskContext | None = None
 
 
-class TriggerRule(Protocol):
-    """The Specification interface for triggering or purging jobs."""
-
-    def apply(self, record: "JobRecord", **kwargs: Any) -> bool: ...
-
-
-class SystemShutdownRule(TriggerRule):
-    def apply(self, record: "JobRecord", **kwargs: Any) -> bool:
-        exec_ctx: ExecutionContext = kwargs.get("exec_ctx")  # type: ignore
-        return exec_ctx.stop_at_ts is not None
-
-
-class MisfireRule(TriggerRule):
-    def apply(self, record: "JobRecord", **kwargs: Any) -> bool:
-        now = kwargs.get("now", get_current_timestamp(strip_tz=STRIP_TZ_FOR_DB))
-        return record.is_misfired(now)
-
-
-class ExpiryRule(TriggerRule):
-    def apply(self, record: "JobRecord", **kwargs: Any) -> bool:
-        # Delegate expiry check directly to the ExpiredState class
-
-        return ExpiredState.is_applicable(task=None, record=record, **kwargs)
-
-
-class CronScheduleRule(TriggerRule):
-    def apply(self, record: "JobRecord", **kwargs: Any) -> bool:
-        now = kwargs.get("now", get_current_timestamp(strip_tz=STRIP_TZ_FOR_DB))
-        sched = standardize_timestamp(
-            record.SCHEDULED_TIMESTAMP_LC, force_naive=STRIP_TZ_FOR_DB
-        )
-        return now >= sched
-
-
-class FileArrivalRule(TriggerRule):
-    def apply(self, record: "JobRecord", **kwargs: Any) -> bool:
-        if not record.WATCH_FILE_PATH:
-            return False
-
-        # Sanitize: Prevent absolute paths or traversal
-        watch_path = record.WATCH_FILE_PATH.lstrip("/")
-        if ".." in watch_path:
-            LOG.warning(
-                f"Security: Blocked traversal attempt in WATCH_FILE_PATH: {watch_path}"
-            )
-            return False
-
-        # Restrict globbing to the workspace data directory
-        parent = Path(watch_path).parent
-        return any(parent.glob(watch_path))
-
-
-class CompositeRule(TriggerRule):
-    """Composite specification for logical OR."""
-
-    def __init__(self, *rules: TriggerRule):
-        self.rules = rules
-
-    def apply(self, record: "JobRecord", **kwargs: Any) -> bool:
-        return any(rule.apply(record, **kwargs) for rule in self.rules)
-
-
 class TriggerManager:
-    """
-    Handles the evaluation of job schedules and the provisioning of new runs.
-    """
+    """Evaluates job records to determine trigger or purge actions."""
 
-    def __init__(
-        self,
-        exec_ctx: "ExecutionContext",
-    ):
+    def __init__(self, exec_ctx):
         self.exec_ctx = exec_ctx
-        # Cache to mitigate IO Complexity
-        self._context_cache: dict[str, TaskContext | None] = {}
 
-        self.shutdown_rule = SystemShutdownRule()
-
-        # Composite Policies
-        self.purge_policy = CompositeRule(MisfireRule(), ExpiryRule())
-        self.trigger_rules = {
-            "CRON": CronScheduleRule(),
-            "FILE": FileArrivalRule(),
-            "MANUAL": CronScheduleRule(),
-        }
-
-    def evaluate(self, job_records: list["JobRecord"]) -> list[TriggerDecision]:
-        """Applies trigger policies to determine the fate of each record."""
-        if self.shutdown_rule.apply(None, exec_ctx=self.exec_ctx):  # type: ignore
-            LOG.debug("Trigger evaluation halted: system is shutting down.")
+    def evaluate(self, job_records: list["TaskRecord"]) -> list[TriggerDecision]:
+        """Iterates through all pending records and calculates actions."""
+        # Check shutdown first
+        if self.exec_ctx.stop_at_ts is not None:
+            LOG.debug("Shutdown active - skipping trigger evaluation")
             return []
 
-        now = get_current_timestamp(
-            timezone=self.exec_ctx.timezone, strip_tz=STRIP_TZ_FOR_DB
-        )
-        decisions: list[TriggerDecision] = []
+        now = current_timestamp(timezone=self.exec_ctx.timezone, naive=STRIP_TZ_FOR_DB)
 
-        # Cache Housekeeping
-        current_run_ids = {r.RUN_ID for r in job_records if r.RUN_ID}
-        self._context_cache = {
-            k: v for k, v in self._context_cache.items() if k in current_run_ids
-        }
-
+        decisions = []
         for record in job_records:
-            # Only evaluate triggers for jobs that are currently PENDING
             if ExecutionStatus.PENDING.value != record.JOB_STATUS:
                 continue
 
-            # --- 1. Decision: Resolve Context ---
-            if record.RUN_ID not in self._context_cache:
-                ctx = resolve_task_context(self.exec_ctx, record)
-
-                # SELF-HEALING: Detect "Ghost Tasks"
-                # If a Run ID exists in the DB but the config is missing on disk,
-                # the workspace is corrupt.
-                if ctx is None and record.RUN_ID:
-                    identity = TaskIdentity(
-                        job_id=record.JOB_ID,
-                        dataset_id=record.DATASET_ID,
-                        partition_date=str(record.PARTITION_DATE or ""),
-                        run_id=record.RUN_ID,
-                    )
-                    job_path = self.exec_ctx.get_run_path(identity)
-                    if job_path.exists():
-                        LOG.warning(
-                            f"Self-healing: Ghost task detected for {record.RUN_ID}. "
-                            "Purging corrupt workspace."
-                        )
-                        decisions.append(
-                            TriggerDecision(
-                                action="purge",
-                                rule_name="GHOST_RECOVERY",
-                                record=record,
-                            )
-                        )
-                        continue
-                self._context_cache[record.RUN_ID] = ctx
-
-            task_ctx = self._context_cache[record.RUN_ID]
-
-            # --- 2. Decision: Purge? (Composite Policy) ---
-            if self.purge_policy.apply(
-                record, now=now, task_ctx=task_ctx, exec_ctx=self.exec_ctx
-            ):
+            # Check purge conditions (expiry policy)
+            if self._should_purge(record):
+                context = self._try_load_context(record)
                 decisions.append(
                     TriggerDecision(
                         action="purge",
-                        rule_name="PURGE_POLICY",
+                        reason="PURGE_POLICY",
                         record=record,
-                        context=task_ctx,
+                        context=context,
                     )
                 )
                 continue
 
-            # --- 3. Decision: Trigger? ---
-            trigger_type = "FILE" if record.WATCH_FILE_PATH else record.TRIGGER_TYPE
-            rule = self.trigger_rules.get(trigger_type, self.trigger_rules["CRON"])
-
-            if rule.apply(record, now=now, task_ctx=task_ctx, exec_ctx=self.exec_ctx):
+            # Check trigger conditions
+            if self._should_trigger(record, now):
+                context = self._try_load_context(record)
                 decisions.append(
                     TriggerDecision(
                         action="trigger",
-                        rule_name=f"READY:{trigger_type}",
+                        reason="READY:DISPATCH",
                         record=record,
-                        context=task_ctx,
+                        context=context,
                     )
                 )
 
         return decisions
 
+    def _should_purge(self, record: "TaskRecord") -> bool:
+        """Check if job should be purged based on temporal expiry policies."""
+        return ExpiredState.matches(task=None, record=record, exec_ctx=self.exec_ctx)
 
-# TODO: How can I implement a 'dry_run' mode in Orchestrator that logs the TriggerManager's decisions without calling trigger_job or janitor.process_expired_run?
-# TODO: How can I implement a 'dry_run' toggle in the Orchestrator to log these Specification decisions without executing them?
+    def _should_trigger(self, record: "TaskRecord", now) -> bool:
+        """Check if job should be triggered based on its type."""
+        # 1. Check scheduled time
+        scheduled = parse_timestamp(
+            record.SCHEDULED_TIMESTAMP_LC, naive=STRIP_TZ_FOR_DB
+        )
+        return now >= scheduled
+
+    def _try_load_context(self, record: "TaskRecord") -> TaskContext | None:
+        """Load task context from disk.
+
+        if config file, task already triggered before.
+        """
+        identity = TaskIdentity(
+            job_id=record.JOB_ID,
+            dataset_id=record.DATASET_ID,
+            partition_date=str(record.PARTITION_DATE),
+            run_id=record.RUN_ID,
+        )
+
+        run_path = self.exec_ctx.get_run_path(identity)
+        pending_path = (
+            self.exec_ctx.active_path
+            / f"{identity.task_key}:{record.RUN_ID}_{CONFIG_FILENAME}"
+        )
+        if run_path.exists():
+            return load_context(run_path)
+
+        if pending_path.exists():
+            with pending_path.open("rb") as f:
+                return msgspec.json.decode(f.read(), type=TaskContext)
+
+        # Log ghost tasks without caching complexity
+        if record.RUN_ID and self.exec_ctx.get_run_path(identity).exists():
+            LOG.warning(f"Ghost task detected: {record.RUN_ID}")
+
+        return None

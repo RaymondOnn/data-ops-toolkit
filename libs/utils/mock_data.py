@@ -30,16 +30,17 @@ def generate_simulation_artifacts(
         "default": {
             "job": {
                 "extract": {"service_ref": "file", "num_workers": 4},
-                "load": {"service_ref": "clickhouse", "partition_col": "event_date"},
+                "load": {"service_ref": "clickhouse", "partition_by": "event_date"},
             },
             "datasets": {
                 dataset: {
                     "extract": {
-                        # Path is relative to the flat_file service root (usually project root)
-                        "source_identifier": f"{target_root.name}/{job_id}/{dataset}",
+                        # Path is relative to the flat_file service root
+                        # (usually project root)
+                        "resource": f"{target_root.name}/{job_id}/{dataset}",
                         "schema_file": "schema.csv",
                     },
-                    "load": {"sink_identifier": f"TEST.{dataset.upper()}"},
+                    "load": {"destination": f"TEST.{dataset.upper()}"},
                 }
             },
         }

@@ -1,16 +1,15 @@
+"""PostgreSQL service implementation."""
+
 import time
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import polars as pl
 from apps.ingestion.src.services.database.base import DatabaseSink, DatabaseSource
 from apps.ingestion.src.services.factory import ServiceFactory
 from libs.database.clients.postgres import PostgresClient
 from loguru import logger
-
-if TYPE_CHECKING:
-    from libs.auth.models import Secret
 
 LOG = logger
 
@@ -19,182 +18,117 @@ LOG = logger
 class PostgresService(DatabaseSource, DatabaseSink):
     @cached_property
     def client(self) -> PostgresClient:
-        secret: Secret = self._config["password"]
+        secret = self._config["password"]
         return PostgresClient(
             host=self._config["host"],
             database=self._config["database"],
             user=self._config["user"],
-            password=secret.resolve(sanitize=True),
+            password=secret.resolve(url_encode=True),
             port=self._config.get("port", 5432),
         )
 
-    def stage_data(
+    def stage(
         self,
         source_dir: Path,
-        target_table: str,
+        target: str,
         expected_count: int,
         file_ext: str = "parquet",
         audit_values: dict[str, Any] | None = None,
     ) -> tuple[str, int]:
-        staging_table = f"stg_{target_table}_{int(time.time())}"
-        self.client.sql(f"CREATE UNLOGGED TABLE {staging_table} (LIKE {target_table})")
+        staging = f"stg_{target}_{int(time.time())}"
+        self.client.sql(f"CREATE UNLOGGED TABLE {staging} (LIKE {target})")
 
         conn = self.client.connect()
         try:
-            with conn.cursor() as cursor:
-                copy_sql = (
-                    f"COPY {staging_table} FROM STDIN WITH (FORMAT CSV, HEADER FALSE)"
-                )
-
-                with cursor.copy(copy_sql) as copy:
-                    # STREAMING BULK LOAD: Use sink_csv to a pipe or process
-                    # batches to keep RAM usage under 2GB.
-                    # For Postgres, we iterate the folder and COPY each file.
-                    rows_staged = 0
-                    for file_path in source_dir.glob(f"*.{file_ext}"):
-                        df = pl.read_parquet(file_path)
+            with conn.cursor() as cur:
+                copy_sql = f"COPY {staging} FROM STDIN WITH (FORMAT CSV, HEADER FALSE)"
+                with cur.copy(copy_sql) as copy:
+                    rows = 0
+                    for f in source_dir.glob(f"*.{file_ext}"):
+                        df = pl.read_parquet(f)
                         copy.write(df.write_csv(include_header=False))
-                        rows_staged += len(df)
-
-            # Commit only if the entire 50M row stream succeeded
+                        rows += len(df)
             conn.commit()
-            LOG.info(
-                "Staged data to Postgres",
-                table=staging_table,
-                rows=rows_staged,
-            )
-            return staging_table, rows_staged
-        except Exception as e:
+            LOG.info(f"Staged {rows:_} rows to {staging}")
+            return staging, rows
+        except Exception:
             conn.rollback()
             self.client.reconnect()
-            raise e
+            raise
 
-    def promote_data(
+    def promote(
         self,
-        staging_table: str,
-        target_table: str,
-        partition_col: str,
-        partition_val: str,
+        staging: str,
+        target: str,
+        partition_by: str,
+        partition_value: str,
         expected_count: int,
     ) -> None:
-        # Transactional Swap
         sql = f"""
         BEGIN;
-        DELETE FROM {target_table}
-            WHERE {partition_col} = '{partition_val}';
-        INSERT INTO {target_table}
-            SELECT * FROM {staging_table};
+        DELETE FROM {target} WHERE {partition_by} = '{partition_value}';
+        INSERT INTO {target} SELECT * FROM {staging};
         COMMIT;
-        DROP TABLE {staging_table};
+        DROP TABLE {staging};
         """
         self.client.sql(sql)
-        LOG.info(
-            "Promoted partition",
-            table=target_table,
-            partition=partition_val,
-        )
+        LOG.info(f"Promoted to {target} partition {partition_value}")
+
+    def clone(self, source: str, dest: str) -> None:
+        self.client.sql(f"CREATE TABLE {dest} AS SELECT * FROM {source} WHERE 1=0")
+        LOG.info(f"Cloned {source} -> {dest}")
 
     def is_equal(
         self,
-        reference: str,
+        ref: str,
         other: str,
         exclude_columns: set[str] | None = None,
     ) -> bool:
-        exclude_columns = exclude_columns or set()
-        ref_table, other_table = str(reference), str(other)
-
-        # 1. Performance Optimization: Check row counts first
-        count_query = "SELECT count(*) FROM {}"
-        count_ref = self.client.sql(count_query.format(ref_table))[0][0]
-        count_other = self.client.sql(count_query.format(other_table))[0][0]
-
+        exclude = exclude_columns or set()
+        count_ref = self.client.sql(f"SELECT COUNT(*) FROM {ref}")[0][0]
+        count_other = self.client.sql(f"SELECT COUNT(*) FROM {other}")[0][0]
         if count_ref != count_other:
-            LOG.warning(
-                "Table comparison failed: Row count mismatch",
-                ref=ref_table,
-                other=other_table,
-            )
             return False
 
-        # 2. Fast-Path: Checksum Comparison
-        hash_ref = self.get_checksum(ref_table)
-        hash_other = self.get_checksum(other_table)
-
-        if hash_ref == hash_other:
-            LOG.info("Fast-path: Table checksums match.", table=ref_table)
+        if self.get_checksum(ref) == self.get_checksum(other):
             return True
 
-        # 3. Deep-Dive: Schema alignment for EXCEPT
-        # Discover shared columns to handle schema evolution
-        col_sql = (
-            "SELECT column_name FROM information_schema.columns WHERE table_name = '{}'"
-        )
-        cols_ref = {
-            row[0]
-            for row in self.client.sql(
-                col_sql.format(ref_table.rsplit(".", maxsplit=1)[-1])
-            )
-        }
-        cols_other = {
-            row[0]
-            for row in self.client.sql(
-                col_sql.format(other_table.rsplit(".", maxsplit=1)[-1])
-            )
-        }
+        def get_cols(table: str) -> set[str]:
+            return {
+                row[0]
+                for row in self.client.sql(f"""
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_name = '{table.rsplit('.', maxsplit=1)[-1]}'
+                """)
+            }
 
-        compare_cols = (cols_ref & cols_other) - exclude_columns
-        if not compare_cols:
-            LOG.error(
-                "No common columns found for comparison",
-                ref=ref_table,
-                other=other_table,
-            )
+        common = (get_cols(ref) & get_cols(other)) - exclude
+        if not common:
             return False
 
-        if cols_ref != cols_other:
-            LOG.warning(
-                "Comparing tables with mismatched schemas. Using common columns only."
-            )
+        cols = ", ".join(sorted(common))
+        result = self.client.sql(
+            f"SELECT {cols} FROM {ref} EXCEPT SELECT {cols} FROM {other}"
+        )
+        return len(result) == 0
 
-        # Explicitly sort columns to ensure positional equality in EXCEPT
-        col_selection = ", ".join(sorted(compare_cols))
-
-        sql = f"""
-            SELECT {col_selection} FROM {ref_table}
-            EXCEPT
-            SELECT {col_selection} FROM {other_table}
-        """
-        results = self.client.sql(sql)
-        return len(results) == 0
-
-    def clone(self, reference: str, other: str) -> None:
-        # Ensure it is a persistent table, not temporary, for regression testing
-        sql = f"""
-            CREATE TABLE {other} AS
-            SELECT * FROM {reference}
-            WHERE 1 = 0
-        """
-        LOG.info("Cloning table structure", source=reference, destination=other)
-        self.client.sql(sql)
-
-    def get_checksum(self, identifier: str, columns: list[str] | None = None) -> str:
-        """
-        Generates a 64-bit table fingerprint for Postgres.
-        Uses MD5 hash of concatenated rows summed for order independence.
-        """
+    def get_checksum(self, name: str, columns: list[str] | None = None) -> str:
         col_expr = (
             f"CONCAT_WS('|', {', '.join(columns)})" if columns else "CAST(t.* AS TEXT)"
         )
-        # We convert the first 16 chars of MD5 (64 bits) to a bigint and sum them.
-        query = f"SELECT SUM(('0x' || SUBSTR(MD5({col_expr}), 1, 16))::bit(64)::bigint) FROM {identifier} AS t"
         try:
-            res = self.client.sql(query)
-            return str(res[0][0]) if res else "0"
-        except Exception as e:
-            LOG.error(f"Checksum calculation failed for {identifier}: {e}")
+            result = self.client.sql(f"""
+                SELECT SUM(
+                    ('x' || SUBSTR(MD5({col_expr}), 1, 16))::bit(64)::bigint
+                )
+                FROM {name} AS t
+            """)
+            return str(result[0][0]) if result else "0"
+        except Exception:
+            LOG.exception(f"Checksum failed for {name}")
             return "ERROR"
 
-    def drop(self, identifier: str) -> None:
-        sql = f"DROP TABLE IF EXISTS {identifier}"
-        LOG.warning("Dropping table", table=identifier)
-        self.client.sql(sql)
+    def delete(self, target: str) -> None:
+        self.client.sql(f"DROP TABLE IF EXISTS {target}")
+        LOG.warning(f"Dropped table: {target}")

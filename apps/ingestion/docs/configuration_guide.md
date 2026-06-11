@@ -13,7 +13,7 @@ dataset_id: "daily_orders"
 
 extract:
   type: "s3"
-  source_identifier: "s3://production-lake/sales/"
+  resource: "s3://production-lake/sales/"
   config:
     region: "us-east-1"
     # Secrets are resolved JIT on the worker (ADR 011)
@@ -26,8 +26,8 @@ transform:
 
 load:
   sink_type: "clickhouse"
-  sink_identifier: "analytics.orders_fact"
-  partition_col: "order_date"
+  destination: "analytics.orders_fact"
+  partition_by: "order_date"
   config:
     host: "clickhouse.internal"
 

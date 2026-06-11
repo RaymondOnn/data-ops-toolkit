@@ -1,4 +1,4 @@
-from .builder import TaskContextBuilder, parse_set_options
+from .builder import TaskContextBuilder, parse_cli_overrides
 from .execution import ExecutionContext, ExecutionMode, RayMode
 from .task import TaskContext
 
@@ -8,5 +8,5 @@ __all__ = [
     "RayMode",
     "TaskContext",
     "TaskContextBuilder",
-    "parse_set_options",
+    "parse_cli_overrides",
 ]

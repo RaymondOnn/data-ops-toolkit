@@ -49,7 +49,7 @@ graph TD
 ```
 
 ## 2. Execution Stage Dependencies (The Pipeline)
-This graph represents the state-machine transitions and physical data dependencies. A failure in an upstream stage typically triggers a `RewindTask` or quarantine logic.
+This graph represents the state-machine transitions and physical data dependencies. A failure in an upstream stage typically triggers a `RollbackRequired` or quarantine logic.
 
 ```mermaid
 graph LR

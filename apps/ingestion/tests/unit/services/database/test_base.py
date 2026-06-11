@@ -10,7 +10,7 @@ from apps.ingestion.src.services.database.base import (
     DatabaseSource,
 )
 from libs.database.clients.base import DBClient
-from libs.resilience.circuit_breaker import CircuitBreakerTripped
+from libs.resilience.circuit_breaker import CircuitOpen
 
 
 # Mock DBClient for testing DatabaseService
@@ -33,7 +33,7 @@ class MockDBClient(DBClient):
     def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
         yield pl.DataFrame({"col": [1]})
 
-    def partition_load(self, table_name, num_workers=10, filter_sql=None):
+    def partition_load(self, table_name, num_workers=10, filter_condition=None):
         return {
             f"SELECT * FROM {table_name} WHERE part = {i}" for i in range(num_workers)
         }
@@ -66,7 +66,7 @@ class TestDatabaseService:
             def client(self) -> DBClient:
                 return mock_db_client
 
-            def get_row_count(
+            def count_units(
                 self, target: str, filter_condition: str | None = None
             ) -> int:
                 return 100
@@ -152,7 +152,7 @@ class TestDatabaseSource:
             def client(self) -> DBClient:
                 return mock_db_client
 
-            def get_row_count(
+            def count_units(
                 self, target: str, filter_condition: str | None = None
             ) -> int:
                 return 100
@@ -169,11 +169,11 @@ class TestDatabaseSource:
         assert units == {f"SELECT * FROM my_table WHERE part = {i}" for i in range(5)}
         mock_db_client.partition_load.assert_called_once_with("my_table", 5, None)
 
-    def test_fetch_data_concatenation(self, db_source, mock_db_client):
+    def test_pull_concatenation(self, db_source, mock_db_client):
         """
         GIVEN a work unit (query)
-        THEN fetch_data should fetch dataframes and concatenate them
-        WHEN fetch_data is called
+        THEN pull should fetch dataframes and concatenate them
+        WHEN pull is called
         """
         # Mock fetch_df to yield multiple batches
         mock_db_client.fetch_df.side_effect = [
@@ -181,7 +181,7 @@ class TestDatabaseSource:
             pl.DataFrame({"id": [2]}),
         ]
 
-        df = db_source.fetch_data("SELECT * FROM my_table WHERE part = 0")
+        df = db_source.pull("SELECT * FROM my_table WHERE part = 0")
         assert isinstance(df, pl.DataFrame)
         assert df.height == 2
         assert df["id"].to_list() == [1, 2]
@@ -202,26 +202,26 @@ class TestDatabaseSink:
             def client(self) -> DBClient:
                 return mock_db_client
 
-            def get_row_count(
+            def count_units(
                 self, target: str, filter_condition: str | None = None
             ) -> int:
                 return 100
 
-            def stage_data(
+            def stage(
                 self,
                 source_dir,
-                target_table,
+                target_location,
                 expected_count,
                 file_ext="parquet",
                 audit_values=None,
             ):
                 return "stg_table", 100
 
-            def promote_data(
+            def promote(
                 self,
-                staging_table,
-                target_table,
-                partition_col,
+                staging_location,
+                target_location,
+                partition_by,
                 partition_val,
                 expected_count,
             ):
@@ -255,10 +255,10 @@ class TestDatabaseSink:
 
     def test_exists_circuit_breaker_tripped(self, db_sink, mock_db_client):
         """
-        GIVEN the underlying client raises a CircuitBreakerTripped exception
-        THEN exists should re-raise CircuitBreakerTripped
+        GIVEN the underlying client raises a CircuitOpen exception
+        THEN exists should re-raise CircuitOpen
         WHEN exists is called
         """
-        mock_db_client.exists.side_effect = CircuitBreakerTripped("Breaker open")
-        with pytest.raises(CircuitBreakerTripped):
+        mock_db_client.exists.side_effect = CircuitOpen("Breaker open")
+        with pytest.raises(CircuitOpen):
             db_sink.exists("my_table")

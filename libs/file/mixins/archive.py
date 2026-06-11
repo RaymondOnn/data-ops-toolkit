@@ -5,7 +5,7 @@ from typing import Any
 
 import fsspec
 import polars as pl
-from libs.utils.dates import get_current_timestamp
+from libs.utils.dates import current_timestamp
 
 LOG = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ class StandardArchiveMixin:
 
     fs: fsspec.AbstractFileSystem
     url: str
-    opts: dict[str, Any]
+    options: dict[str, Any]
 
     def archive_snapshot(
         self,
@@ -41,7 +41,7 @@ class StandardArchiveMixin:
         Returns:
             str: The full path to the archived artifact.
         """
-        ref_date = logical_date or get_current_timestamp()
+        ref_date = logical_date or current_timestamp()
         date_path = ref_date.strftime("%Y/%m/%d")
 
         # New Hierarchy: job_id -> dataset_name -> date -> category
@@ -106,7 +106,7 @@ class StandardArchiveMixin:
             days: Number of days of data to retain.
             dry_run: If True, logs intended deletions without removing files.
         """
-        cutoff_date = get_current_timestamp() - timedelta(days=days)
+        cutoff_date = current_timestamp() - timedelta(days=days)
         dataset_root = f"{self.url}/archive/{job_id}/{dataset_name}"
 
         if not self.fs.exists(dataset_root):

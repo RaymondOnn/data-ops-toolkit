@@ -32,7 +32,7 @@ def test_streaming_memory_safety_limit(runtime, tmp_path):
     overrides = {
         "extract": {
             "source_type": "flat_file",
-            "source_identifier": str(source_dir),
+            "resource": str(source_dir),
         },
         "_global": {"compute": {"memory_gb": 0.2}},  # 200MB limit
     }
@@ -51,7 +51,7 @@ def test_streaming_memory_safety_limit(runtime, tmp_path):
 
         task_path = runtime.orchestrator.state_store.resolve_task_path(run_id)
         if task_path:
-            task = Task.from_folder(task_path, runtime.exec_ctx)
+            task = Task.from_path(task_path, runtime.exec_ctx)
             if task.manifest.status == ExecutionStatus.SUCCESS:
                 completed = True
                 break
@@ -60,9 +60,9 @@ def test_streaming_memory_safety_limit(runtime, tmp_path):
     # 4. Verification
     assert completed is True, "Pipeline failed or OOM'd during large stream"
 
-    task = Task.from_folder(task_path, runtime.exec_ctx)
+    task = Task.from_path(task_path, runtime.exec_ctx)
     # Ensure the manifest captured the full 5M rows
-    assert task.manifest.extract.source_row_count == 5_000_000
+    assert task.manifest.extract.source_count == 5_000_000
 
     # Check that output files exist in the vault
     extract_data = task.workspace.get_data_path("extract")

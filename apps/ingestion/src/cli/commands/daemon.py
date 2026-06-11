@@ -5,13 +5,14 @@ Provides core engine control commands for starting the Always-On daemon
 and performing graceful service terminations.
 """
 
+import traceback
 from pathlib import Path
 from typing import Annotated
 
 import typer
-from apps.ingestion.src.cli.state import app
+from apps.ingestion.src.cli.state import app, configure_runtime, state
 from apps.ingestion.src.cli.utils import _write_signal_file
-from apps.ingestion.src.core.contexts import TaskContextBuilder
+from apps.ingestion.src.core.contexts import ExecutionMode, TaskContextBuilder
 from apps.ingestion.src.core.orchestrator.factory import assemble_runtime
 from apps.ingestion.src.core.orchestrator.modes.daemon import DaemonRuntime
 from apps.ingestion.src.utils.common import setup_logger
@@ -27,19 +28,18 @@ def start_orchestrator(
 
     In this mode, the engine polls for database triggers and reactive
     filesystem signals.
-
-    Args:
-        debug: Enables verbose logging and diagnostics.
-
-    Decision: Unified Exception Hooking (ADR 014).
-    We use the 'except*' syntax to handle ExceptionGroups produced by the
-    Daemon's multi-threaded scheduler and Ray workers. This allows us to
-    report failures across multiple concurrent tasks without crashing the
-    main monitoring thread.
     """
+
+    configure_runtime(
+        debug=debug or state["debug"],
+        dry_run=state["dry_run"],
+        ray_mode=state["ray_mode"].value,
+    )
+
     builder = TaskContextBuilder()
     try:
-        exec_ctx = builder.get_execution_context()
+        mode = ExecutionMode.DEBUG if state["debug"] else ExecutionMode.NORMAL
+        exec_ctx = builder.build_execution_context(mode=mode)
         exec_ctx.always_on = True
         runtime = assemble_runtime(exec_ctx, builder)
 
@@ -49,8 +49,7 @@ def start_orchestrator(
 
         setup_logger(
             log_dir=Path("./.workspace/logs"),
-            is_prod=runtime.exec_ctx.is_prod,
-            is_debug=debug,
+            is_debug=state["debug"],
             filename="orchestrator_daemon.jsonl",
         )
 
@@ -67,11 +66,18 @@ def start_orchestrator(
         typer.secho(
             f"INFRA FAILURE: {len(eg.exceptions)} tasks failed to connect.", fg="red"
         )
+        if state["debug"]:
+            for e in eg.exceptions:
+                typer.echo(f"Details: {e}")
 
     except* Exception as eg:
-        typer.secho(
-            f"UNEXPECTED: {len(eg.exceptions)} miscellaneous failures.", fg="red"
-        )
+        for e in eg.exceptions:
+            typer.secho(
+                f"❌ CRITICAL FAILURE ({type(e).__name__}):", fg="red", bold=True
+            )
+            typer.secho(f"  {e}", fg="white")
+            if state["debug"]:
+                traceback.print_exception(type(e), e, e.__traceback__)
 
 
 @app.command(name="stop")
@@ -93,7 +99,7 @@ def stop_daemon(
     We use a .cmd file to signal the daemon thread. This ensures the engine
     completes active Ray tasks before exiting, preventing state corruption.
     """
-    exec_ctx = TaskContextBuilder().get_execution_context()
+    exec_ctx = TaskContextBuilder().build_execution_context()
 
     if not exec_ctx.lock_file.exists():
         typer.secho("⚠️ Orchestrator daemon is not running.", fg="yellow")

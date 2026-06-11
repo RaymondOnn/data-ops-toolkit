@@ -4,14 +4,14 @@
 # from apps.ingestion.src.core.models.job.manifest import AuditPayload
 
 # from .base import ExecutionStage
-# from .enums import StageName
+# from .enums import Stage
 
 # if TYPE_CHECKING:
 #     from apps.ingestion.src.core.models.job import Task
 
 
 # class AuditStage(ExecutionStage):
-#     name = StageName.AUDIT.label
+#     name = Stage.AUDIT.value
 #     manifest: AuditPayload
 
 #     def execute(self, job: "Task") -> str:
@@ -47,7 +47,8 @@
 #             #     cmd,
 #             #     capture_output=True,
 #             #     text=True,
-#             #     check=False  # We handle the error manually to finalize the manifest
+#             #     check=False  # We handle the error manually to checkpoint
+# the manifest
 #             # )
 
 #             # 3. Build Payload
@@ -61,7 +62,7 @@
 #                 audit_duration_ms=duration_ms,
 #             )
 
-#             self.finalize(job, results=payload)
+#             self.checkpoint(job, results=payload)
 
 #             # If validation fails, we stop the pipeline here!
 #             if not payload.validation_passed:
@@ -69,10 +70,10 @@
 #                     f"Audit failed for Task {job.job_id}. See manifest for details."
 #                 )
 
-#             return self._transit(job)
+#             return self._next_stage(job)
 
 #         except Exception as e:
-#             self.finalize(job, exception=e)
+#             self.checkpoint(job, exception=e)
 #             raise
 
 #     def _run_internal_checks(

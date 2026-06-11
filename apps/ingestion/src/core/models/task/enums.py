@@ -17,10 +17,7 @@ SUPPORTED_SIGNAL_EXTENSIONS = {f".{s.value}" for s in TaskSignal}
 
 
 class TaskIdentity(msgspec.Struct, frozen=True):
-    """
-    The immutable physical identity of a task run.
-    Used for path construction, signal naming, and unique identification.
-    """
+    """Immutable physical identity of a task run."""
 
     job_id: str
     dataset_id: str
@@ -29,28 +26,20 @@ class TaskIdentity(msgspec.Struct, frozen=True):
 
     @classmethod
     def from_signal_stem(cls, stem: str) -> "TaskIdentity":
-        """Parses a signal file stem (job:dataset:partition:run_id) into Identity."""
+        """Parse signal filename stem into identity."""
         parts = stem.split(":")
         if len(parts) != 4:
             raise ValueError(f"Invalid signal stem: {stem}")
         return cls(*parts)
 
     @property
-    def identifier(self) -> str:
-        """The logical task identifier (JOB:DATASET:PARTITION)."""
+    def task_key(self) -> str:
+        """Logical task key (JOB:DATASET:PARTITION)."""
         return f"{self.job_id}:{self.dataset_id}:{self.partition_date}"
-
-    @property
-    def composite_key(self) -> str:
-        """The registry lookup key (JOB:DATASET)."""
-        return f"{self.job_id}:{self.dataset_id}"
 
 
 class TaskRef(msgspec.Struct, frozen=True):
-    """
-    A routing handle that combines a TaskIdentity with its current Execution State.
-    Used primarily for Cache Key generation and Orchestrator routing.
-    """
+    """Routing handle combining identity with current execution state."""
 
     identity: TaskIdentity
     status: ExecutionStatus
@@ -59,12 +48,11 @@ class TaskRef(msgspec.Struct, frozen=True):
 
     @classmethod
     def from_str(cls, key: str) -> "TaskRef":
-        """Factory to parse a colon-delimited string into a TaskRef Struct."""
+        """Parse colon-delimited string into TaskRef."""
         parts = key.split(":")
         if len(parts) != 7:
             raise ValueError(f"Invalid TaskRef format: {key}")
 
-        # Format: namespace:status:stage:job:ds:date:run
         return cls(
             namespace=parts[0],
             status=ExecutionStatus(parts[1]),
@@ -73,15 +61,15 @@ class TaskRef(msgspec.Struct, frozen=True):
         )
 
     @property
-    def identifier(self) -> str:
-        return self.identity.identifier
+    def task_key(self) -> str:
+        return self.identity.task_key
 
     @property
     def run_id(self) -> str:
         return self.identity.run_id
 
     def build(self, status: str | None = None, stage: str | None = None) -> str:
-        """Rebuilds a cache key with optional state changes."""
+        """Build cache key string with optional overrides."""
         return (
             f"{self.namespace}:"
             f"{status or self.status.value}:"
@@ -93,9 +81,9 @@ class TaskRef(msgspec.Struct, frozen=True):
     def with_updates(
         self, status: ExecutionStatus | None = None, stage: str | None = None
     ) -> "TaskRef":
-        """Returns a new TaskRef with updated status or stage, bypassing string parsing."""
+        """Create new TaskRef with updated status/stage."""
         return msgspec.structs.replace(
             self,
-            status=status if status else self.status,
-            stage=stage if stage else self.stage,
+            status=status if status is not None else self.status,
+            stage=stage if stage is not None else self.stage,
         )

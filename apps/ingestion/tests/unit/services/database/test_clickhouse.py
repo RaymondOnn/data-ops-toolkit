@@ -66,7 +66,7 @@ class TestClickHouseService:
                 password="resolved_secret",
                 database="default",
             )
-            mock_secret.resolve.assert_called_once_with(sanitize=True)
+            mock_secret.resolve.assert_called_once_with(url_encode=True)
 
     def test_close_client(self, ch_service, mock_clickhouse_client):
         """
@@ -83,25 +83,25 @@ class TestClickHouseService:
         mock_clickhouse_client.close.assert_called_once()
         assert "client" not in ch_service.__dict__
 
-    def test_get_total_count_delegation(self, ch_service, mock_clickhouse_client):
+    def test_count_units_delegation(self, ch_service, mock_clickhouse_client):
         """
         GIVEN a target table and filter condition
-        THEN get_total_count should delegate to get_row_count
-        WHEN get_total_count is called
+        THEN count_units should delegate to count_units
+        WHEN count_units is called
         """
-        with patch.object(ch_service, "get_row_count", return_value=500) as mock_grc:
-            count = ch_service.get_total_count("my_table", "col > 10")
+        with patch.object(ch_service, "count_units", return_value=500) as mock_grc:
+            count = ch_service.count_units("my_table", "col > 10")
             assert count == 500
             mock_grc.assert_called_once_with("my_table", "col > 10")
 
-    @patch("apps.ingestion.src.services.database.clickhouse.get_current_timestamp")
-    def test_stage_data_success(
+    @patch("apps.ingestion.src.services.database.clickhouse.current_timestamp")
+    def test_stage_success(
         self, mock_get_ts, ch_service, mock_clickhouse_client, tmp_path
     ):
         """
         GIVEN a source directory with files, a target table, and expected count
         THEN it should create a staging table, copy files, and return staging info
-        WHEN stage_data is called
+        WHEN stage is called
         """
         mock_get_ts.return_value = MagicMock(strftime=lambda x: "20240101120000")
         source_dir = tmp_path / "data"
@@ -110,28 +110,28 @@ class TestClickHouseService:
         (source_dir / "file2.parquet").touch()
 
         mock_clickhouse_client.sql.return_value = []
-        with patch.object(ch_service, "get_row_count", return_value=200) as mock_grc:
-            staging_table, rows_staged = ch_service.stage_data(
-                source_dir, "mydb.target_table", 200
+        with patch.object(ch_service, "count_units", return_value=200) as mock_grc:
+            staging_location, rows_staged = ch_service.stage(
+                source_dir, "mydb.target_location", 200
             )
 
-            assert "stg_target_table_20240101120000" in staging_table
+            assert "stg_target_location_20240101120000" in staging_location
             assert rows_staged == 200
             mock_clickhouse_client.sql.assert_any_call(
-                f"CREATE OR REPLACE TABLE {staging_table} "
-                "ENGINE = MergeTree() ORDER BY tuple() AS mydb.target_table"
+                f"CREATE OR REPLACE TABLE {staging_location} "
+                "ENGINE = MergeTree() ORDER BY tuple() AS mydb.target_location"
             )
             mock_clickhouse_client.copy_from_file.assert_called_once()
-            mock_grc.assert_called_once_with(staging_table)
+            mock_grc.assert_called_once_with(staging_location)
 
-    @patch("apps.ingestion.src.services.database.clickhouse.get_current_timestamp")
-    def test_stage_data_row_count_mismatch(
+    @patch("apps.ingestion.src.services.database.clickhouse.current_timestamp")
+    def test_stage_row_count_mismatch(
         self, mock_get_ts, ch_service, mock_clickhouse_client, tmp_path
     ):
         """
         GIVEN a row count mismatch after staging
         THEN it should raise ValueError and drop the staging table
-        WHEN stage_data is called
+        WHEN stage is called
         """
         mock_get_ts.return_value = MagicMock(strftime=lambda x: "20240101120000")
         source_dir = tmp_path / "data"
@@ -139,56 +139,54 @@ class TestClickHouseService:
         (source_dir / "file1.parquet").touch()
 
         with (
-            patch.object(ch_service, "get_row_count", return_value=100),
+            patch.object(ch_service, "count_units", return_value=100),
             pytest.raises(ValueError, match="Row count mismatch"),
         ):
-            ch_service.stage_data(source_dir, "mydb.target_table", 200)
+            ch_service.stage(source_dir, "mydb.target_location", 200)
 
         # Verify cleanup
         mock_clickhouse_client.sql.assert_any_call(
-            "DROP TABLE IF EXISTS stg_target_table_20240101120000"
+            "DROP TABLE IF EXISTS stg_target_location_20240101120000"
         )
 
-    def test_promote_data_success(self, ch_service, mock_clickhouse_client):
+    def test_promote_success(self, ch_service, mock_clickhouse_client):
         """
         GIVEN a staging table, target table, partition info, and expected count
         THEN it should perform schema audit, delete existing partition, insert from
              staging, and drop staging table
-        WHEN promote_data is called
+        WHEN promote is called
         """
         mock_clickhouse_client.sql.side_effect = [
-            # DESCRIBE TABLE target_table
+            # DESCRIBE TABLE target_location
             [("col1", "Int32"), ("col2", "String")],
-            # DESCRIBE TABLE staging_table
+            # DESCRIBE TABLE staging_location
             [("col1", "Int32"), ("col2", "String")],
-            # DELETE FROM target_table
+            # DELETE FROM target_location
             [],
-            # INSERT INTO target_table
+            # INSERT INTO target_location
             [],
-            # DROP TABLE staging_table
+            # DROP TABLE staging_location
             [],
         ]
-        with patch.object(ch_service, "get_row_count", return_value=100) as mock_grc:
-            ch_service.promote_data(
-                "stg_table", "target_table", "dt", "2024-01-01", 100
-            )
+        with patch.object(ch_service, "count_units", return_value=100) as mock_grc:
+            ch_service.promote("stg_table", "target_location", "dt", "2024-01-01", 100)
             mock_grc.assert_called_once()
             mock_clickhouse_client.sql.assert_any_call("DROP TABLE IF EXISTS stg_table")
 
-    def test_promote_data_schema_mismatch(self, ch_service, mock_clickhouse_client):
+    def test_promote_schema_mismatch(self, ch_service, mock_clickhouse_client):
         """
         GIVEN a schema mismatch between staging and target
         THEN it should raise ValueError
-        WHEN promote_data is called
+        WHEN promote is called
         """
         mock_clickhouse_client.sql.side_effect = [
-            # DESCRIBE TABLE target_table
+            # DESCRIBE TABLE target_location
             [("col1", "Int32")],
-            # DESCRIBE TABLE staging_table (missing col1)
+            # DESCRIBE TABLE staging_location (missing col1)
             [("col2", "String")],
         ]
         with pytest.raises(ValueError, match="Schema mismatch"):
-            ch_service.promote_data("stg_table", "target_table", "dt", "2024-01-01", 10)
+            ch_service.promote("stg_table", "target_location", "dt", "2024-01-01", 10)
 
     def test_is_equal_row_count_mismatch(self, ch_service):
         """
@@ -196,7 +194,7 @@ class TestClickHouseService:
         THEN is_equal should return False
         WHEN is_equal is called
         """
-        with patch.object(ch_service, "get_row_count", side_effect=[100, 99]):
+        with patch.object(ch_service, "count_units", side_effect=[100, 99]):
             assert ch_service.is_equal("ref", "other") is False
 
     def test_is_equal_checksum_match(self, ch_service):
@@ -206,7 +204,7 @@ class TestClickHouseService:
         WHEN is_equal is called
         """
         with (
-            patch.object(ch_service, "get_row_count", return_value=100),
+            patch.object(ch_service, "count_units", return_value=100),
             patch.object(ch_service, "get_checksum", return_value="abc"),
         ):
             assert ch_service.is_equal("ref", "other") is True
@@ -268,19 +266,19 @@ class TestClickHouseService:
         THEN drop should execute DROP TABLE IF EXISTS ...
         WHEN drop is called
         """
-        ch_service.drop("old_table")
+        ch_service.delete("old_table")
         mock_clickhouse_client.sql.assert_called_once_with(
             "DROP TABLE IF EXISTS old_table"
         )
 
-    def test_get_row_count_with_filter(self, ch_service, mock_clickhouse_client):
+    def test_count_units_with_filter(self, ch_service, mock_clickhouse_client):
         """
         GIVEN a target and filter condition
-        THEN get_row_count should construct and execute the correct COUNT(*) query
-        WHEN get_row_count is called
+        THEN count_units should construct and execute the correct COUNT(*) query
+        WHEN count_units is called
         """
         mock_clickhouse_client.sql.return_value = [(123,)]
-        count = ch_service.get_row_count("my_table", "dt = '2024-01-01'")
+        count = ch_service.count_units("my_table", "dt = '2024-01-01'")
         assert count == 123
         mock_clickhouse_client.sql.assert_called_once_with(
             "SELECT COUNT(*) FROM my_table WHERE dt = '2024-01-01'"

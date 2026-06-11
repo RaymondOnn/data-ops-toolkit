@@ -1,38 +1,53 @@
+"""Base classes for extraction strategies."""
+
 from abc import ABC, abstractmethod
 from collections.abc import Generator
 from pathlib import Path
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 import msgspec
-from apps.ingestion.src.core.contexts.task import SchemaRow
+from apps.ingestion.src.core.contexts.task import ColumnMapping
 from apps.ingestion.src.services.base import Source
 
+T_Source = TypeVar("T_Source", bound=Source)
 
-class ReaderContext(msgspec.Struct, frozen=True):
+
+class ExtractContext(msgspec.Struct, frozen=True):
+    """Serializable container for extraction parameters."""
+
+    kind: str
+    resource: str
+    num_workers: int
+    run_id: str
+    partition_date: str
+    job_id: str
+    workspace: str | None = None
+    params: dict[str, Any] = {}
+    schema: list[ColumnMapping] = []
+
+
+class Extractor(ABC, Generic[T_Source]):
+    """Abstract base class for all data extraction strategies.
+
+    Decision: Generic Service Binding.
+    By making the Extractor generic over T_Source, we ensure that specialized
+    implementations (like DatabaseExtractor) are type-safely bound to their
+    required service types (like DatabaseSource), preventing Liskov
+    Substitution Principle violations during method overrides.
     """
-    Type-safe container for all ingestion parameters.
-    Serializable for Ray worker distribution.
-    """
 
-    source_type: str
-    source_identifier: str | None = None
-    num_workers: int | None = None
-    run_id: str | None = None
-    partition_date: str | None = None
-    job_id: str | None = None
-    # For any source-specific extras (e.g., API keys, custom filters)
-    workspace_dir: str | None = None
-    options: dict[str, Any] = {}
-    schema_items: list[SchemaRow] = []
-
-    # mode: Literal["single_shot", "partitioned"]
-    # work_units: List[List[str]]  # List of file groups to process
-    # total_size_bytes: int
-
-
-class Reader(ABC):
     @abstractmethod
-    def fetch(
-        self, service: Source, context: ReaderContext, target_folder: Path
+    def extract(
+        self, service: T_Source, context: ExtractContext, target_folder: Path
     ) -> Generator[dict[str, Any], None, None]:
-        raise NotImplementedError("Subclasses must implement this method")
+        """Yield metadata for each Parquet chunk as it's written.
+
+        Args:
+            service: The source service instance.
+            context: The extraction parameters.
+            target_folder: The directory to write output files.
+
+        Yields:
+            Generator[dict[str, Any], None, None]: Metadata about the written chunks.
+        """
+        pass

@@ -25,8 +25,8 @@ class TestAuthFactory:
         THEN the same instance should be returned for subsequent calls
         WHEN get_provider is invoked multiple times
         """
-        p1 = AuthFactory.get_provider("dev", type="env_file")
-        p2 = AuthFactory.get_provider("dev", type="env_file")
+        p1 = AuthFactory.get_provider("dev", type="local_file")
+        p2 = AuthFactory.get_provider("dev", type="local_file")
 
         assert p1 is p2
         mock_local_cls.assert_called_once()
@@ -53,7 +53,7 @@ class TestAuthFactory:
         THEN force the use of AWS Secret Manager regardless of config type
         WHEN get_provider is invoked
         """
-        _ = AuthFactory.get_provider("prod", type="env_file")
+        _ = AuthFactory.get_provider("prod", type="local_file")
 
         mock_aws_cls.assert_called_once()
         assert AuthFactory._provider == mock_aws_cls.return_value
@@ -62,13 +62,13 @@ class TestAuthFactory:
     @patch("os.getenv")
     def test_get_provider_encrypted_validation(self, mock_getenv, mock_enc_cls):
         """
-        GIVEN a 'file_encrypted' type
+        GIVEN a 'secure_file' type
         THEN ensure the master_key is retrieved and passed to the provider
         WHEN get_provider is called with valid configuration
         """
         mock_getenv.return_value = "my-secret-master-key"
 
-        AuthFactory.get_provider("dev", type="file_encrypted")
+        AuthFactory.get_provider("dev", type="secure_file")
 
         mock_enc_cls.assert_called_once()
         _, kwargs = mock_enc_cls.call_args
@@ -76,7 +76,7 @@ class TestAuthFactory:
 
     def test_get_provider_encrypted_missing_key(self):
         """
-        GIVEN a 'file_encrypted' type without a master key in config or env
+        GIVEN a 'secure_file' type without a master key in config or env
         THEN raise a ValueError
         WHEN get_provider is called
         """
@@ -84,7 +84,7 @@ class TestAuthFactory:
             patch("os.getenv", return_value=None),
             pytest.raises(ValueError, match="requires a master_key"),
         ):
-            AuthFactory.get_provider("dev", type="file_encrypted")
+            AuthFactory.get_provider("dev", type="secure_file")
 
     def test_get_provider_unsupported_type(self):
         """
@@ -103,7 +103,7 @@ class TestAuthFactory:
         WHEN get_provider is called
         """
         custom_cfg = {
-            "type": "aws_secret_manager",
+            "type": "aws_sm",
             "client": {"region": "us-west-2"},
             "service": {"endpoint_url": "http://localstack"},
         }

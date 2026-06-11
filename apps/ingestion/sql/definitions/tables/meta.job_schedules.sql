@@ -14,8 +14,6 @@ CREATE TABLE IF NOT EXISTS META.JOB_SCHEDULES (
     , PRIORITY              UInt8 -- Worker Allocation Priority
     , TIMEOUT_SECS          UInt32 -- Max Execution Time
     , CONCURRENCY_LIMIT     UInt16 -- Max Concurrent Tasks
-    , MISFIRE_GRACE_SECS    Int32 -- Run if X Seconds late (0=Never, -1=Always)
-    , WATCH_FILE_PATH       String -- For file monitoring
     -- , PARTITION_DATE        Date -- Added to support partitioning/ordering
     -- , NEXT_RUN_TS_LC           DateTime64(3)
     -- , PREV_RUN_TS_LC           DateTime64(3)

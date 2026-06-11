@@ -26,7 +26,7 @@ class TestServiceFactory:
 
         @ServiceFactory.register("mock_src")
         class MockSource(Source):
-            def get_total_count(
+            def count_units(
                 self, target: str, filter_condition: str | None = None
             ) -> int:
                 return 0
@@ -34,7 +34,7 @@ class TestServiceFactory:
             def parallelize(self, target, num_workers, filter_condition=None):
                 return []
 
-            def fetch_data(self, unit):
+            def pull(self, unit):
                 return None
 
         assert "mock_src" in ServiceFactory._SERVICES
@@ -44,7 +44,7 @@ class TestServiceFactory:
         """
         GIVEN a registered service
         THEN identical configurations should return the same object instance
-        WHEN get_service is called multiple times
+        WHEN get is called multiple times
         """
 
         @ServiceFactory.register("singleton_svc")
@@ -53,8 +53,8 @@ class TestServiceFactory:
                 self.config = config
 
         cfg = {"host": "localhost"}
-        s1 = ServiceFactory.get_service("singleton_svc", **cfg)
-        s2 = ServiceFactory.get_service("singleton_svc", **cfg)
+        s1 = ServiceFactory.get("singleton_svc", **cfg)
+        s2 = ServiceFactory.get("singleton_svc", **cfg)
 
         assert s1 is s2
         assert len(ServiceFactory._INSTANCES) == 1
@@ -63,7 +63,7 @@ class TestServiceFactory:
         """
         GIVEN benchmark_mode is enabled in flags
         THEN the factory should return the experimental sink type
-        WHEN get_service is invoked
+        WHEN get is invoked
         """
 
         @ServiceFactory.register("stable")
@@ -78,14 +78,14 @@ class TestServiceFactory:
         flags.benchmark_mode = True
         flags.experimental_sink_type = "experimental"
 
-        service = ServiceFactory.get_service("stable", flags=flags)
+        service = ServiceFactory.get("stable", flags=flags)
         assert isinstance(service, ExperimentalSink)
 
     def test_secret_resolution_logic(self):
         """
         GIVEN a config containing 'secret_key'
         THEN the factory should wrap the ID in a Secret object
-        WHEN get_service is called and a provider is configured
+        WHEN get is called and a provider is configured
         """
 
         @ServiceFactory.register("auth_svc")
@@ -97,19 +97,19 @@ class TestServiceFactory:
         ServiceFactory._provider = mock_provider
 
         config = {"auth": {"secret_key": "vault_id_123"}}
-        service = ServiceFactory.get_service("auth_svc", **config)
+        service = ServiceFactory.get("auth_svc", **config)
 
         assert isinstance(service.password, Secret)
         assert service.password.secret_id == "vault_id_123"
 
-    def test_get_service_not_found(self):
+    def test_get_not_found(self):
         """
         GIVEN an unregistered service type
         THEN raise a ServiceNotFound exception
-        WHEN get_service is called
+        WHEN get is called
         """
         with pytest.raises(ServiceNotFound, match="No service found"):
-            ServiceFactory.get_service("ghost_service")
+            ServiceFactory.get("ghost_service")
 
     def test_typed_accessor_validation(self):
         """

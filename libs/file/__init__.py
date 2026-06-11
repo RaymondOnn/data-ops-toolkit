@@ -10,15 +10,16 @@ from .formats.parquet import ParquetHandler
 from .formats.xml import XMLHandler
 from .mixins.archive import StandardArchiveMixin
 from .mixins.cas import CASArchiveMixin
-from .mixins.data import FlatFileMixin
+from .mixins.data import FileMixin
+from .utils import filter_files
 
 __all__ = [
     "AzureClient",
     "CASArchiveMixin",
     "CSVHandler",
+    "FileMixin",
     "FileSystemClient",
     "FileSystemSkills",
-    "FlatFileMixin",
     "FormatFactory",
     "FormatHandler",
     "JSONHandler",
@@ -28,4 +29,5 @@ __all__ = [
     "StandardArchiveMixin",
     "XMLHandler",
     "create_fs_client",
+    "filter_files",
 ]

@@ -119,17 +119,17 @@ ignore = [
     "W291",
     "PLR0913",
     "COM812",
-    "ISC001", # implicit-str-concatenation
-    "N818", # error-suffix-on-exception-name
-    "TD002", # missing-todo-author
-    "B009", # getattr has no safety benefit
-    "PLC0415", # import-outside-top-level
-    "BLE001", # disallow-bare-except
-    "E501", # line-too-long
-    "DTZ001", # disallow-naive-datetime
-    "DTZ005", # disallow-datetime-now
-    "DTZ006", # disallow-datetime-today
-    "DTZ007", # disallow-datetime-utcnow
+    "ISC001",   # implicit-str-concatenation
+    "N818",     # error-suffix-on-exception-name
+    "TD002",    # missing-todo-author
+    "PLC0415",  # import-outside-top-level
+    "BLE001",   # disallow-bare-except
+    "E501",     # line-too-long
+    "DTZ001",   # disallow-naive-datetime
+    "DTZ005",   # disallow-datetime-now
+    "DTZ006",   # disallow-datetime-today
+    "DTZ007",   # disallow-datetime-utcnow
+    "PLR0915",  # too-many-statements
 ]
 
 [tool.ruff.lint.pydocstyle]
@@ -140,7 +140,7 @@ convention = "google"
 
 minversion = "7.0"                              # Minimum pytest version
 pythonpath = ["apps/ingestion/src", "libs"]     # Add current directory to Python path
-addopts = [
+addoptions = [
     "-ra",                                      # Show summary of all tests
     "-q",                                       # Quiet mode
     "--strict-markers",                         # Error on unknown markers

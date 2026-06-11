@@ -12,7 +12,7 @@ CREATE TABLE META.EXECUTION_LOG (
     , CURRENT_STAGE          LowCardinality(Nullable(String))
     , JOB_BITMASK           String --UInt16
     , IS_SCHEDULED          UInt8 -- 1 = Scheduled, 0 = Manual/Ad-hoc
-    , WATCH_FILE_PATH       Nullable(String)
+    , ERROR                 Nullable(String)
     , RUNTIME_OVERRIDES     Nullable(String) -- JSON representation
     , RETRY_ATTEMPTS        UInt8
     , SOURCE_ROW_COUNT      Nullable(UInt64)

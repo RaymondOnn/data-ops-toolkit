@@ -4,7 +4,7 @@ from libs.utils.log import (
     _MASK_STRINGS,
     create_console_formatter,
     is_masked,
-    register_log_masking,
+    mask_secrets,
     setup_logging,
 )
 from loguru import logger
@@ -21,10 +21,10 @@ class TestLoggingUtils:
         """
         GIVEN a sensitive string 'secret_password'
         THEN it should be found in the mask registry
-        WHEN register_log_masking is called
+        WHEN mask_secrets is called
         """
         secret = "secret_password"
-        register_log_masking(secret)
+        mask_secrets(secret)
 
         assert is_masked(secret) is True
         assert is_masked("public_info") is False
@@ -33,10 +33,10 @@ class TestLoggingUtils:
         """
         GIVEN a list of sensitive strings
         THEN all items should be registered in the global set
-        WHEN register_log_masking is called with a list
+        WHEN mask_secrets is called with a list
         """
         secrets = ["pass1", "token2"]
-        register_log_masking(secrets)
+        mask_secrets(secrets)
 
         assert is_masked("pass1") is True
         assert is_masked("token2") is True
@@ -47,7 +47,7 @@ class TestLoggingUtils:
         THEN the output log should replace the secret with [MASKED_SECRET]
         WHEN a message containing the secret is logged
         """
-        register_log_masking("super-secret-key")
+        mask_secrets("super-secret-key")
 
         # Temporary sink to capture output
         def sink_handler(message):

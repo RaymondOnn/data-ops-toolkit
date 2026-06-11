@@ -1,7 +1,7 @@
 from datetime import datetime
 
 import pytest
-from apps.ingestion.src.core.orchestrator.enums import JobRecord
+from apps.ingestion.src.core.orchestrator.enums import TaskRecord
 from apps.ingestion.src.core.orchestrator.modes.daemon.trigger import TriggerManager
 
 
@@ -19,7 +19,7 @@ def test_file_arrival_trigger_with_globs(trigger_mgr, exec_ctx, tmp_path):
     """
     # 1. Setup: Define a job watching for parquet files
     watch_pattern = str(tmp_path / "landing/*.parquet")
-    record = JobRecord(
+    record = TaskRecord(
         JOB_ID="file_job",
         DATASET_ID="ds1",
         PARTITION_DATE="2024-01-01",
@@ -49,11 +49,11 @@ def test_file_arrival_trigger_with_globs(trigger_mgr, exec_ctx, tmp_path):
 
 def test_trigger_security_traversal_block(trigger_mgr, exec_ctx):
     """
-    GIVEN a malicious JobRecord with a path traversal in WATCH_FILE_PATH
+    GIVEN a malicious TaskRecord with a path traversal in WATCH_FILE_PATH
     WHEN evaluate is called
     THEN the manager should block the check and log a warning.
     """
-    malicious_record = JobRecord(
+    malicious_record = TaskRecord(
         JOB_ID="hack_job",
         DATASET_ID="ds1",
         PARTITION_DATE="2024-01-01",
@@ -75,7 +75,7 @@ def test_ghost_task_auto_purge(trigger_mgr, exec_ctx, tmp_path):
     WHEN the TriggerManager evaluates the record
     THEN it should identify it as a 'Ghost Task' and issue a 'purge' decision.
     """
-    record = JobRecord(
+    record = TaskRecord(
         JOB_ID="ghost_job",
         DATASET_ID="ds1",
         PARTITION_DATE="2024-01-01",

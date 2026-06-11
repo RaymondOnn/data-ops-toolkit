@@ -49,7 +49,7 @@ def clean_workspace(
     data loss in production environments.
     """
     builder = TaskContextBuilder()
-    exec_ctx = builder.get_execution_context()
+    exec_ctx = builder.build_execution_context()
     runtime = assemble_runtime(exec_ctx, builder)
 
     if all_data:
@@ -69,10 +69,9 @@ def clean_workspace(
     typer.echo("🧹 Initializing Janitor sweep...")
 
     # Delegate physical logic to the Janitor component
-    runtime.orchestrator.janitor.clean_workspace(
+    runtime.orchestrator.janitor.cleanup_workspace(
         expired=expired,
         all_data=all_data,
-        dry_run=dry_run,
         run_id=run_id,
         older_than_days=older_than,
     )

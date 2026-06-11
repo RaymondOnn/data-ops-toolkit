@@ -1,17 +1,21 @@
 from datetime import UTC, datetime
 from unittest.mock import patch
 
-from apps.ingestion.src.utils.dates import epoch_to_iso, get_end_of_day_ts, iso_to_epoch
+from apps.ingestion.src.utils.dates import (
+    end_of_day_timestamp,
+    epoch_to_iso,
+    iso_to_epoch,
+)
 
 
 class TestAppDatesUtils:
     """Unit tests for application-specific date utility functions."""
 
     @patch("apps.ingestion.src.utils.dates.datetime")
-    def test_get_end_of_day_ts(self, mock_datetime):
+    def test_end_of_day_timestamp(self, mock_datetime):
         """
         GIVEN the current time is mocked to a specific point
-        THEN get_end_of_day_ts should return the Unix timestamp for 23:59:59
+        THEN end_of_day_timestamp should return the Unix timestamp for 23:59:59
         WHEN called
         """
         # Mock datetime.now() to return a fixed datetime object
@@ -21,7 +25,7 @@ class TestAppDatesUtils:
         mock_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
 
         expected_eod = datetime(2024, 3, 10, 23, 59, 59)
-        result = get_end_of_day_ts()
+        result = end_of_day_timestamp()
 
         # Decision: Component Verification.
         # We convert the resulting timestamp back to a local datetime to verify

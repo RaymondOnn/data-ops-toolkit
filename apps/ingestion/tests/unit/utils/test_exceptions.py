@@ -1,4 +1,4 @@
-from apps.ingestion.src.utils.exceptions import RetryTask, RewindTask
+from apps.ingestion.src.utils.exceptions import RollbackRequired, TryAgainLater
 
 
 class TestAppExceptions:
@@ -8,9 +8,9 @@ class TestAppExceptions:
         """
         GIVEN a reason, wait duration, and service name
         THEN the exception should store these attributes correctly
-        WHEN RetryTask is instantiated
+        WHEN TryAgainLater is instantiated
         """
-        exc = RetryTask(
+        exc = TryAgainLater(
             reason="Connection timeout", wait_seconds=60, service_name="ClickHouse"
         )
 
@@ -23,9 +23,9 @@ class TestAppExceptions:
         """
         GIVEN only a reason
         THEN the exception should use default wait duration and no service name
-        WHEN RetryTask is instantiated
+        WHEN TryAgainLater is instantiated
         """
-        exc = RetryTask(reason="Transient error")
+        exc = TryAgainLater(reason="Transient error")
 
         assert exc.wait_seconds == 30
         assert exc.service_name is None
@@ -34,9 +34,9 @@ class TestAppExceptions:
         """
         GIVEN a target stage and a reason
         THEN the exception should store these attributes correctly
-        WHEN RewindTask is instantiated
+        WHEN RollbackRequired is instantiated
         """
-        exc = RewindTask(target_stage="EXTRACT", reason="Missing upstream data")
+        exc = RollbackRequired(target_stage="EXTRACT", reason="Missing upstream data")
 
         assert exc.target_stage == "EXTRACT"
         assert exc.reason == "Missing upstream data"

@@ -4,7 +4,7 @@ import pytest
 from libs.resilience.circuit_breaker import (
     CircuitBreaker,
     CircuitBreakerState,
-    CircuitBreakerTripped,
+    CircuitOpen,
 )
 
 
@@ -54,7 +54,7 @@ class TestCircuitBreaker:
     def test_raises_tripped_exception_when_open(self):
         """
         GIVEN a CircuitBreaker in OPEN state
-        THEN it should raise CircuitBreakerTripped without calling the function
+        THEN it should raise CircuitOpen without calling the function
         WHEN the function is invoked
         """
         breaker = CircuitBreaker(failure_threshold=1)
@@ -69,7 +69,7 @@ class TestCircuitBreaker:
 
         assert breaker.current_state == CircuitBreakerState.OPEN
 
-        with pytest.raises(CircuitBreakerTripped) as exc:
+        with pytest.raises(CircuitOpen) as exc:
             some_action()
         assert "Breaker OPEN" in str(exc.value)
 
@@ -79,7 +79,7 @@ class TestCircuitBreaker:
         THEN it should transition through HALF_OPEN to CLOSED
         WHEN the timeout expires and a call succeeds
         """
-        breaker = CircuitBreaker(failure_threshold=1, recovery_timeout=0.1)
+        breaker = CircuitBreaker(failure_threshold=1, timeout_secs=0.1)
 
         @breaker
         def recovering_call():
@@ -101,7 +101,7 @@ class TestCircuitBreaker:
         THEN it should return to OPEN immediately on the next failure
         WHEN a failure occurs during the trial period
         """
-        breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=0.1)
+        breaker = CircuitBreaker(failure_threshold=5, timeout_secs=0.1)
         breaker._on_failure(ValueError("Initial trip"))
         assert breaker.current_state == CircuitBreakerState.OPEN
 
@@ -119,13 +119,13 @@ class TestCircuitBreaker:
         # In HALF_OPEN, failures increments from previous count
         assert breaker.failures == 2
 
-    def test_ignores_non_expected_exceptions(self):
+    def test_ignores_non_tracked_exceptions(self):
         """
         GIVEN a breaker configured for specific exceptions
         THEN it should ignore other exception types
         WHEN an unconfigured exception is raised
         """
-        breaker = CircuitBreaker(expected_exceptions=(RuntimeError,))
+        breaker = CircuitBreaker(tracked_exceptions=(RuntimeError,))
 
         @breaker
         def unexpected_fail():

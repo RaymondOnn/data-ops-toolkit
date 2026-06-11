@@ -13,7 +13,7 @@ class MockArchiveClient(StandardArchiveMixin):
     def __init__(self, fs, url):
         self.fs = fs
         self.url = url
-        self.opts = {}
+        self.options = {}
 
 
 class TestStandardArchiveMixin:

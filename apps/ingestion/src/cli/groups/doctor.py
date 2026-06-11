@@ -2,7 +2,7 @@ from typing import Annotated
 
 import typer
 from apps.ingestion.src.core.contexts import TaskContextBuilder
-from apps.ingestion.src.core.orchestrator.common import StateStore
+from apps.ingestion.src.core.orchestrator.common import StateHub
 from apps.ingestion.src.core.orchestrator.doctor import Doctor
 
 doctor_app = typer.Typer(help="🩺 Diagnose environment health and configuration.")
@@ -27,10 +27,10 @@ def _get_doctor(env: str = "local") -> Doctor:
     rather than object graph construction.
     """
     builder = TaskContextBuilder(env=env)
-    exec_ctx = builder.get_execution_context()
+    exec_ctx = builder.build_execution_context()
     db_config = builder.app_settings.get("services.clickhouse", {}).to_dict()
-    state_store = StateStore(exec_ctx=exec_ctx, db_config=db_config)
-    return Doctor(exec_ctx, lambda: state_store.db, builder)
+    state = StateHub(exec_ctx=exec_ctx, db_config=db_config)
+    return Doctor(exec_ctx, lambda: state.sink.db, builder)
 
 
 def _exit_on_failure(success: bool) -> None:
@@ -74,7 +74,7 @@ def doctor_main(
     doctor = _get_doctor()
 
     if ctx.invoked_subcommand is None:
-        doctor.check_all(debug)
+        doctor.run_all(debug)
 
 
 @doctor_app.command("fs")
@@ -125,9 +125,7 @@ def network_check(
     """
     doctor = _get_doctor()
 
-    success = doctor.run_network_diagnostics(
-        target_host, target_port, proxy_url=proxy_url
-    )
+    success = doctor.check_network_path(target_host, target_port, proxy_url=proxy_url)
     _exit_on_failure(success)
 
 
@@ -151,7 +149,7 @@ def network_trace(
     firewall drops without leaving the application's toolset.
     """
     doctor = _get_doctor()
-    success = doctor.run_network_trace(target_host)
+    success = doctor.trace_route(target_host)
     _exit_on_failure(success)
 
 
@@ -182,7 +180,7 @@ def doctor_connect(
     matches the actual parameters used by the execution engine.
     """
     doctor = _get_doctor(env=env)
-    doctor.check_service_connectivity(service_name)
+    doctor.check_service(service_name)
 
 
 @doctor_app.command("config")
@@ -213,7 +211,7 @@ def doctor_config(
     triggering a run, significantly reducing the "fail-at-runtime" loop.
     """
     doctor = _get_doctor(env=env)
-    doctor.check_config(job_id, all_jobs=all_jobs, debug=debug)
+    doctor.check_config(job_id, all_jobs=all_jobs)
 
 
 @doctor_app.command("inspect")
@@ -241,4 +239,4 @@ def doctor_inspect(
     viewer for the internal task configuration.
     """
     doctor = _get_doctor(env=env)
-    doctor.inspect_config(job_id, dataset_id=dataset)
+    doctor.check_config(job_id, dataset_id=dataset)

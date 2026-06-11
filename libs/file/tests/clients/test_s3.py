@@ -8,7 +8,7 @@ class TestS3Client:
     """Unit tests for the S3 filesystem client."""
 
     @pytest.fixture
-    def mock_opts(self):
+    def mock_options(self):
         """Standard storage options for S3 tests."""
         return {
             "client": {
@@ -23,7 +23,9 @@ class TestS3Client:
 
     @patch("libs.file.clients.s3.S3FileSystem")
     @patch("libs.file.clients.s3.AWSClient")
-    def test_fs_property_initialization(self, mock_aws_cls, mock_s3fs_cls, mock_opts):
+    def test_fs_property_initialization(
+        self, mock_aws_cls, mock_s3fs_cls, mock_options
+    ):
         """
         GIVEN valid S3 storage options and credentials
         THEN it should instantiate S3FileSystem with correct parameters
@@ -36,7 +38,7 @@ class TestS3Client:
         )
         mock_aws.config.region = "us-east-1"
 
-        client = S3Client("s3://bucket", storage_options=mock_opts)
+        client = S3Client("s3://bucket", storage_options=mock_options)
         fs = client.fs
 
         assert fs is not None
@@ -47,7 +49,7 @@ class TestS3Client:
 
     @patch("libs.file.clients.s3.S3FileSystem")
     @patch("libs.file.clients.s3.AWSClient")
-    def test_exists_bucket_root(self, mock_aws, mock_s3fs_cls, mock_opts):
+    def test_exists_bucket_root(self, mock_aws, mock_s3fs_cls, mock_options):
         """
         GIVEN a path pointing to a bucket root
         THEN it should use list_buckets for validation (LocalStack workaround)
@@ -56,7 +58,7 @@ class TestS3Client:
         mock_fs = mock_s3fs_cls.return_value
         mock_fs.call_s3.return_value = {"Buckets": [{"Name": "my-bucket"}]}
 
-        client = S3Client("s3://my-bucket", storage_options=mock_opts)
+        client = S3Client("s3://my-bucket", storage_options=mock_options)
         client._fs = mock_fs  # Inject mock
 
         assert client.exists("s3://my-bucket") is True
@@ -64,7 +66,7 @@ class TestS3Client:
 
     @patch("libs.file.clients.s3.S3FileSystem")
     @patch("libs.file.clients.s3.AWSClient")
-    def test_exists_file_not_found(self, mock_aws, mock_s3fs_cls, mock_opts):
+    def test_exists_file_not_found(self, mock_aws, mock_s3fs_cls, mock_options):
         """
         GIVEN a file path that does not exist
         THEN it should return False and handle NoSuchKey exceptions
@@ -73,21 +75,21 @@ class TestS3Client:
         mock_fs = mock_s3fs_cls.return_value
         mock_fs.exists.side_effect = Exception("NoSuchKey")
 
-        client = S3Client("s3://bucket", storage_options=mock_opts)
+        client = S3Client("s3://bucket", storage_options=mock_options)
         client._fs = mock_fs
 
         assert client.exists("s3://bucket/missing.txt") is False
 
     @patch("libs.file.clients.s3.S3FileSystem")
     @patch("libs.file.clients.s3.AWSClient")
-    def test_cp_local_to_s3(self, mock_aws, mock_s3fs_cls, mock_opts):
+    def test_cp_local_to_s3(self, mock_aws, mock_s3fs_cls, mock_options):
         """
         GIVEN a local source path and an S3 destination
         THEN it should invoke the put() method for upload
         WHEN cp() is called
         """
         mock_fs = mock_s3fs_cls.return_value
-        client = S3Client("s3://bucket", storage_options=mock_opts)
+        client = S3Client("s3://bucket", storage_options=mock_options)
         client._fs = mock_fs
 
         client.cp("/tmp/local_file.txt", "s3://bucket/remote.txt")
@@ -98,7 +100,7 @@ class TestS3Client:
 
     @patch("libs.file.clients.s3.S3FileSystem")
     @patch("libs.file.clients.s3.AWSClient")
-    def test_find_with_pattern(self, mock_aws, mock_s3fs_cls, mock_opts):
+    def test_find_with_pattern(self, mock_aws, mock_s3fs_cls, mock_options):
         """
         GIVEN a list of files in S3
         THEN it should yield only those matching the glob pattern
@@ -108,7 +110,7 @@ class TestS3Client:
         mock_fs.find.return_value = ["bucket/data.csv", "bucket/data.json"]
         mock_fs.unstrip_protocol.side_effect = lambda x: f"s3://{x}"
 
-        client = S3Client("s3://bucket", storage_options=mock_opts)
+        client = S3Client("s3://bucket", storage_options=mock_options)
         client._fs = mock_fs
 
         results = list(client.find("s3://bucket", pattern="*.csv"))
@@ -118,7 +120,7 @@ class TestS3Client:
 
     @patch("libs.file.clients.s3.S3FileSystem")
     @patch("libs.file.clients.s3.AWSClient")
-    def test_ensure_bucket_exists(self, mock_aws, mock_s3fs_cls, mock_opts):
+    def test_ensure_bucket_exists(self, mock_aws, mock_s3fs_cls, mock_options):
         """
         GIVEN a path to a non-existent bucket
         THEN it should call mkdir to create the bucket
@@ -128,7 +130,7 @@ class TestS3Client:
         # Mock list_buckets to return empty
         mock_fs.call_s3.return_value = {"Buckets": []}
 
-        client = S3Client("s3://new-bucket", storage_options=mock_opts)
+        client = S3Client("s3://new-bucket", storage_options=mock_options)
         client._fs = mock_fs
 
         client._ensure_bucket_exists("s3://new-bucket/data/")

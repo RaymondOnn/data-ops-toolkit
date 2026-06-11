@@ -1,100 +1,68 @@
+"""Secret provider factory with environment-aware selection."""
+
 import logging
 import os
-from typing import ClassVar
 
 from .provider import (
-    AWSSecretProvider,  # Ensure AWSSecretProvider is imported for direct instantiation
+    AWSSecretProvider,
     LocalEncryptedProvider,
     LocalSecretProvider,
     SecretProvider,
 )
 
 LOG = logging.getLogger(__name__)
-MASTER_KEY_ENV_VAR = "MASTER_KEY"
+
+# Provider registry
+_PROVIDERS: dict[str, type[SecretProvider]] = {
+    "local_file": LocalSecretProvider,
+    "secure_file": LocalEncryptedProvider,
+    "aws_sm": AWSSecretProvider,
+}
+
+DEFAULT_SECRETS_PATH = ".secrets.json"
+DEFAULT_ENCRYPTED_PATH = ".secrets.enc"
+DEFAULT_MASTER_KEY_ENV = "MASTER_KEY"
 
 
 class AuthFactory:
-    _provider: SecretProvider | None = None
+    """Factory for creating secret providers."""
 
-    _STRATEGIES: ClassVar[dict[str, type]] = {
-        "env_file": LocalSecretProvider,
-        "file_encrypted": LocalEncryptedProvider,
-        "aws_secret_manager": AWSSecretProvider,
-    }
+    _instance: SecretProvider | None = None
 
     @classmethod
     def get_provider(cls, env: str, **config) -> SecretProvider:
-        """
-        Retrieves or creates a singleton SecretProvider based on the environment.
-
-        If an environment is set to 'prod', the factory forces the use of
-        the AWS Secret Manager provider regardless of the configuration.
-
-        Args:
-            env: The deployment environment (e.g., 'dev', 'prod', 'test').
-            **config: Configuration parameters for the provider.
-                Expected keys vary by provider type (e.g., 'master_key').
-
-        Returns:
-            SecretProvider: An initialized secret provider instance.
-
-        Raises:
-            ValueError: If the provider type is unsupported or if mandatory
-                configuration (like master_key) is missing.
-        """
-        if cls._provider:
-            return cls._provider
+        """Get or create a secret provider singleton."""
+        if cls._instance:
+            return cls._instance
 
         env = env or os.getenv("APP_ENV", "dev").lower()
+        provider_type = config.get("type", "local_file").strip().lower()
 
-        # 1. Determine Provider Type
-        provider_type = config.get("type", "env_file").strip().casefold()
-
-        # Override for production
+        # Force AWS in production
         if env == "prod":
-            LOG.info(
-                "Production environment detected. "
-                "Forcing 'aws_secret_manager' provider."
-            )
-            provider_type = "aws_secret_manager"
+            LOG.info("Production environment - forcing AWS Secrets Manager")
+            provider_type = "aws_sm"
 
-        LOG.info("Configuring auth provider", extra={"type": provider_type, "env": env})
+        LOG.info(f"Creating secret provider: {provider_type}")
 
-        # 2. Pre-flight Validation (Logic happens before Init)
-        if provider_type == "file_encrypted":
-            config["master_key"] = os.getenv(
-                MASTER_KEY_ENV_VAR, config.get("master_key")
-            )
-            if not config.get("master_key"):
-                raise ValueError(
-                    f"Provider '{provider_type}' requires a master_key "
-                    "(config or {MASTER_KEY_ENV_VAR} env var)"
-                )
-            # Ensure we have a path for the encrypted file
+        # Prepare config
+        if provider_type == "secure_file":
+            config["master_key"] = config.get(
+                DEFAULT_MASTER_KEY_ENV.casefold()
+            ) or os.getenv(DEFAULT_MASTER_KEY_ENV)
+            if not config["master_key"]:
+                raise ValueError("secure_file provider requires master_key")
             config.setdefault(
-                "encrypted_file_path", config.get("path", "./.secrets.json")
+                "encrypted_file_path", config.get("path", DEFAULT_ENCRYPTED_PATH)
             )
 
-        elif provider_type == "env_file":
-            # Ensure we have a fallback path if none provided
-            config.setdefault("path", "./.secrets.json")
+        elif provider_type == "local_file":
+            config.setdefault("path", DEFAULT_SECRETS_PATH)
 
-        # 3. Dictionary Dispatch
-        provider_class = cls._STRATEGIES.get(provider_type)
+        # Instantiate
+        provider_class = _PROVIDERS.get(provider_type)
         if not provider_class:
-            raise ValueError(
-                f"Unsupported provider type: '{provider_type}'. "
-                f"Available: {list(cls._STRATEGIES.keys())}"
-            )
+            raise ValueError(f"Unknown provider type: {provider_type}")
 
-        # 4. Instantiate Singleton
-        LOG.debug(
-            "Instantiating provider class", extra={"cls": provider_class.__name__}
-        )
-        cls._provider = provider_class(**config)
-        if not cls._provider:
-            raise ValueError(
-                f"Failed to instantiate provider class: {provider_class.__name__}"
-            )
-
-        return cls._provider
+        cls._instance = provider_class(**config)
+        return cls._instance

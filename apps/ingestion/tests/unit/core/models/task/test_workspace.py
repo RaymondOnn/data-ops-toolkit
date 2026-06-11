@@ -118,7 +118,8 @@ def test_purge_recursive_vault(workspace, exec_ctx):
     """
     GIVEN a workspace with metadata and data artifacts
     WHEN purge is called with include_vaults=True
-    THEN it should remove the run folders and recursively clean empty parent directories in data/
+    THEN it should remove the run folders and recursively clean empty parent
+    directories in data/
     """
     # Setup: Create hierarchy data/job/ds/date/run/extract
     data_path = workspace.get_data_path("extract")
@@ -129,22 +130,23 @@ def test_purge_recursive_vault(workspace, exec_ctx):
 
     assert not workspace.run_path.exists()
     assert not data_path.exists()
-    # Recursive Check: Because we were the only run, the whole tree up to 'data/' should be gone
+    # Recursive Check: Because we were the only run, the whole tree up
+    # to 'data/' should be gone
     assert not (exec_ctx.data_path / "unit_job").exists()
     assert exec_ctx.data_path.exists()  # Root data dir should remain
 
 
-def test_create_stage_marker_relative(workspace):
+def test_create_symlink_relative(workspace):
     """
     GIVEN a physical data folder
-    WHEN create_stage_marker is called
+    WHEN create_symlink is called
     THEN it should create a relative symlink that is portable
     """
     workspace.run_path.mkdir(parents=True)
     data_folder = workspace.get_data_path("extract")
     data_folder.mkdir(parents=True)
 
-    workspace.create_stage_marker("extract", data_folder)
+    workspace.create_symlink("extract", data_folder)
 
     marker = workspace.run_path / "extract"
     assert marker.is_symlink()
@@ -153,17 +155,17 @@ def test_create_stage_marker_relative(workspace):
     assert ".." in link_target
 
 
-def test_clear_stage_data_idempotency(workspace):
+def test_reset_data_dir_idempotency(workspace):
     """
     GIVEN an existing stage directory with stale files
-    WHEN clear_stage_data is called
+    WHEN reset_data_dir is called
     THEN it should purge existing content and return a clean directory
     """
     path = workspace.get_data_path("transform")
     path.mkdir(parents=True)
     (path / "stale.parquet").write_text("garbage")
 
-    new_path = workspace.clear_stage_data("transform")
+    new_path = workspace.reset_data_dir("transform")
 
     assert new_path == path
     assert new_path.is_dir()

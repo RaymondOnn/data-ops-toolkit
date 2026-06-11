@@ -173,7 +173,7 @@ class DBClient(ABC):
         self,
         table_name: str,
         num_workers: int = 10,
-        filter_sql: str | None = None,
+        filter_condition: str | None = None,
     ) -> set[str]:
         """
         Generates a set of partitioned queries for parallel loading.
@@ -181,7 +181,7 @@ class DBClient(ABC):
         Args:
             table_name: Fully qualified name of the source table.
             num_workers: Number of parallel loaders/workers.
-            filter_sql: Optional filter condition.
+            filter_condition: Optional filter condition.
 
         Returns:
             set[str]: A set of query strings for distributed execution.

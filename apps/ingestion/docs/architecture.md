@@ -63,7 +63,7 @@ Use Ray to spawn stages as isolated processes with logical resource constraints 
 
 **Context:** If an Oracle DB is down, 50 parallel Ray workers will all attempt to connect, potentially worsening the outage (thundering herd).
 
-**Decision:** Use `Diskcache` as a shared registry for `ServiceRegistry`.
+**Decision:** Use `Diskcache` as a shared registry for `ServiceMonitor`.
 
 **Consequences:**
 *   **Pros:** The first worker to fail "trips" the breaker globally. Remaining 49 workers fail-fast without hitting the network.
@@ -76,7 +76,7 @@ Use Ray to spawn stages as isolated processes with logical resource constraints 
 
 **Consequences:**
 *   **Pros:** Automatically scales Ray actor counts based on data volume, ensuring memory usage stays under the 2GB worker ceiling.
-*   **Cons:** Requires a pre-flight row count check (`get_total_count`), adding slight overhead to the driver node.
+*   **Cons:** Requires a pre-flight row count check (`count_units`), adding slight overhead to the driver node.
 
 ## ADR 008: The "Zero-Footprint" Local Disk Protocol
 

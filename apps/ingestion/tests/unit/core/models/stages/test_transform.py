@@ -2,14 +2,14 @@ from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pytest
-from apps.ingestion.src.core.models.stages.enums import StageName
+from apps.ingestion.src.core.models.stages.enums import Stage
 from apps.ingestion.src.core.models.stages.transform import TransformStage
-from apps.ingestion.src.utils.exceptions import RewindTask
+from apps.ingestion.src.utils.exceptions import RollbackRequired
 
 
 @pytest.fixture
 def transform_stage():
-    return TransformStage(StageName.TRANSFORM)
+    return TransformStage(Stage.TRANSFORM)
 
 
 @pytest.fixture
@@ -35,23 +35,23 @@ def test_transform_pre_flight_missing_extract_metadata(
     """
     GIVEN a task where the extract payload is missing from the manifest
     WHEN pre_flight is called
-    THEN it should raise a RewindTask to the EXTRACT stage
+    THEN it should raise a RollbackRequired to the EXTRACT stage
     """
     mock_transform_task.manifest.extract = None
 
-    with pytest.raises(RewindTask) as exc:
+    with pytest.raises(RollbackRequired) as exc:
         transform_stage.pre_flight(mock_transform_task)
-    assert exc.value.target_stage == StageName.EXTRACT.label
+    assert exc.value.target_stage == Stage.EXTRACT.value
 
 
 def test_transform_pre_flight_missing_data_marker(transform_stage, mock_transform_task):
     """
     GIVEN extract metadata exists but the 'extract/' marker folder is missing from disk
     WHEN pre_flight is called
-    THEN it should raise a RewindTask to the EXTRACT stage
+    THEN it should raise a RollbackRequired to the EXTRACT stage
     """
     # folder / 'extract' does not exist in the temporary workspace
-    with pytest.raises(RewindTask, match="Extraction data marker missing"):
+    with pytest.raises(RollbackRequired, match="Extraction data marker missing"):
         transform_stage.pre_flight(mock_transform_task)
 
 
@@ -59,12 +59,12 @@ def test_transform_pre_flight_empty_extract_dir(transform_stage, mock_transform_
     """
     GIVEN an 'extract/' marker exists but contains no parquet files
     WHEN pre_flight is called
-    THEN it should raise a RewindTask
+    THEN it should raise a RollbackRequired
     """
-    extract_dir = mock_transform_task.folder / StageName.EXTRACT.label
+    extract_dir = mock_transform_task.workspace.path / Stage.EXTRACT.value
     extract_dir.mkdir(parents=True)
 
-    with pytest.raises(RewindTask, match="Physical artifacts missing or empty"):
+    with pytest.raises(RollbackRequired, match="Physical artifacts missing or empty"):
         transform_stage.pre_flight(mock_transform_task)
 
 
@@ -72,10 +72,10 @@ def test_transform_execute_success(transform_stage, mock_transform_task):
     """
     GIVEN a valid extraction output
     WHEN execute is called
-    THEN it should read data via Ray, apply transformations, and finalize the manifest
+    THEN it should read data via Ray, apply transformations, and checkpoint the manifest
     """
     # 1. Setup physical environment
-    extract_dir = mock_transform_task.folder / StageName.EXTRACT.label
+    extract_dir = mock_transform_task.workspace.path / Stage.EXTRACT.value
     extract_dir.mkdir(parents=True)
     (extract_dir / "part_000.parquet").write_text("data")
 
@@ -92,22 +92,22 @@ def test_transform_execute_success(transform_stage, mock_transform_task):
         patch(
             "polars.read_parquet_schema", return_value={"id": "Int64", "val": "String"}
         ),
-        patch.object(transform_stage, "_transit", return_value=StageName.WRITE.label),
+        patch.object(transform_stage, "_transit", return_value=Stage.WRITE.value),
     ):
         mock_scan.return_value.select.return_value.collect.return_value = mock_stats
 
         result = transform_stage.execute(mock_transform_task)
 
         # Assertions
-        assert result == StageName.WRITE.label
-        mock_transform_task.finalize.assert_called_once()
+        assert result == Stage.WRITE.value
+        mock_transform_task.checkpoint.assert_called_once()
 
         # Verify payload contains row counts and logic version
-        _, kwargs = mock_transform_task.finalize.call_args
+        _, kwargs = mock_transform_task.checkpoint.call_args
         payload = kwargs["results"]
         assert payload["output_row_count"] == 100
         assert payload["transform_type"] == "base_transformer"
-        assert "refined_schema" in payload
+        assert "output_schema" in payload
 
 
 def test_transform_execute_skip_no_data(transform_stage, mock_transform_task):
@@ -121,11 +121,11 @@ def test_transform_execute_skip_no_data(transform_stage, mock_transform_task):
     with patch("ray.data.read_parquet") as mock_ray:
         result = transform_stage.execute(mock_transform_task)
 
-        assert result == str(StageName.WRITE.label)
+        assert result == str(Stage.WRITE.value)
         mock_ray.assert_not_called()
 
         # Verify payload indicates zero rows
-        _, kwargs = mock_transform_task.finalize.call_args
+        _, kwargs = mock_transform_task.checkpoint.call_args
         assert kwargs["results"]["output_row_count"] == 0
 
 
@@ -138,7 +138,7 @@ def test_transform_execute_invalid_type(transform_stage, mock_transform_task):
     mock_transform_task.context.transform.transform_type = ""
 
     # Ensure data exists so it doesn't skip
-    extract_dir = mock_transform_task.folder / StageName.EXTRACT.label
+    extract_dir = mock_transform_task.workspace.path / Stage.EXTRACT.value
     extract_dir.mkdir(parents=True)
     (extract_dir / "part_000.parquet").write_text("data")
 
@@ -146,5 +146,5 @@ def test_transform_execute_invalid_type(transform_stage, mock_transform_task):
     with pytest.raises(ValueError, match="Transform type is not defined"):
         transform_stage.execute(mock_transform_task)
 
-    # Verify it attempted to finalize with the exception
-    assert mock_transform_task.finalize.called
+    # Verify it attempted to checkpoint with the exception
+    assert mock_transform_task.checkpoint.called

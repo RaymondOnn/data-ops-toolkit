@@ -109,7 +109,7 @@ class ClickhouseClient(DBClient):
         self,
         table_name: str,
         num_workers: int = 5,
-        filter_sql: str | None = None,
+        filter_condition: str | None = None,
     ) -> set[str]:
         """
         Generates partitioned SQL queries using cityHash64 for parallel loading.
@@ -117,16 +117,18 @@ class ClickhouseClient(DBClient):
         Args:
             table_name: Name of the source table.
             num_workers: Number of workers/partitions to generate.
-            filter_sql: Optional WHERE clause logic.
+            filter_condition: Optional WHERE clause logic.
 
         Returns:
             set[str]: A set of query strings.
         """
-        filter_sql = filter_sql.replace("WHERE", "") if filter_sql else ""
+        filter_condition = (
+            filter_condition.replace("WHERE", "") if filter_condition else ""
+        )
         return {
             f"""
             SELECT * FROM {table_name}
-            WHERE {filter_sql}
+            WHERE {filter_condition}
             AND cityHash64(*) % {num_workers} = {i}
             """
             for i in range(num_workers)
@@ -167,7 +169,7 @@ class ClickhouseClient(DBClient):
         column_names = [c for c in all_columns if c not in audit_values]
 
         # 1. Create a Temporary Table with the same structure as the Parquet
-        # 'AS target_table' copies the schema; 'EXCEPT' omits the audit columns
+        # 'AS target_location' copies the schema; 'EXCEPT' omits the audit columns
         unique_id = str(uuid.uuid4())[:8]
         tmp_table = f"tmp_stage_{int(time.time())}_{unique_id}"
         except_clause = (

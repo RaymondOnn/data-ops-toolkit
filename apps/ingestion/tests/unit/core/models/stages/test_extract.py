@@ -2,13 +2,13 @@ from unittest.mock import MagicMock
 
 import polars as pl
 import pytest
-from apps.ingestion.src.core.models.stages.enums import StageName
+from apps.ingestion.src.core.models.stages.enums import Stage
 from apps.ingestion.src.core.models.stages.extract import ExtractStage
 
 
 @pytest.fixture
 def extract_stage():
-    return ExtractStage(StageName.EXTRACT)
+    return ExtractStage(Stage.EXTRACT)
 
 
 def test_merge_schemas_basic(extract_stage):
@@ -32,7 +32,7 @@ def test_resolve_audit_identity_single_file(extract_stage):
     THEN it should return the filename as the source identifier
     """
     ctx = MagicMock()
-    ctx.source_identifier = "s3://bucket/raw/data.csv"
+    ctx.resource = "s3://bucket/raw/data.csv"
     source_files = ["s3://bucket/raw/data.csv"]
 
     ident = extract_stage._resolve_audit_identity(ctx, source_files)
@@ -46,7 +46,7 @@ def test_resolve_audit_identity_batch(extract_stage):
     THEN it should return the parent folder name as the source identifier
     """
     ctx = MagicMock()
-    ctx.source_identifier = "s3://bucket/raw_folder/"
+    ctx.resource = "s3://bucket/raw_folder/"
     source_files = ["file1.csv", "file2.csv"]
 
     ident = extract_stage._resolve_audit_identity(ctx, source_files)

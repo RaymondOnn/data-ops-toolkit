@@ -50,10 +50,10 @@
 #     ) -> None:
 #         self.url = url  # This is the "Base" path or folder
 #         self.file_pattern = file_pattern
-#         self.opts = storage_options or {}
+#         self.options = storage_options or {}
 
 #         protocol = self.url.split("://")[0] if "://" in self.url else "file"
-#         self.fs = fsspec.filesystem(protocol, **self.opts)
+#         self.fs = fsspec.filesystem(protocol, **self.options)
 
 
 #     def fetch_by_hash(self, file_hash: str) -> BytesIO:

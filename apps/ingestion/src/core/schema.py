@@ -1,72 +1,73 @@
 import time
+from typing import Any
 
+import msgspec
 import polars as pl
-from apps.ingestion.src.core.strategies.extract import ReaderContext
 from libs.database import TypeResolver
 
 
 # TODO: Masking: Hash, Redact, Last_4
-def apply_schema_contract(df: pl.DataFrame, context: ReaderContext) -> pl.DataFrame:
-    """
-    Decision: Stateless, Pure Function for Distributed Guarding.
-    Enforces the physical contract.
-    Handles: String-first casting, Masking, Renaming, and Column Selection.
+class ColumnMapping(msgspec.Struct):
+    """Represents a single column mapping and transformation rule.
 
-    By applying this inside the Ray worker, we utilize the cluster CPU
-    for hashing/casting and reduce memory usage by dropping extra cols immediately.
+    Attributes:
+        target_col: The canonical name of the column in the destination.
+        target_type: The target data type identifier (e.g., 'int64', 'string').
+        source_col: The original name in the source system.
+        masking: The PII protection strategy ('hash', 'fixed', 'none').
     """
-    schema_items = context.schema_items
 
-    # Guard: If no schema is defined or the batch arrived without columns,
-    # skip processing to avoid ColumnNotFound errors.
-    if not schema_items or df.width == 0:
+    target_col: str
+    target_type: str
+    source_col: str | None = None
+    masking: str = "none"
+
+    def __post_init__(self):
+        """Normalize source_col representation."""
+        if self.source_col in ("None", "null", ""):
+            self.source_col = None
+
+
+def apply_schema_contract(df: pl.DataFrame, context: Any) -> pl.DataFrame:
+    """Enforces the physical schema contract on an extracted Polars DataFrame."""
+    if not context.schema or df.width == 0:
         return df
-
-    exprs = []
-    for item in schema_items:
-        # 1. Normalize Source Column (Handle CSV 'None' strings)
-        s_col = item.get("source_col")
-        if s_col in (None, "None", "null", ""):
-            s_col = None
-
-        t_col = item["target_col"]
-
-        # 2. Resolve Polars type using the Canonical Mapper
-        target_ptype = TypeResolver.resolve_to_polars(
-            context.source_type, item["target_dtype"]
-        )
-
-        # 3. Handle Audit/Literal Columns (No physical source column)
-        if s_col is None and t_col.startswith("_"):
-            resolvers = {
-                "_created_at_ts": lambda: pl.lit(time.time()),
-                "_ingested_at": lambda: pl.lit(time.time()),
-                "_partition": lambda: pl.lit(context.partition_date),
-                "_run_id": lambda: pl.lit(context.run_id),
-                "_source": lambda: pl.lit(context.source_identifier),
-                "_source_host": lambda: pl.lit(context.source_identifier),
-            }
-
-            resolver = resolvers.get(t_col, lambda: pl.lit(None))
-            expr = resolver()
-
-            # Directly cast literal to target type and alias
-            exprs.append(expr.cast(target_ptype).alias(t_col))
-
-        else:
-            # 4. Standard Columns: Cast to String first for stability
-            expr = pl.col(str(s_col)).cast(pl.String)
-
-            # 5. Masking Logic
-            # Default to 'none' to prevent accidental hashing of non-PII columns like dates.
-            mask_val = str(item.get("masking", "none")).lower()
-            if mask_val == "hash":
-                expr = expr.hash(seed=42).cast(pl.String)
-            elif mask_val == "fixed":
-                expr = pl.lit("MASKED_VALUE")
-
-            # 6. Final Cast to target type (Int64, Date, etc.) and Rename
-            exprs.append(expr.cast(target_ptype).alias(t_col))
-
-    # Single pass selection: Renames, Casts, and Drops extra columns
+    exprs = [_build_column_expr(item, context) for item in context.schema]
     return df.select(exprs)
+
+
+def _build_column_expr(item: ColumnMapping, context: Any) -> pl.Expr:
+    """Build a single column transformation expression."""
+    # Audit/literal columns (system metadata)
+    if item.source_col is None and item.target_col.startswith("_"):
+        expr = _get_audit_literal(item.target_col, context)
+    else:
+        # Standard column with optional masking
+        expr = pl.col(str(item.source_col)).cast(pl.String)
+        # expr = _apply_masking(expr, item.masking)
+
+    # Apply final type and alias
+    target_polars_type = TypeResolver.resolve_to_polars(context.kind, item.target_type)
+    return expr.cast(target_polars_type).alias(item.target_col)
+
+
+def _get_audit_literal(col_name: str, context: Any) -> pl.Expr:
+    """Returns the appropriate audit literal expression for system columns."""
+    audit_map = {
+        "_created_at_ts": lambda: pl.lit(time.time()),
+        "_partition": lambda: pl.lit(str(getattr(context, "partition_date", None))),
+        "_run_id": lambda: pl.lit(context.run_id),
+        "_source": lambda: pl.lit(getattr(context, "resource", None)),
+    }
+    return audit_map.get(col_name, lambda: pl.lit(None))()
+
+
+# TODO
+def _apply_masking(expr: pl.Expr, strategy: str) -> pl.Expr:
+    """Apply PII masking strategy to an expression."""
+    strategy = strategy.lower()
+    if strategy == "hash":
+        return expr.hash(seed=42).cast(pl.String)
+    if strategy == "fixed":
+        return pl.lit("MASKED_VALUE")
+    return expr  # 'none' or unknown strategy

@@ -1,3 +1,5 @@
+"""Testing and validation CLI commands."""
+
 from pathlib import Path
 from typing import Annotated
 
@@ -14,423 +16,366 @@ from apps.ingestion.src.core.contexts import (
 from apps.ingestion.src.core.orchestrator.factory import assemble_runtime
 from apps.ingestion.src.extras.regression.regression import (
     RegressionRunner,
-    suggest_affected_datasets,
+    find_affected_datasets,
 )
 
 from .harness import ScenarioType
-from .scenarios import SimulationEngine
+from .scenarios import SimulationRunner
 
-test_app = typer.Typer(help="Testing and validation utilities.")
-regression_app = typer.Typer(help="Regression testing and impact analysis.")
+test_app = typer.Typer(help="Testing and validation utilities")
+regression_app = typer.Typer(help="Regression testing and impact analysis")
 test_app.add_typer(regression_app, name="regression")
 
 
+# =============================================================================
+# Configuration Validation
+# =============================================================================
+
+
 @test_app.command("config")
-def test_config(
-    path: Annotated[Path, typer.Argument(help="Path to a config.yaml or app.yaml")],
-):
-    """
-    Deep-dive schema audit for configuration files.
-    Validates syntax, msgspec Struct compatibility, and type strictness.
+def validate_config(
+    path: Annotated[Path, typer.Argument(help="Path to config.yaml or app.yaml")],
+) -> None:
+    """Audits the syntax and structural integrity of YAML configuration files.
 
     Args:
-        path: Physical path to the YAML configuration file.
+        path (Path): The filesystem path to the YAML configuration file.
 
     Raises:
         typer.Exit: If the file is missing or schema validation fails.
 
-    Decision: Structural vs. Model Audit.
-    Distinguishes between global app config (general dict validation)
-    and job config (strict msgspec Struct validation). This ensures
-    that critical job parameters are verified against the exact
-    models used by the execution engine.
+    Notes:
+        Decision: Model-Based Auditing.
+        We distinguish between 'app.yaml' (global infrastructure) and 'config.yaml'
+        (job-specific logic) to apply the correct msgspec validation model.
     """
     if not path.exists():
-        typer.secho(f"❌ Error: File not found at {path}", fg="red", err=True)
+        typer.secho(f"❌ File not found: {path}", fg="red")
         raise typer.Exit(1)
 
-    typer.echo(f"📋 Auditing schema: {path.name}...")
+    typer.echo(f"📋 Auditing: {path.name}")
 
     try:
-        # 1. Structural Integrity Check
-        # We use TaskContextBuilder to attempt a dry-run resolution.
-        # This verifies that the YAML keys map correctly to our internal models.
-        # Note: In a CI environment, we use a mock env to avoid needing real secrets.
-        # We load as a dict first to identify the configuration type
-        raw_bytes = path.read_bytes()
-        raw_data = msgspec.yaml.decode(raw_bytes, type=dict)
+        raw = msgspec.yaml.decode(path.read_bytes(), type=dict)
 
-        if "workspace_dir" in raw_data:
-            typer.echo("🔍 Identified as Global App Config.")
-            # msgspec validates based on keys present in the raw_data dictionary
+        if "workspace_dir" in raw:
+            typer.echo("🔍 Global app config detected")
         else:
-            typer.echo("🔍 Identified as Job Configuration.")
-            # Deep Audit: Direct decode from YAML to TaskContext Struct
-            # This is significantly faster and catches schema errors natively.
-            msgspec.yaml.decode(raw_bytes, type=TaskContext)
+            typer.echo("🔍 Job configuration detected")
+            msgspec.yaml.decode(path.read_bytes(), type=TaskContext)
 
-        typer.secho(f"✅ {path.name} is schema-compliant.", fg="green", bold=True)
+        typer.secho(f"✅ {path.name} is valid", fg="green", bold=True)
     except Exception as e:
-        typer.secho(f"💥 Schema Validation Failed: {e}", fg="red", bold=True)
+        typer.secho(f"💥 Validation failed: {e}", fg="red", bold=True)
         raise typer.Exit(1) from e
 
 
-@regression_app.command("run")
-def test_regression(
-    job_id: Annotated[str, typer.Option("--job-id", "-j", help="The job ID")],
-    dataset: Annotated[
-        str, typer.Option("--dataset", "-d", help="Specific dataset to compare")
-    ],
-    baseline_pex: Annotated[
-        Path | None,
-        typer.Option("--baseline-pex", help="Path to stable app.pex for shadow run"),
-    ] = None,
-    env: Annotated[
-        str, typer.Option("--env", help="Environment to resolve sinks from")
-    ] = "dev",
-    impact: Annotated[
-        bool,
-        typer.Option("--impact", help="Suggest and include affected peer datasets"),
-    ] = False,
-    reuse_baseline: Annotated[
-        bool,
-        typer.Option("--reuse-baseline", help="Skip baseline ingestion phase"),
-    ] = False,
-):
-    """
-    Executes a data regression audit comparing baseline and candidate datasets.
+# =============================================================================
+# Regression Testing
+# =============================================================================
 
-    Creates a shadow copy of the baseline data (optionally using a different PEX),
-    and performs a deep PK-based comparison to detect missing or drifted records.
+
+@regression_app.command("run")
+def run_regression(
+    partition_date: Annotated[str, typer.Argument(help="Partition date (YYYY-MM-DD)")],
+    job_id: Annotated[str, typer.Option("--job-id", "-j")],
+    dataset: Annotated[str, typer.Option("--dataset", "-d")],
+    baseline_pex: Annotated[Path | None, typer.Option("--baseline-pex")] = None,
+    env: Annotated[str, typer.Option("--env")] = "dev",
+    reuse_baseline: Annotated[bool, typer.Option("--reuse-baseline")] = False,
+) -> None:
+    """Triggers a regression audit comparing stable baseline data with local code.
 
     Args:
-        job_id: The job identifier.
-        dataset: The target dataset for comparison.
-        baseline_pex: Optional PEX for the baseline "Shadow" run.
-        env: Target environment.
-        impact: If True, suggests and includes affected peer datasets.
-        reuse_baseline: If True, skips the baseline ingestion phase.
+        partition_date (str): The date partition (YYYY-MM-DD) used to slice data.
+        job_id (str): The job identifier to test.
+        dataset (str): The specific dataset for comparison.
+        baseline_pex (Path | None): Optional path to a stable PEX binary for
+            baseline generation.
+        env (str): The environment context for the run.
+        reuse_baseline (bool): If True, skips the baseline generation phase and
+            uses existing tables.
 
-    Decision: Automated Shadow Comparisons.
-    Implements a high-level orchestration of the RegressionRunner.
-    The decision to include impact analysis within the run flow
-    allows users to expand their test suite dynamically based on
-    shared transformation logic discovery.
+    Notes:
+        Decision: Positional Argument Consistency.
+        Making `partition_date` a positional argument aligns with the core `run`
+        command UX, providing a familiar interface for developers targeting
+        specific temporal snapshots for debugging.
     """
-    datasets_to_run = [dataset]
-
-    if impact:
-        typer.secho("🔍 Scanning for affected peer datasets...", fg="cyan")
-        peers = suggest_affected_datasets(job_id, dataset, env=env)
-
-        if peers:
-            typer.echo("The following datasets share the same transformation logic:")
-            for p in peers:
-                typer.echo(f" - {p['job_id']}.{p['dataset_id']}")
-
-            if typer.confirm("Include these in the regression suite?"):
-                datasets_to_run.extend([p["dataset_id"] for p in peers])
-        else:
-            typer.echo("No affected peers found.")
-
-    typer.echo(
-        f"🚀 Initializing regression suite for {len(datasets_to_run)} datasets..."
-    )
+    datasets = [dataset]
+    typer.echo(f"🚀 Running regression on {len(datasets)} datasets...")
 
     runner = RegressionRunner(
         job_id=job_id,
-        dataset_ids=list(set(datasets_to_run)),
-        env_baseline=env,
-        env_candidate=env,
+        dataset_ids=list(set(datasets)),
+        env=env,
         baseline_pex_path=baseline_pex,
         skip_baseline_run=reuse_baseline,
     )
-    summary = runner.run()
-
-    typer.echo("\n" + "═" * 60)
-    typer.secho("📊 DATA REGRESSION SUMMARY", fg="magenta", bold=True)
-    typer.echo("═" * 60)
-    typer.echo(f"Job ID:      {summary['job_id']}")
-    typer.echo(f"Duration:    {summary['duration_sec']}s")
-    typer.echo(f"Datasets:    {summary['total_datasets']}")
-    typer.echo("-" * 60)
-
-    for ds_id, report in summary["details"].items():
-        typer.secho(f"🔹 Dataset: {ds_id}", fg="blue", bold=True)
-        if "error" in report:
-            typer.secho(f"  ❌ ERROR: {report['error']}", fg="red")
-            continue
-
-        counts = report.get("counts", {})
-        typer.echo(
-            f"  Rows:    Baseline={counts.get('ref_total')} | "
-            f"Candidate={counts.get('target_total')}"
-        )
-        typer.echo(f"  Missing: {counts.get('missing_in_target')} rows")
-        typer.echo(f"  Extra:   {counts.get('extra_in_target')} rows")
-
-        drift = report.get("drift", {}).get("mismatched_pk_samples", [])
-        if drift:
-            typer.secho(
-                f"  ⚠️ DRIFT: Detected in {len(drift)} sample records",
-                fg="yellow",
-            )
-            typer.echo(f"  Sample Mismatched PKs: {drift}")
-        else:
-            typer.secho("  ✅ DATA MATCHED: No drift detected", fg="green")
-        typer.echo("")
-
-    typer.echo("═" * 60)
+    summary = runner.run(partition_date)
+    summary.print_summary()
 
 
 @regression_app.command("impact")
-def test_impact(job_id: str, dataset: str, env: str = "local"):
-    """
-    Discovery tool to find other datasets sharing the same transformation logic.
+def show_impact(job_id: str, dataset: str, env: str = "local") -> None:
+    """Identifies peer datasets that share the same transformation logic.
 
     Args:
-        job_id: The job identifier.
-        dataset: The specific dataset.
-        env: Environment context.
+        job_id (str): The identifier of the job containing the target dataset.
+        dataset (str): The specific dataset ID to analyze.
+        env (str): The environment context to scan for peers. Defaults to "local".
 
-    Decision: Logic-Based Discovery.
-    Helps developers understand the blast radius of their changes
-    by finding peer datasets that utilize the same underlying
-    transformation code.
+    Raises:
+        typer.Exit: If the configuration cannot be parsed.
+
+    Notes:
+        Decision: Impact Analysis.
+        By analyzing shared transformation signatures (logic name + type), we
+        enable developers to perform "Static Impact Analysis." This prevents
+        localized fixes in one job from inadvertently breaking peer datasets
+        that rely on the same shared transformation strategy.
     """
-    peers = suggest_affected_datasets(job_id, dataset, env=env)
+    peers = find_affected_datasets(job_id, dataset, env=env)
+
     if not peers:
-        typer.echo("No affected peer datasets found.")
+        typer.echo("No affected datasets found")
         return
 
-    typer.echo(f"👥 Found {len(peers)} datasets sharing this transformation logic:")
+    typer.echo(f"👥 {len(peers)} affected datasets:")
     for p in peers:
-        typer.echo(f" - {p['job_id']}.{p['dataset_id']}")
+        typer.echo(f"  - {p['job_id']}.{p['dataset_id']}")
+
+
+# =============================================================================
+# Simulation Scenarios
+# =============================================================================
 
 
 @test_app.command("scenario")
-def test_scenario(
+def run_scenario(
     scenario: Annotated[
-        ScenarioType | None,
-        typer.Argument(
-            help="The simulation to execute. Leave empty to run all in order."
-        ),
+        ScenarioType | None, typer.Argument(help="Simulation to run (omit for batch)")
     ] = None,
-    job_id: Annotated[
-        str | None, typer.Option("--job-id", "-j", help="Job ID to use")
-    ] = None,
-    dataset: Annotated[
-        str | None, typer.Option("--dataset", "-d", help="Dataset ID to use")
-    ] = None,
-    automated_input: Annotated[
-        bool,
-        typer.Option(
-            "--yes", "-y", help="Provide automated input for interactive scenarios."
-        ),
+    job_id: Annotated[str | None, typer.Option("--job-id", "-j")] = None,
+    dataset: Annotated[str | None, typer.Option("--dataset", "-d")] = None,
+    auto: Annotated[
+        bool, typer.Option("--yes", "-y", help="Auto-confirm prompts")
     ] = False,
     env: str = "local",
-):
-    """
-    Runs complex multi-stage simulations to test the limits of the engine.
+) -> None:
+    """Entry point for executing chaos engineering and resilience scenarios.
 
     Args:
-        scenario: Specific simulation to run. If None, runs a batch.
-        job_id: Optional job ID to use as a target.
-        dataset: Optional dataset to use as a target.
-        automated_input: If True, bypasses interactive prompts.
-        env: Environment context.
+        scenario (ScenarioType | None): Simulation to run (omit for batch).
+        job_id (str | None): Target job ID for the simulation.
+        dataset (str | None): Target dataset ID for the simulation.
+        auto (bool): If True, bypasses interactive confirmation.
+        env (str): Target environment.
 
-    Decision: Batch Orchestration.
-    Provides a recommended order for resilience testing (Concurrency ->
-    Memory -> Zombie, etc.). This ensures that destructive tests like
-    KILL_DAEMON are run last, maintaining environment stability for
-    as long as possible.
+    Notes:
+        Decision: Hybrid Dispatch.
+        Supports both automated batch runs for CI and targeted single runs
+        for local debugging.
     """
     if scenario is None:
-        # Recommended Order: Concurrency -> Memory -> Resilience -> Recovery
-        # We exclude interactive ones (Latency, Disk Full)
-        # from the default batch to avoid hangs.
-        batch_order = [
-            ScenarioType.CONCURRENCY,
-            ScenarioType.MEMORY,
-            ScenarioType.ZOMBIE,
-            ScenarioType.RECOVERY,
-            ScenarioType.BLOCK,
-            ScenarioType.STRESS,
-            ScenarioType.SCHEMA_DRIFT,
-            ScenarioType.DATA_LOSS,
-            ScenarioType.RETENTION,
-            ScenarioType.KILL_DAEMON,  # Destructive, so run last
-        ]
-
-        if automated_input:
-            # Include interactive scenarios if automated input is enabled
-            batch_order.extend([ScenarioType.LATENCY, ScenarioType.DISK_FULL])
-
-        typer.secho(
-            "🚀 No scenario specified. Preparing full resilience batch run...",
-            fg="magenta",
-            bold=True,
-        )
-        typer.echo(f"Sequence: {' ➔ '.join([s.value for s in batch_order])}")
-
-        if not automated_input and not typer.confirm(
-            "This will stress local resources. Continue?"
-        ):
-            raise typer.Abort()
-
-        results = []
-        for s in batch_order:  # Pass automated_input to each simulation
-            outcome, reason = _run_simulation(s, job_id, dataset, env, automated_input)
-            results.append({"scenario": s, "outcome": outcome, "reason": reason})
-
-        # --- FINAL SUMMARY REPORT ---
-        typer.echo("\n" + "=" * 60)
-        typer.secho("📊 RESILIENCE BATCH SUMMARY", fg="magenta", bold=True)
-        typer.echo("=" * 60)
-
-        for res in results:
-            name = res["scenario"].value.upper().ljust(20)
-            if res["outcome"] is True:
-                typer.secho(f"{name} ✅ SUCCESS", fg="green")
-            elif res["outcome"] is False:
-                typer.secho(f"{name} ❌ FAILED ({res['reason']})", fg="red")
-            else:
-                typer.secho(f"{name} 🟡 SKIPPED ({res['reason']})", fg="yellow")
-
-        typer.echo("=" * 60)
-
-        # Exit with error if any test in the batch failed
-        if any(r["outcome"] is False for r in results):
-            raise typer.Exit(code=1)
-
+        _run_batch(auto, job_id, dataset, env)
     else:
-        outcome, reason = _run_simulation(
-            scenario, job_id, dataset, env, automated_input
-        )
-        if outcome is False:
-            typer.secho(f"\n❌ Scenario Failed: {reason}", fg="red", bold=True)
-            raise typer.Exit(code=1)
-        if outcome is None:
-            typer.secho(f"\n🟡 Scenario Skipped: {reason}", fg="yellow")
+        _run_single(scenario, job_id, dataset, auto, env)
 
 
-def _run_simulation(
+def _run_batch(auto: bool, job_id: str | None, dataset: str | None, env: str) -> None:
+    """Executes a predefined sequence of resilience and chaos engineering tests.
+
+    Args:
+        auto (bool): If True, skips manual confirmations and runs extended scenarios
+            (e.g., Disk Full).
+        job_id (str | None): The job identifier to use for the simulation.
+        dataset (str | None): The dataset identifier to use for the simulation.
+        env (str): The environment context (e.g., 'local').
+
+    Notes:
+        Decision: Curated Test Sequence.
+        The batch runs tests in an order that maximizes early discovery of
+        critical system failures.
+    """
+    order = [
+        ScenarioType.CONCURRENCY,
+        ScenarioType.MEMORY,
+        ScenarioType.ZOMBIE,
+        ScenarioType.RECOVERY,
+        ScenarioType.BLOCK,
+        ScenarioType.STRESS,
+        ScenarioType.SCHEMA_DRIFT,
+        ScenarioType.DATA_LOSS,
+        ScenarioType.RETENTION,
+        ScenarioType.KILL_DAEMON,
+    ]
+
+    if auto:
+        order.extend([ScenarioType.LATENCY, ScenarioType.DISK_FULL])
+
+    typer.secho("🚀 Running full resilience batch...", fg="magenta", bold=True)
+    typer.echo(f"Sequence: {' ➔ '.join([s.value for s in order])}")
+
+    if not auto and not typer.confirm("This will stress local resources. Continue?"):
+        raise typer.Abort()
+
+    results = []
+    for s in order:
+        outcome, reason = _execute_scenario(s, job_id, dataset, env, auto)
+        results.append({"scenario": s, "outcome": outcome, "reason": reason})
+
+    # Summary
+    typer.echo("\n" + "=" * 60)
+    typer.secho("📊 RESILIENCE BATCH SUMMARY", fg="magenta", bold=True)
+    typer.echo("=" * 60)
+
+    for r in results:
+        name = r["scenario"].value.upper().ljust(20)
+        if r["outcome"] is True:
+            typer.secho(f"{name} ✅ PASS", fg="green")
+        elif r["outcome"] is False:
+            typer.secho(f"{name} ❌ FAIL ({r['reason']})", fg="red")
+        else:
+            typer.secho(f"{name} 🟡 SKIP ({r['reason']})", fg="yellow")
+
+    if any(r["outcome"] is False for r in results):
+        raise typer.Exit(1)
+
+
+def _run_single(
+    scenario: ScenarioType,
+    job_id: str | None,
+    dataset: str | None,
+    auto: bool,
+    env: str,
+) -> None:
+    """Executes a specific simulation and handles terminal failures.
+
+    Args:
+        scenario (ScenarioType): The type of test to run.
+        job_id (str | None): The target job ID.
+        dataset (str | None): The target dataset ID.
+        auto (bool): Auto-input flag.
+        env (str): Target environment.
+
+    Notes:
+        Decision: Error Reporting.
+        Single runs provide detailed failure reasons to the console for
+        rapid iteration.
+    """
+    outcome, reason = _execute_scenario(scenario, job_id, dataset, env, auto)
+
+    if outcome is False:
+        typer.secho(f"\n❌ Scenario failed: {reason}", fg="red", bold=True)
+        raise typer.Exit(1)
+    if outcome is None:
+        typer.secho(f"\n🟡 Scenario skipped: {reason}", fg="yellow")
+
+
+def _execute_scenario(
     scenario: ScenarioType,
     job_id: str | None,
     dataset: str | None,
     env: str,
-    automated_input: bool = False,
+    auto: bool,
 ) -> tuple[bool | None, str | None]:
-    """Internal runner logic for a specific scenario.
+    """Initializes the runtime and dispatches a scenario to the SimulationRunner.
 
     Args:
-        scenario: The type of simulation to execute.
-        job_id: The target job ID.
-        dataset: The target dataset ID.
-        env: The environment.
-        automated_input: If True, disables interactive blocks.
+        scenario (ScenarioType): The chaos scenario type.
+        job_id (str | None): The job ID.
+        dataset (str | None): The dataset ID.
+        env (str): The environment.
+        auto (bool): Auto-input flag.
 
     Returns:
-        tuple: (success_status, failure_reason).
+        tuple[bool | None, str | None]: A pair of (success_status, failure_reason).
 
-    Decision: Runtime Re-provisioning.
-    Each simulation re-assembles the runtime to ensure a clean state.
-    The decision to block if a daemon is already running prevents
-    state corruption during chaos testing.
+    Raises:
+        typer.Exit: If the daemon is running and preventing the simulation.
+
+    Notes:
+        Decision: Runtime Isolation for Simulations.
+        Each scenario re-provisions the entire runtime to ensure chaos effects
+        (like disk pressure or ray worker cancellations) do not leak across
+        different tests in a batch.
     """
-    typer.secho(f"\n🎬 STARTING SCENARIO: {scenario.upper()}", fg="blue", bold=True)
+    typer.secho(f"\n🎬 STARTING: {scenario.value.upper()}", fg="blue", bold=True)
 
     builder = TaskContextBuilder(env=env)
     mode = ExecutionMode.DRY_RUN if state.get("dry_run") else ExecutionMode.NORMAL
     if state.get("debug"):
         mode = ExecutionMode.DEBUG
 
-    exec_ctx = builder.get_execution_context(mode=mode)
+    exec_ctx = builder.build_execution_context(mode=mode)
     runtime = assemble_runtime(exec_ctx, builder)
 
-    # 1. Safety Check: Prevent simulations from conflicting with an active daemon
-    # Exception: KILL_DAEMON specifically targets an active process
+    # Don't allow simulations with active daemon (except kill test)
     if exec_ctx.lock_file.exists() and scenario != ScenarioType.KILL_DAEMON:
-        msg = (
-            "🚨 ERROR: Orchestrator daemon is already running.\n"
-            "Running simulations alongside a live process can cause state corruption. "
-            "Stop the daemon first."
+        typer.secho(
+            "🚨 Daemon is running. Stop it before running simulations.", fg="red"
         )
-        typer.secho(msg, fg="red", err=True)
         raise typer.Exit(1)
 
-    # 2. Resolve Defaults
+    # Resolve defaults
     job_id = job_id or builder.app_settings.get("test.default_job")
     dataset = dataset or builder.app_settings.get("test.default_dataset")
 
-    engine = SimulationEngine(runtime, env=env)
-    return engine.run(scenario, job_id, dataset, automated_input)
+    runner = SimulationRunner(runtime, env=env)
+    return runner.run(scenario, job_id, dataset, auto)
+
+
+# =============================================================================
+# Data Inspection
+# =============================================================================
 
 
 @test_app.command("peek")
-def test_peek(
-    path: Annotated[Path, typer.Argument(help="Path to the Parquet file or directory")],
-    rows: Annotated[
-        int, typer.Option("--rows", "-n", help="Number of rows to show")
-    ] = 10,
-    tail: Annotated[
-        bool, typer.Option("--tail", help="Show the last N rows instead of the first")
-    ] = False,
-    sql: Annotated[
-        str | None,
-        typer.Option(
-            "--sql", "-s", help="SQL query to run (the table is named 'self')"
-        ),
-    ] = None,
-    schema: Annotated[
-        bool, typer.Option("--schema", help="Only show the schema/dtypes")
-    ] = False,
-):
-    """
-    Instantly inspect the contents or schema of a Parquet artifact.
+def peek_parquet(
+    path: Annotated[Path, typer.Argument(help="Path to Parquet file or directory")],
+    rows: Annotated[int, typer.Option("--rows", "-n")] = 10,
+    tail: Annotated[bool, typer.Option("--tail")] = False,
+    sql: Annotated[str | None, typer.Option("--sql", "-s")] = None,
+    show_schema: Annotated[bool, typer.Option("--schema")] = False,
+) -> None:
+    """Low-overhead utility to inspect the contents and schema of Parquet files.
 
     Args:
-        path: Path to the Parquet file or directory.
-        rows: Number of rows to show.
-        tail: Show the last N rows instead of the first.
-        sql: SQL query to run (the table is named 'self').
-        schema: Only show the schema/dtypes.
+        path (Path): Path to the parquet file or directory.
+        rows (int): Number of rows to display. Defaults to 10.
+        tail (bool): If True, shows the last N rows. Defaults to False.
+        sql (str | None): Optional SQL query to run against the file (via Polars).
+        show_schema (bool): If True, only prints the column types and returns.
 
-    Decision: SQL-Native Observability.
-    While re-running a stage is common, diagnostic visibility into intermediate
-    artifacts is crucial for debugging high-volume pipelines (50M+ rows) without
-    the overhead of a full notebook or execution run. This tool leverages
-    Polars' lazy scanning and SQL engine to minimize memory usage during inspection.
+    Raises:
+        typer.Exit: If the path does not exist or file parsing fails.
+
+    Notes:
+        Decision: Zero-Copy Inspection.
+        By using `pl.scan_parquet`, we can inspect multi-GB files without
+        loading them into memory, making the CLI safe to use on shared nodes.
     """
     if not path.exists():
-        typer.secho(f"❌ Error: Path not found: {path}", fg="red")
+        typer.secho(f"❌ Path not found: {path}", fg="red")
         raise typer.Exit(1)
 
     try:
-        # Decision: Use scan_parquet for large files to avoid OOM during inspection
         lf = pl.scan_parquet(path)
 
-        if schema:
-            typer.secho(f"📋 Schema for: {path.name}", fg="cyan", bold=True)
+        if show_schema:
+            typer.secho(f"📋 Schema: {path.name}", fg="cyan", bold=True)
             for col, dtype in lf.schema.items():
                 typer.echo(f"  {col.ljust(25)} {dtype}")
             return
 
         if sql:
-            # Decision: SQL-Native Observability.
-            # Using Polars SQLContext allows standard SQL syntax for filtering/selecting.
-            try:
-                ctx = pl.SQLContext(self=lf)
-                lf = ctx.execute(sql)
-            except Exception as sql_err:
-                typer.secho(f"❌ Invalid SQL Query: {sql_err}", fg="red")
-                raise typer.Exit(1) from sql_err
+            ctx = pl.SQLContext(self=lf)
+            lf = ctx.execute(sql)
 
         df = lf.tail(rows).collect() if tail else lf.head(rows).collect()
-
         typer.echo(df)
 
     except Exception as e:
-        typer.secho(f"💥 Failed to peek artifact: {e}", fg="red")
+        typer.secho(f"💥 Failed to peek: {e}", fg="red")
         raise typer.Exit(1) from e

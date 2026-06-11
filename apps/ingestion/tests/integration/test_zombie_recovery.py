@@ -15,7 +15,7 @@ def test_zombie_resurrection_on_worker_death(runtime, tmp_path):
     overrides = {
         "extract": {
             "source_type": "flat_file",
-            "source_identifier": str(tmp_path / "landing"),
+            "resource": str(tmp_path / "landing"),
         }
     }
     (tmp_path / "landing").mkdir()
@@ -66,7 +66,7 @@ def test_zombie_resurrection_on_worker_death(runtime, tmp_path):
 
     # Verify manifest reflects the state change
     task_path = runtime.orchestrator.state_store.resolve_task_path(run_id)
-    task = Task.from_folder(task_path, runtime.exec_ctx)
+    task = Task.from_path(task_path, runtime.exec_ctx)
     assert task.manifest.status == ExecutionStatus.PENDING
 
     # 6. Final Drive: Ensure it can be picked up again

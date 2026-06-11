@@ -15,7 +15,7 @@ def test_janitor_purges_expired_tasks(runtime, tmp_path):
     run_id = next(iter(run_ids))
 
     task_path = runtime.orchestrator.state_store.resolve_task_path(run_id)
-    task = Task.from_folder(task_path, runtime.exec_ctx)
+    task = Task.from_path(task_path, runtime.exec_ctx)
 
     # 2. Mock the system clock to be in the future
     # This makes the current (final) context appear expired to the Janitor
@@ -31,7 +31,7 @@ def test_janitor_purges_expired_tasks(runtime, tmp_path):
 
     # 5. Assertions
     # The task's folder should no longer exist
-    assert not task.folder.exists(), "Task folder was not purged by Janitor"
+    assert not task.workspace.path.exists(), "Task folder was not purged by Janitor"
 
     # Verify the data vault was also cleaned up recursively
     data_root = task.workspace.get_data_path("")

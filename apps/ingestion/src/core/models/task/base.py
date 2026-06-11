@@ -1,55 +1,55 @@
-from __future__ import annotations
+"""Task model representing a pipeline execution unit."""
 
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 
 import msgspec
-from apps.ingestion.src.core.models.stages.enums import StageName
+from apps.ingestion.src.core.models.stages.enums import Stage
+from apps.ingestion.src.core.models.stages.utils import get_stage_class
+from apps.ingestion.src.core.models.task.enums import TaskIdentity, TaskRef, TaskSignal
 from apps.ingestion.src.core.models.task.status import ExecutionStatus
-from apps.ingestion.src.utils.common import recursive_merge
+from libs.utils.dict import deep_merge
 from loguru import logger
 
-from .enums import TaskIdentity, TaskRef, TaskSignal
+from .manifest import TaskManifest
 from .workspace import TaskWorkspace
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.contexts.execution import ExecutionContext
     from apps.ingestion.src.core.contexts.task import TaskContext
     from apps.ingestion.src.core.models.stages.base import ExecutionStage
-    from apps.ingestion.src.core.models.task.manifest import TaskManifest
 
 LOG = logger
 
-# Constants to replace magic values
-RECOVERY_WORKER_ID = "recovery"
-TERMINATED_SIGNAL = "TERMINATED"
-MARKER_RETRYING = ".retrying"
-MARKER_BLOCKED = ".blocked"
-DEFAULT_NAMESPACE = "task"  # Default namespace for TaskRef
+# Constants
+RECOVERY_WORKER = "recovery"
+STOP_SIGNAL = "STOP"
+RETRY_MARKER = ".retrying"
+BLOCKED_MARKER = ".blocked"
 
 
 class Task:
-    _stage: ExecutionStage
+    """Pipeline execution task with workspace and state management."""
 
     def __init__(
         self,
-        task_ref: TaskRef,
+        task_ref: "TaskRef",
         worker_id: str,
-        exec_ctx: ExecutionContext,
+        exec_ctx: "ExecutionContext",
         workspace: TaskWorkspace | None = None,
-    ) -> None:
+    ):
         self.task_ref = task_ref
-        # Proxy attributes for easier access
+        self.worker_id = worker_id
+        self.exec_ctx = exec_ctx
+
+        # Convenience properties
         self.job_id = task_ref.identity.job_id
         self.dataset_id = task_ref.identity.dataset_id
         self.run_id = task_ref.identity.run_id
         self.partition_date = task_ref.identity.partition_date
-
-        self.worker_id = worker_id
-        self.exec_ctx = exec_ctx
         self.target_stage = task_ref.stage
 
-        # 1. Identity the workspace (The storage driver)
+        # Workspace management
         self.workspace = workspace or TaskWorkspace(
             job_id=self.job_id,
             dataset_id=self.dataset_id,
@@ -58,38 +58,53 @@ class Task:
             exec_ctx=self.exec_ctx,
         )
 
-        # Immediately set the current stage based on the target_stage from the engine
-        # This ensures the Task object knows what stage it's supposed to execute
-        from apps.ingestion.src.core.models.stages.utils import get_stage_class_by_name
+        # Lazy-loaded stage
+        self._stage: ExecutionStage | None = None
 
-        self._stage = get_stage_class_by_name(self.target_stage)
+    @property
+    def stage(self) -> "ExecutionStage":
+        """Get the current execution stage."""
+        if not self._stage:
+            self._stage = get_stage_class(self.target_stage)
+        return self._stage
+
+    @property
+    def manifest(self) -> TaskManifest:
+        """Load current manifest from disk."""
+        return self.workspace.load_manifest()
+
+    @property
+    def context(self) -> "TaskContext":
+        """Load task context from config file."""
+        from apps.ingestion.src.core.contexts.task import load_context
+
+        return load_context(self.workspace.path)
+
+    @property
+    def id(self) -> str:
+        """Unique task identifier."""
+        return self.task_ref.task_key
 
     @classmethod
-    def from_folder(
+    def from_path(
         cls,
-        folder_path: Path,
-        exec_ctx: ExecutionContext,
-        target_stage: StageName | None = None,
+        folder: Path,
+        exec_ctx: "ExecutionContext",
+        target_stage: str | None = None,
     ) -> Self:
-        """
-        Factory to rehydrate a Task. If a target_stage is provided,
-        it performs an immediate check-in.
-        """
-        active_path = Path(folder_path)
-        run_id = active_path.name
+        """Rehydrate task from workspace folder."""
+        run_id = folder.name
+        parts = folder.parent.name.split(":")
 
-        # Folder pattern: active/{job_id}:{dataset_id}:{partition_date}/{run_id}
-        identifier_parts = active_path.parent.name.split(":")
+        from .enums import TaskRef
 
         identity = TaskIdentity(
-            job_id=identifier_parts[0],
-            dataset_id=identifier_parts[1],
-            partition_date=identifier_parts[2],
+            job_id=parts[0],
+            dataset_id=parts[1],
+            partition_date=parts[2],
             run_id=run_id,
         )
 
-        # Re-hydrate manifest to find the correct target stage if not provided
-        # Since we have the path, we can read it directly
         workspace = TaskWorkspace(
             job_id=identity.job_id,
             dataset_id=identity.dataset_id,
@@ -97,136 +112,34 @@ class Task:
             run_id=run_id,
             exec_ctx=exec_ctx,
         )
-        m = workspace.read_manifest()
-        current_stage = m.current_stage or (
-            target_stage.label if target_stage else StageName.START.label
-        )
 
-        LOG.debug(
-            "Task rehydrated from folder",
-            run_id=run_id,
-            manifest_stage=m.current_stage,
-            resolved_stage=current_stage,
-        )
+        manifest = workspace.load_manifest()
+        current = manifest.current_stage or target_stage or Stage.START.value
 
-        # Reconstruct identity (Ref)
         task_ref = TaskRef(
-            namespace=DEFAULT_NAMESPACE,
+            namespace="task",
             status=ExecutionStatus.UNKNOWN,
-            stage=current_stage,
+            stage=current,
             identity=identity,
         )
 
-        return cls(
-            task_ref=task_ref,
-            worker_id=RECOVERY_WORKER_ID,
-            exec_ctx=exec_ctx,
-            workspace=workspace,
-        )
+        LOG.debug(f"Rehydrated task {run_id} at stage {current}")
+        return cls(task_ref, RECOVERY_WORKER, exec_ctx, workspace)
 
-    @property
-    def id(self) -> str:
-        return self.task_ref.identifier
-
-    @property
-    def manifest(self) -> TaskManifest:
-        return self.workspace.read_manifest()
-
-    @property
-    def is_dispatched(self) -> bool:
-        """Returns True if the task has been handed off to a worker."""
-        return self.manifest.status in ExecutionStatus.dispatched_statuses()
-
-    @property
-    def context(self) -> TaskContext:
-        """
-        Finds the config file and returns a hydrated TaskContext object.
-        Does not store the object in self to save RAM.
-        """
-        # Local import to prevent circular dependency
-        from apps.ingestion.src.core.contexts import TaskContext
-
-        if not self.workspace.config_path.exists():
-            raise FileNotFoundError(
-                f"Config for task {self.id} not found at {self.workspace.config_path}"
-            )
-
-        with self.workspace.config_path.open(mode="rb") as f:
-            return msgspec.json.decode(f.read(), type=TaskContext)
-
-    @property
-    def stage(self) -> ExecutionStage:
-        from apps.ingestion.src.core.models.stages.utils import get_stage_class_by_name
-
-        if not hasattr(self, "_stage") or not self._stage:
-            # This should ideally not be reached if _stage is set in __init__
-            LOG.warning(
-                "Task._stage not set, falling back to manifest/start",
-                job_id=self.job_id,
-                run_id=self.run_id,
-            )
-            stage = self.manifest.current_stage or StageName.START.label
-            self._stage = get_stage_class_by_name(stage)
-        return self._stage
-
-    def set_stage(self, stage: ExecutionStage) -> None:
-        self._stage = stage
-
-    def execute(self) -> str:
-        """Execute the current job stage.
-
-        :raises ValueError: If the job is not initialized.
-        """
-        log = LOG.bind(job_id=self.job_id, run_id=self.run_id, stage=self.stage.name)
-
-        # In 'Pod' Scaling, this is the 'Entry Point' of the isolated process.
-        # If this process OOMs, Ray will catch the SIGKILL, but the
-        # Orchestrator will stay alive because it is not sharing memory
-        # with this code.
-        log.info(
-            "Executing {stage} stage logic",
-            stage=self.stage.name,
-            isolation_mode="RayActor",
-        )
-        try:
-            next_stage_label = self.stage.execute(task=self)
-
-            # Safety Check: If the manifest status is no longer RUNNING, stop the chain
-            if self.manifest.status not in [
-                ExecutionStatus.RUNNING,
-                ExecutionStatus.PENDING,
-            ]:
-                return TERMINATED_SIGNAL
-            return next_stage_label
-        except Exception as e:
-            # The stage finalize already handled the move/manifest update
-            raise e
-
-    def update_manifest(self, updates: dict[str, Any] | None = None) -> None:
-        """
-        Performs an atomic partial update directly to the disk.
-        """
-        updates = updates or {}
+    def update_manifest(self, updates: dict[str, Any]) -> None:
+        """Atomic update of manifest on disk."""
         data = msgspec.to_builtins(self.manifest)
+        merged = deep_merge(data, updates)
+        self.workspace.save_manifest(merged)
 
-        # 2. Apply updates using a recursive deep merge
-        recursive_merge(data, updates)
-        LOG.debug("Updating manifest", run_id=self.run_id, updates=updates)
-        self.workspace.write_manifest(data)
-
-    def check_in(self, stage_name: str) -> None:
-        """
-        The 'Step Check-in': Mark the start of a process on disk immediately.
-        Ensures the folder reflects the current stage if a crash/outage occurs.
-        """
+    def check_in(self, stage: str) -> None:
+        """Mark stage start in manifest."""
         updates: dict[str, Any] = {
-            "current_stage": stage_name,
-            "status": ExecutionStatus.RUNNING,
+            "current_stage": stage,
+            "status": ExecutionStatus.RUNNING.value,
         }
 
-        # If the manifest doesn't exist yet, we perform a "Fat Initial Update"
-        # that includes all the required header fields in one go.
-        if not self.workspace.manifest_path.exists():
+        if not self.workspace.manifest_file.exists():
             updates.update(
                 {
                     "job_id": self.job_id,
@@ -237,34 +150,41 @@ class Task:
             )
 
         self.update_manifest(updates)
-        LOG.debug("Task checked in to stage", run_id=self.run_id, stage=stage_name)
+        LOG.debug(f"Checked into stage: {stage} (run_id: {self.run_id})")
 
-    def move_to_folder(self, stage: str) -> None:
-        """
-        Physically relocates the metadata folder (active -> HOLD/FAILED).
-        Because data is in /data/ vault via symlinks, this move is instant.
-        """
-        self.workspace.relocate(stage)
+    def move_to(self, folder: str) -> None:
+        """Move workspace to another folder (e.g., FAILED)."""
+        self.workspace.relocate(folder)
 
-    def request_status_sync(self, signal: TaskSignal = TaskSignal.SYNC) -> None:
-        """
-        Drops a signal file to notify the Orchestrator of a state change.
-        """
+    def send_signal(self, signal: "TaskSignal") -> None:
+        """Send signal file to orchestrator."""
         ext = f".{signal.value}"
-        signal_filename = self.exec_ctx.get_signal_name(self.task_ref.identity, ext)
+        filename = self.exec_ctx.get_signal_name(self.task_ref.identity, ext)
+        self.workspace.send_signal(filename)
 
-        self.workspace.drop_signal(signal_filename)
+        if signal == "retry":
+            self.workspace.create_marker(RETRY_MARKER)
 
-        if signal == TaskSignal.RETRY:
-            self.workspace.touch_marker(MARKER_RETRYING)
+    def execute(self) -> str:
+        """Execute current stage."""
+        LOG.info(f"Executing stage: {self.stage.name}")
 
-    def purge_metadata(self) -> None:
-        self.workspace.purge(include_vaults=False)
+        try:
+            next_stage = self.stage.execute(self)
 
-    def purge_data_vaults(self, stages: list[str] | None = None) -> None:
-        # Placeholder for targeted vault cleaning if workspace.purge is too broad
-        pass
+            # Stop if no longer running
+            if self.manifest.status not in [
+                ExecutionStatus.RUNNING,
+                ExecutionStatus.PENDING,
+            ]:
+                return STOP_SIGNAL
+
+            return next_stage
+
+        except Exception:
+            LOG.exception(f"Stage {self.stage.name} failed")
+            raise
 
     def purge(self) -> None:
-        """Full purge of metadata and all data vaults."""
-        self.workspace.purge(include_vaults=True)
+        """Delete all task data (metadata and artifacts)."""
+        self.workspace.delete(include_data=True)

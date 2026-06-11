@@ -1,109 +1,111 @@
+"""Publish stage for promoting staged data to production."""
+
 from typing import TYPE_CHECKING
 
-import msgspec
 from apps.ingestion.src.core.models.task.manifest import PublishPayload
-from apps.ingestion.src.core.strategies.load.load import LoadContext, Loader
-from apps.ingestion.src.services.base import Sink
+from apps.ingestion.src.core.strategies.load.load import LoadContext, LoaderFactory
 from apps.ingestion.src.services.factory import ServiceFactory
-from apps.ingestion.src.utils.exceptions import RewindTask
-from libs.utils.dates import get_current_timestamp
+from apps.ingestion.src.utils.exceptions import RollbackRequired
+from libs.utils.dates import current_timestamp
 from loguru import logger
 
 from .base import ExecutionStage
-from .enums import StageName
+from .enums import Stage
+from .utils import stage
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.task import Task
 
-
 LOG = logger
 
 
+@stage(Stage.PUBLISH.value)
 class PublishStage(ExecutionStage):
-    """
-    Decision: The PublishStep makes the data 'Public'.
-    We use the context to identify the target 'Prod' table vs 'Staging' table.
+    """Stage for promoting staged data to production.
+
+    This stage handles the "Promotion" phase of the load strategy, moving data
+    from a temporary staging area (created in the WRITE stage) to the final
+    production destination.
     """
 
-    name = StageName.PUBLISH.label
-    manifest: PublishPayload
-    service: Sink
+    requires_disk_space: bool = False
 
     def pre_flight(self, task: "Task") -> None:
-        """
-        Bypass global pre-flight checks (like disk pressure).
-        Publishing is a priority stage to reclaim resources.
-        """
-        # 1. Initialize Service & Check Connectivity
-        # (This logic is the 'new' pre-flight abstraction)
-        task_ctx = task.context
-        self.service = ServiceFactory.get_sink(
-            task_ctx.load.sink_type, **task_ctx.load.sink_config
-        )
+        """Initialize sink and verify staging artifact exists.
 
-        # 2. Check Staging Artifact (Self-Healing Rewind)
-        write_meta = task.manifest.write
-        if not write_meta or not write_meta.staging_artifact:
-            LOG.warning("Missing write metadata. Rewinding to WRITE stage.")
-            raise RewindTask(
-                target_stage=StageName.WRITE.label,
-                reason="Staging artifact missing for publication.",
-            )
+        Args:
+            task (Task): The current task instance being executed.
 
-    def execute(self, task: "Task"):
-        start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
+        Raises:
+            RollbackRequired: If the WRITE stage manifest or the staging
+                artifact identifier is missing.
+
+        Notes:
+            Decision: Strict Staging Dependency.
+            We explicitly check for the `staging_artifact` here to prevent
+            the loader from attempting a promotion on a non-existent or
+            corrupted staging state. If missing, we rewind to WRITE to
+            re-attempt the staging process.
+        """
+        super().pre_flight(task)
+        self.sink = ServiceFactory.get_sink(self.config.type, **self.config.service)
+
+        # Verify write metadata exists
+        self.write = task.manifest.write
+        if not self.write or not self.write.staging_artifact:
+            LOG.warning("Missing staging artifact, rewinding to WRITE")
+            raise RollbackRequired(Stage.WRITE.value, "Staging artifact missing")
+
+    def execute(self, task: "Task") -> str:
+        """Promote staged data to production.
+
+        Args:
+            task (Task): The task instance containing the manifest and context.
+
+        Returns:
+            str: The name of the next stage (usually ARCHIVE) or 'FINISH'.
+
+        Raises:
+            RollbackRequired: If the write manifest is unexpectedly None.
+            Exception: Propagates any underlying database or promotion errors.
+
+        Notes:
+            Decision: Atomic Promotion.
+            We use the `loader.promote` method to ensure that the data swap
+            is handled according to the specific sink's best practices
+            (e.g., partition exchange, atomic renames, or transactional deletes).
+        """
+        start_ts = current_timestamp(naive=True).isoformat(sep=" ")
+        if self.write is None:
+            raise RollbackRequired(Stage.WRITE.value, "Write metadata missing")
 
         try:
-            task_ctx = task.context
-            write_meta = task.manifest.write
-            if not write_meta:
-                LOG.error("Write metadata is required for Publish stage.")
-                raise ValueError("Write metadata is required for Publish stage.")
-
-            # 2. Get the behavioral Strategy
-            loader = Loader()
-
-            # 3. Create Context
-            context = LoadContext(
-                sink_identifier=task_ctx.load.sink_identifier,
-                partition_col=task_ctx.load.partition_col,
-                partition_value=task_ctx.load.partition_value,
-                expected_count=write_meta.rows_inserted,
+            loader = LoaderFactory.get_loader(self.config.type)
+            load_ctx = LoadContext(
+                target=self.config.destination,
+                partition_by=self.config.partition_by,
+                partition_value=self.config.partition_value,
+                expected_count=self.write.write_count,
             )
 
-            LOG.info(
-                "Promoting to production",
-                stage=self.name,
-                target=task_ctx.load.sink_identifier,
-                staging=write_meta.staging_artifact,
-            )
+            LOG.info(f"Promoting to {self.config.destination}")
 
-            # 2. FINISH THE JOB
-            # Move from staging to production
             loader.promote(
-                service=self.service,
-                staging_identifier=write_meta.staging_artifact,
-                load_ctx=context,
+                sink=self.sink,
+                staging_id=self.write.staging_artifact,
+                context=load_ctx,
             )
-
-            # 3. PAYLOAD: The 'Success Receipt'
-            # Get count from previous write stage if available
-            final_count = 0
-            if task.manifest.write:
-                final_count = task.manifest.write.rows_inserted
 
             payload = PublishPayload(
-                final_destination=task_ctx.load.sink_identifier,
-                final_count=final_count,
-                start_timestamp=start_ts,
+                final_path=self.config.destination,
+                final_count=self.write.write_count,
+                start_time=start_ts,
             )
 
-            self.finalize(task, results=msgspec.to_builtins(payload))
-            LOG.info(
-                "Publish complete", stage=self.name, table=task_ctx.load.sink_identifier
-            )
-            return str(self._transit(task))
+            self.checkpoint(task, payload=payload)
+            LOG.info(f"Publish complete: {self.config.destination}")
+            return self._next_stage()
 
         except Exception as e:
-            self.finalize(task, exception=e)
+            self.checkpoint(task, error=e)
             raise

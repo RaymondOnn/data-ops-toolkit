@@ -44,14 +44,16 @@ class PostgresClient(DBClient):
         self,
         table_name: str,
         num_workers: int = 10,
-        filter_sql: str | None = None,
+        filter_condition: str | None = None,
     ) -> set[str]:
         # Physical partitioning using Postgres hidden ctid column
-        filter_sql = filter_sql.replace("WHERE", "") if filter_sql else ""
+        filter_condition = (
+            filter_condition.replace("WHERE", "") if filter_condition else ""
+        )
         return {
             f"""
             SELECT * FROM {table_name}
-            WHERE {filter_sql}
+            WHERE {filter_condition}
             AND abs(hashint4(ctid::text::hashint4)) % {num_workers} = {i}
             """
             for i in range(num_workers)
@@ -73,13 +75,14 @@ class PostgresClient(DBClient):
                     )
 
                 # KEY STEP: Reorder columns to match the DB schema exactly
-                # This prevents "column mismatch" errors if Parquet order differs from DB
+                # This prevents "column mismatch" errors if
+                # Parquet order differs from DB
                 yield batch.select(target_columns)
 
         audit_values = audit_values or {}
         dataset = ds.dataset(source_dir, format=file_ext.casefold())
         with self.get_connection() as conn, conn.cursor() as cur:
-            db_schema = conn.adbc_get_table_schema("target_table")
+            db_schema = conn.adbc_get_table_schema("target_location")
             target_columns = db_schema.names
 
             # Stream the dataset to the table

@@ -1,40 +1,48 @@
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from apps.ingestion.src.core.contexts import ExecutionContext
-from apps.ingestion.src.core.models.stages.enums import StageName
+from apps.ingestion.src.core.models.stages.enums import Stage
 from apps.ingestion.src.core.models.task import ExecutionStatus
 from apps.ingestion.src.core.orchestrator.contracts.policies import (
     AdmissionPolicy,
     MaintenancePolicy,
 )
-from apps.ingestion.src.core.orchestrator.enums import JobUpdate, TaskMetadata, TaskRef
+from apps.ingestion.src.core.orchestrator.enums import TaskMetadata, TaskRef, TaskUpdate
 from apps.ingestion.src.services.factory import ServiceFactory
-from apps.ingestion.src.services.registry import ServiceRegistry
+from apps.ingestion.src.services.monitor import ServiceMonitor
 from apps.ingestion.src.utils.constants import (
     CACHE_TASK_NAMESPACE,
     STRIP_TZ_FOR_DB,
 )
-from apps.ingestion.src.utils.dates import get_end_of_day_ts
+from apps.ingestion.src.utils.dates import end_of_day_timestamp
 from filelock import FileLock
 from libs.cache.factory import get_cache
-from libs.utils.dates import get_current_timestamp
+from libs.utils.dates import current_timestamp
 from loguru import logger
 
 from .compute import Compute
-from .state import StateStore
+from .state import StateHub
 
 if TYPE_CHECKING:
     import ray
 
 LOG = logger
-STAGES_PRIORITY: dict[StageName, int] = {
-    StageName.ARCHIVE: 100,
-    StageName.PUBLISH: 80,
-    StageName.WRITE: 60,
-    StageName.TRANSFORM: 40,
-    StageName.EXTRACT: 20,
-    StageName.START: 10,
+STAGES_PRIORITY: dict[Stage, int] = {
+    Stage.ARCHIVE: 100,
+    Stage.PUBLISH: 80,
+    Stage.WRITE: 60,
+    Stage.TRANSFORM: 40,
+    Stage.EXTRACT: 20,
+    Stage.START: 10,
+}
+
+# Internal weights to prioritize status within the same stage.
+STATUS_WEIGHTS: dict[ExecutionStatus, int] = {
+    ExecutionStatus.RETRY: 5,  # Highest: Finish what we started
+    ExecutionStatus.BLOCKED: 3,  # High: Clear backlogs after service recovery
+    ExecutionStatus.WAITING: 0,  # Baseline: New work
 }
 
 
@@ -58,7 +66,7 @@ class TaskManager:
     def __init__(
         self,
         exec_ctx: ExecutionContext,
-        state_store: StateStore,
+        state_store: StateHub,
         admission_policy: AdmissionPolicy,
         maintenance_policy: MaintenancePolicy,
         cache_dir: str = ".cache/ingestion",
@@ -86,10 +94,8 @@ class TaskManager:
 
         # 2. Initialize the Global Registry (Diskcache)
         # This ensures the shared cache path exists for all Ray workers
-        ServiceRegistry.configure(
-            self.exec_ctx.workspace_dir, self.exec_ctx.cache_config
-        )
-        self.registry = ServiceRegistry()
+        ServiceMonitor.setup(self.exec_ctx.workspace_dir, self.exec_ctx.cache_config)
+        self.registry = ServiceMonitor()
 
         # CRITICAL: Create cache directory in the parent process BEFORE
         # spinning up Ray workers to prevent SQLite race conditions for diskcache.
@@ -113,7 +119,7 @@ class TaskManager:
         self._last_probe_ts: float = 0
 
         try:
-            self.exec_ctx.check_serializability()
+            self.exec_ctx.verify_serializable()
         except Exception as e:
             # If the context is not serializable, we cannot proceed with Ray workers.
             # Log the error and raise an exception to prevent silent failures.
@@ -125,20 +131,20 @@ class TaskManager:
         # Local tracker for active Ray tasks (ObjectRef -> task_key)
         self._active_tasks: dict[ray.ObjectRef, str] = {}
 
-    def _get_midnight_ts(self) -> float:
-        """Calculates the Unix timestamp for 23:59:59 of the current day.
+    # def _get_midnight_ts(self) -> float:
+    #     """Calculates the Unix timestamp for 23:59:59 of the current day.
 
-        Decision: Temporal Boundaries.
-        Used to reconcile 'stuck' BLOCKED tasks. If a service outage lasts
-        until midnight, we fail the tasks to prevent them from contaminating
-        the next day's schedule.
+    #     Decision: Temporal Boundaries.
+    #     Used to reconcile 'stuck' BLOCKED tasks. If a service outage lasts
+    #     until midnight, we fail the tasks to prevent them from contaminating
+    #     the next day's schedule.
 
-        Returns:
-            float: Unix timestamp for 23:59:59.
-        """
-        now = get_current_timestamp(strip_tz=True)
-        midnight = now.replace(hour=23, minute=59, second=59, microsecond=0)
-        return midnight.timestamp()
+    #     Returns:
+    #         float: Unix timestamp for 23:59:59.
+    #     """
+    #     now = current_timestamp(naive=True)
+    #     midnight = now.replace(hour=23, minute=59, second=59, microsecond=0)
+    #     return midnight.timestamp()
 
     @property
     def active_tasks(self) -> dict:
@@ -164,7 +170,7 @@ class TaskManager:
             self._compute = Compute(self.exec_ctx)
         return self._compute
 
-    def queue_tasks(self, task_ref: TaskRef, config_file_path: str) -> TaskRef | None:
+    def enqueue(self, task_ref: TaskRef, config_file_path: str) -> TaskRef | None:
         """Validates and adds a task to the persistent queue.
 
         Args:
@@ -180,29 +186,31 @@ class TaskManager:
         meta = TaskMetadata.from_ref(
             task_ref,
             config_file_path,
-            expires_at=get_end_of_day_ts() if is_snapshot else None,
+            expires_at=end_of_day_timestamp() if is_snapshot else None,
         )
-        if self.admission_policy.validate_and_queue(
-            self.cache, self.lock, task_ref, meta
-        ):
+        if self.admission_policy.admit(self.cache, self.lock, task_ref, meta):
             LOG.info(
                 "Queued Task", run_id=task_ref.identity.run_id, stage=task_ref.stage
             )
             return task_ref
         return None
 
-    def _process_tasks(self) -> None:
-        """Main dispatch loop: reconciles status and spawns workers.
+    def dispatch(self) -> None:
+        """Main dispatch loop: reconciles resource status and spawns workers.
 
         Decision: Priority Dispatch.
         We score tasks based on their Stage (e.g., ARCHIVE before EXTRACT)
         to ensure the system clears its local disk backlog before
         ingesting more data.
+
+        Decision: Tactical Reclamation.
+        We call cleanup_tasks at the start of every tick. This ensures that
+        ObjectRefs for finished tasks are released immediately, giving
+        the TaskManager an accurate view of available compute slots
+        before it attempts a new dispatch.
         """
-        # Delegate resource cleanup to maintenance policy logic as well
-        self.maintenance_policy._cleanup_finished_tasks(
-            self._active_tasks, self.compute
-        )
+        # Delegate resource cleanup to maintenance policy
+        self.maintenance_policy.cleanup_tasks(self._active_tasks, self.compute)
 
         if self.exec_ctx.stop_at_ts is not None:
             return
@@ -217,7 +225,8 @@ class TaskManager:
             ExecutionStatus.RETRY,
             ExecutionStatus.BLOCKED,
         }
-        now_ts, midnight_ts = time.time(), self._get_midnight_ts()
+        # now_ts, midnight_ts = time.time(), self._get_midnight_ts()
+        now_ts = time.time()
         scored_keys = []
         for status in valid_statuses:
             for k in self.cache.iterkeys(
@@ -225,13 +234,18 @@ class TaskManager:
             ):
                 try:
                     ref = TaskRef.from_str(k)
-                    priority = STAGES_PRIORITY.get(StageName.from_label(ref.stage), 0)
+                    # Calculate priority: Stage Base + Status Bonus
+                    base_priority = STAGES_PRIORITY.get(Stage(ref.stage), 0)
+                    status_bonus = STATUS_WEIGHTS.get(status, 0)
+                    priority = base_priority + status_bonus
+
                     scored_keys.append((priority, k))
                 except ValueError:
                     continue
 
         candidate_keys = [k for _, k in sorted(scored_keys, reverse=True)]
         dispatch_count = 0
+        deferred_count = 0
 
         for key in candidate_keys:
             task_ref = TaskRef.from_str(key)
@@ -239,35 +253,32 @@ class TaskManager:
             if not task_meta:
                 continue
 
-            # Decision: Apply 'End of Day' failure to BLOCKED tasks.
-            # If a service stays down past midnight, we transition the task
-            # to FAILED so the Janitor can quarantine it for SRE review.
-            # Decision: remarks are sent to JobUpdate, not TaskMetadata (cache).
-            if task_ref.status == ExecutionStatus.BLOCKED and now_ts >= midnight_ts:
-                LOG.error(
-                    "Failing blocked task: outage exceeded midnight threshold.",
-                    run_id=task_ref.identity.run_id,
-                    service=task_meta.blocked_by,
-                )
-                remark = "Failed: Service outage persisted past midnight."
-                self.state_store.update_run(
-                    task_ref.identity.run_id,
-                    JobUpdate(
-                        JOB_ID=task_meta.job_id,
-                        DATASET_ID=task_meta.dataset_id,
-                        PARTITION_DATE=task_meta.partition_date,
-                        JOB_STATUS=ExecutionStatus.FAILED.value,
-                        REMARKS=remark,
-                        LAST_UPDATED_AT_TS_LC=get_current_timestamp(
-                            strip_tz=STRIP_TZ_FOR_DB
-                        ).isoformat(sep=" "),
-                    ),
-                )
-                self.cache.pop(key, None)
-                failed_key = task_ref.build(status=ExecutionStatus.FAILED)
-                task_meta.status = ExecutionStatus.FAILED.value
-                self.cache[failed_key] = task_meta
-                continue
+            # # Once past midnight, BLOCKED tasks transition to FAILED
+            # if task_ref.status == ExecutionStatus.BLOCKED and now_ts >= midnight_ts:
+            #     LOG.error(
+            #         "Failing blocked task: outage exceeded midnight threshold.",
+            #         run_id=task_ref.identity.run_id,
+            #         service=task_meta.blocked_by,
+            #     )
+            #     remark = "Failed: Service outage persisted past midnight."
+            #     self.state_store.update_task(
+            #         task_ref.identity.run_id,
+            #         TaskUpdate(
+            #             JOB_ID=task_meta.job_id,
+            #             DATASET_ID=task_meta.dataset_id,
+            #             PARTITION_DATE=task_meta.partition_date,
+            #             JOB_STATUS=ExecutionStatus.FAILED.value,
+            #             REMARKS=remark,
+            #             LAST_UPDATED_AT_TS_LC=current_timestamp(
+            #                 naive=STRIP_TZ_FOR_DB
+            #             ).isoformat(sep=" "),
+            #         ),
+            #     )
+            #     self.cache.pop(key, None)
+            #     failed_key = task_ref.build(status=ExecutionStatus.FAILED)
+            #     task_meta.status = ExecutionStatus.FAILED.value
+            #     self.cache[failed_key] = task_meta
+            #     continue
 
             ready = (
                 (task_ref.status == ExecutionStatus.WAITING)
@@ -277,7 +288,7 @@ class TaskManager:
                 )
                 or (
                     task_ref.status == ExecutionStatus.BLOCKED
-                    and ServiceRegistry.is_healthy(task_meta.blocked_by or "")
+                    and ServiceMonitor.is_healthy(task_meta.blocked_by or "")
                     and now_ts >= task_meta.last_hb
                 )
             )
@@ -285,30 +296,36 @@ class TaskManager:
             if not ready:
                 continue
 
+            # Prepare state update
             task_meta.status = ExecutionStatus.DISPATCHED.value
             task_meta.last_hb = time.time()
             new_key = task_ref.build(status=ExecutionStatus.DISPATCHED)
+
+            # We must update the cache BEFORE spawning the worker. Otherwise,
+            # a fast-starting worker will look for its key before the manager
+            # has finished writing it.
+            with self.lock:
+                self.cache.pop(key, None)
+                self.cache[new_key] = task_meta
+
             ref = self.compute.spawn_worker(
-                stage=StageName.from_label(task_ref.stage), key=new_key
+                stage=Stage(task_ref.stage), task_key=new_key
             )
 
             if ref:
-                self.state_store.update_run(
+                self.state_store.update_task(
                     task_ref.identity.run_id,
-                    JobUpdate(
+                    TaskUpdate(
                         JOB_ID=task_meta.job_id,
                         DATASET_ID=task_meta.dataset_id,
                         PARTITION_DATE=task_meta.partition_date,
                         JOB_STATUS=task_meta.status,
                         CURRENT_STAGE=task_ref.stage,
-                        LAST_UPDATED_AT_TS_LC=get_current_timestamp(
-                            strip_tz=STRIP_TZ_FOR_DB
+                        LAST_UPDATED_AT_TS_LC=current_timestamp(
+                            naive=STRIP_TZ_FOR_DB
                         ).isoformat(sep=" "),
                     ),
                 )
-                with self.lock:
-                    self.cache.pop(key, None)
-                    self.cache[new_key] = task_meta
                 self._active_tasks[ref] = new_key
                 dispatch_count += 1
                 LOG.success(
@@ -317,6 +334,20 @@ class TaskManager:
                     run_id=task_ref.identity.run_id,
                     stage=task_ref.stage,
                 )
+            else:
+                # Rollback cache if spawn failed (e.g. Ray resources suddenly full)
+                with self.lock:
+                    self.cache.pop(new_key, None)
+                    task_meta.status = task_ref.status  # Restore old status
+                    self.cache[key] = task_meta
+
+                deferred_count += 1
+
+        if deferred_count > 0 and dispatch_count == 0:
+            LOG.info(
+                f"Resource Backpressure: {deferred_count} tasks (RETRY/WAITING) "
+                "are ready but blocked by physical CPU/MEM or logical limits."
+            )
 
     def _get_all_keys(self) -> list[str]:
         """Fetches a snapshot of all task keys from the cache.
@@ -355,19 +386,19 @@ class TaskManager:
             return
 
         self._last_probe_ts = now
-        blocked_services = set()
+        blocked_info = {}  # service_name -> sample_task_key
         for k in self.cache.iterkeys(
             pattern=f"{CACHE_TASK_NAMESPACE}:{ExecutionStatus.BLOCKED.value}:*"
         ):
             meta = self.cache.get(k)
-            if meta and meta.blocked_by:
-                blocked_services.add(meta.blocked_by)
+            if meta and meta.blocked_by and meta.blocked_by not in blocked_info:
+                blocked_info[meta.blocked_by] = k
 
-        if not blocked_services:
+        if not blocked_info:
             return
 
-        for svc_name in blocked_services:
-            if not ServiceRegistry.is_healthy(svc_name):
+        for svc_name, task_key in blocked_info.items():
+            if not ServiceMonitor.is_healthy(svc_name):
                 LOG.debug(f"Probing blocked service: {svc_name}")
 
                 # Decision: Late Binding Fix.
@@ -375,15 +406,32 @@ class TaskManager:
                 # the closure binds to the value at definition time,
                 # preventing loop-variable leakage during asynchronous
                 # execution or deferred evaluation.
-                def _ping(s_name: str = svc_name) -> bool:
+                def _ping(s_name: str = svc_name, t_key: str = task_key) -> bool:
                     try:
-                        svc = ServiceFactory.get_service(s_name)
+                        svc = ServiceFactory.get(s_name)
+
+                        # If this is a storage service, probe the specific resource that blocked us
+                        if ServiceFactory.is_file_source(s_name):
+                            meta = self.cache.get(t_key)
+                            if meta:
+                                from apps.ingestion.src.core.contexts.task import (
+                                    load_context,
+                                )
+
+                                ctx = load_context(Path(meta.config_file).parent)
+                                if ctx and ctx.extract and ctx.extract.resource:
+                                    LOG.trace(
+                                        f"Probing resource {ctx.extract.resource} for {s_name}"
+                                    )
+                                    return svc.exists(ctx.extract.resource)
+
                         if not hasattr(svc, "exists"):
                             raise NotImplementedError(
-                                f"exists() method not implemented for service type: {s_name}"
+                                f"exists() method not implemented for "
+                                f"service type: {s_name}"
                             )
                         return svc.exists("/")
                     except Exception:
                         return False
 
-                ServiceRegistry.probe(svc_name, _ping)
+                ServiceMonitor.probe(svc_name, _ping)

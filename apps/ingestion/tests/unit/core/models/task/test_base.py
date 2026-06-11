@@ -25,13 +25,13 @@ def test_task_check_in_new_manifest(exec_ctx):
     task = Task(task_ref=task_ref, worker_id="worker_1", exec_ctx=exec_ctx)
 
     # Ensure manifest doesn't exist initially
-    assert not task.workspace.manifest_path.exists()
+    assert not task.workspace.manifest_file.exists()
 
     # Execute check_in
     task.check_in("extract")
 
     # Verify result via manifest rehydration
-    manifest = task.workspace.read_manifest()
+    manifest = task.workspace.load_manifest()
     assert manifest.job_id == "test_job"
     assert manifest.run_id == "run_123"
     assert manifest.current_stage == "extract"
@@ -66,17 +66,17 @@ def test_task_check_in_existing_manifest(exec_ctx):
     task.check_in("extract")
 
     # Verify updates
-    manifest = task.workspace.read_manifest()
+    manifest = task.workspace.load_manifest()
     assert manifest.current_stage == "extract"
     assert manifest.status == ExecutionStatus.RUNNING
     assert manifest.bitmask == 1  # Should remain unchanged by check_in
-    assert manifest.remarks == "pre-seeded"  # Should be preserved via recursive_merge
+    assert manifest.remarks == "pre-seeded"  # Should be preserved via deep_merge
 
 
-def test_task_request_status_sync(exec_ctx):
+def test_task_send_signal(exec_ctx):
     """
     GIVEN a Task
-    WHEN request_status_sync is called with TaskSignal.DONE
+    WHEN send_signal is called with TaskSignal.DONE
     THEN it should drop a .done signal file and the filename should follow
     the standard pattern
     """
@@ -91,7 +91,7 @@ def test_task_request_status_sync(exec_ctx):
     )
     task = Task(task_ref=task_ref, worker_id="w1", exec_ctx=exec_ctx)
 
-    task.request_status_sync(TaskSignal.DONE)
+    task.send_signal(TaskSignal.DONE)
 
     # Expected filename pattern from ExecutionContext: {identifier}:{run_id}.done
     # identifier = job_id:dataset_id:partition_date

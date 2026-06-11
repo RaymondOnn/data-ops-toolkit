@@ -2,9 +2,9 @@ from .base import Task
 from .enums import TaskRef, TaskSignal
 from .manifest import (
     ArchivePayload,
-    AuditPayload,
-    ErrorPayload,
+    ErrorInfo,
     ExtractPayload,
+    FileInfo,
     PublishPayload,
     TaskManifest,
     TransformPayload,
@@ -14,10 +14,10 @@ from .status import ExecutionStatus
 
 __all__ = [
     "ArchivePayload",
-    "AuditPayload",
-    "ErrorPayload",
+    "ErrorInfo",
     "ExecutionStatus",
     "ExtractPayload",
+    "FileInfo",
     "PublishPayload",
     "Task",
     "TaskManifest",

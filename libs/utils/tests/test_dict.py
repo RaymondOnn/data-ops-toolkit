@@ -1,5 +1,5 @@
 import pytest
-from libs.utils.dict import find_keys_by_pattern, update_nested_key
+from libs.utils.dict import find_keys_by_pattern, set_nested_key
 
 
 class TestDictUtils:
@@ -46,31 +46,31 @@ class TestDictUtils:
         assert len(results) == 1
         assert results[0][0] == "API_KEY"
 
-    def test_update_nested_key_rename(self):
+    def test_set_nested_key_rename(self):
         """
         GIVEN a nested dictionary
         THEN the old key should be removed and new key added with same value
-        WHEN update_nested_key is called without a new_value
+        WHEN set_nested_key is called without a new_value
         """
         data = {"a": {"b": {"c": 42}}}
-        update_nested_key(data, "a.b.c", "d")
+        set_nested_key(data, "a.b.c", "d")
 
         assert "c" not in data["a"]["b"]
         assert data["a"]["b"]["d"] == 42
 
-    def test_update_nested_key_value_override(self):
+    def test_set_nested_key_value_override(self):
         """
         GIVEN a nested dictionary
         THEN the key should be renamed and its value updated
-        WHEN update_nested_key is called with a new_value
+        WHEN set_nested_key is called with a new_value
         """
         data = {"meta": {"old": "data"}}
-        update_nested_key(data, "meta.old", "new", new_value="refreshed")
+        set_nested_key(data, "meta.old", "new", new_value="refreshed")
 
         assert data["meta"]["new"] == "refreshed"
         assert "old" not in data["meta"]
 
-    def test_update_nested_key_missing_path(self):
+    def test_set_nested_key_missing_path(self):
         """
         GIVEN an invalid path
         THEN raise a KeyError
@@ -78,4 +78,4 @@ class TestDictUtils:
         """
         data = {"a": 1}
         with pytest.raises(KeyError):
-            update_nested_key(data, "b.c", "d")
+            set_nested_key(data, "b.c", "d")

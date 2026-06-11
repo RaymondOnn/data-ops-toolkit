@@ -33,7 +33,8 @@ def test_get_run_path(exec_ctx):
     """
     GIVEN job metadata and a run_id
     WHEN get_run_path is called for the 'active' category
-    THEN it should return a path following the {workspace}/active/{identifier}/{run_id} pattern
+    THEN it should return a path following the
+        {workspace}/active/{identifier}/{run_id} pattern
     """
     path = exec_ctx.get_run_path(
         job_id="test_job",

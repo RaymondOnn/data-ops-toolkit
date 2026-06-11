@@ -1,93 +1,137 @@
-from enum import Enum
-from typing import ClassVar
+from enum import StrEnum
+from functools import lru_cache
+from typing import Any, Final
 
 import polars as pl
 
 
-class TypeGroup(Enum):
-    NUMERIC = "NUMERIC"  # Ints, Decimals, Floats
-    TEXT = "TEXT"  # Strings, Enums
-    TEMPORAL = "TEMPORAL"  # Dates, Times
-    BOOLEAN = "BOOLEAN"  # Bits, Bools
-    BINARY = "BINARY"  # Bloads, Raw bytes (pl.Binary)
-    OBJECT = "OBJECT"  # JSON, Lists, Maps (pl.Struct/pl.List)
-    NULL = "NULL"  # Special group for NULL-only columns
+class TypeGroup(StrEnum):
+    """Canonical type groups for cross-database compatibility."""
+
+    NUMERIC = "NUMERIC"
+    TEXT = "TEXT"
+    TEMPORAL = "TEMPORAL"
+    BOOLEAN = "BOOLEAN"
+    BINARY = "BINARY"
+    OBJECT = "OBJECT"
+    NULL = "NULL"
 
 
-# Mapping: Database Specific Type -> Canonical Type
-POSTGRES_MAP = {
-    "int4": TypeGroup.NUMERIC,
-    "int8": TypeGroup.NUMERIC,
-    "varchar": TypeGroup.TEXT,
-    "text": TypeGroup.TEXT,
-    "bool": TypeGroup.BOOLEAN,
-    "timestamp": TypeGroup.TEMPORAL,
-    "jsonb": TypeGroup.OBJECT,
+# Type Registry: Database -> Native Type -> TypeGroup
+_TYPE_REGISTRY: Final = {
+    "postgres": {
+        "int4": TypeGroup.NUMERIC,
+        "int8": TypeGroup.NUMERIC,
+        "varchar": TypeGroup.TEXT,
+        "text": TypeGroup.TEXT,
+        "bool": TypeGroup.BOOLEAN,
+        "timestamp": TypeGroup.TEMPORAL,
+        "timestamptz": TypeGroup.TEMPORAL,
+        "date": TypeGroup.TEMPORAL,
+        "jsonb": TypeGroup.OBJECT,
+        "bytea": TypeGroup.BINARY,
+        "_int4": TypeGroup.NUMERIC,  # Array types
+        "_text": TypeGroup.TEXT,
+    },
+    "oracle": {
+        "number": TypeGroup.NUMERIC,
+        "binary_double": TypeGroup.NUMERIC,
+        "varchar2": TypeGroup.TEXT,
+        "nvarchar2": TypeGroup.TEXT,
+        "clob": TypeGroup.TEXT,
+        "date": TypeGroup.TEMPORAL,
+        "timestamp": TypeGroup.TEMPORAL,
+        "raw": TypeGroup.BINARY,
+    },
+    "clickhouse": {
+        "int32": TypeGroup.NUMERIC,
+        "int64": TypeGroup.NUMERIC,
+        "float64": TypeGroup.NUMERIC,
+        "string": TypeGroup.TEXT,
+        "fixedstring": TypeGroup.TEXT,
+        "bool": TypeGroup.BOOLEAN,
+        "date": TypeGroup.TEMPORAL,
+        "datetime": TypeGroup.TEMPORAL,
+        "uuid": TypeGroup.TEXT,
+    },
 }
 
-ORACLE_MAP = {
-    "NUMBER": TypeGroup.NUMERIC,  # Defaulting to BigInt for safety
-    "BINARY_DOUBLE": TypeGroup.NUMERIC,
-    "VARCHAR2": TypeGroup.TEXT,
-    "CLOB": TypeGroup.TEXT,
-    "DATE": TypeGroup.TEMPORAL,  # Oracle DATE includes time
-    "TIMESTAMP": TypeGroup.TEMPORAL,
-    "RAW": TypeGroup.BINARY,
-}
-
-# Clickhouse is very explicit about bit-width
-CLICKHOUSE_MAP = {
-    "Int32": TypeGroup.NUMERIC,
-    "Int64": TypeGroup.NUMERIC,
-    "Float64": TypeGroup.NUMERIC,
-    "String": TypeGroup.TEXT,
-    "FixedString": TypeGroup.TEXT,
-    "Bool": TypeGroup.BOOLEAN,
-    "Date": TypeGroup.TEMPORAL,
-    "DateTime": TypeGroup.TEMPORAL,
-    "UUID": TypeGroup.TEXT,
-}
-
-# Mapping: Canonical Type -> Polars Type
-POLARS_OUT_MAP = {
-    TypeGroup.NUMERIC: pl.Float64,  # Use Float64 if you have many Decimals
+# Polars type mapping
+_POLARS_MAP: Final = {
+    TypeGroup.NUMERIC: pl.Float64,
     TypeGroup.TEXT: pl.Utf8,
     TypeGroup.TEMPORAL: pl.Datetime,
     TypeGroup.BOOLEAN: pl.Boolean,
     TypeGroup.BINARY: pl.Binary,
-    TypeGroup.OBJECT: pl.Utf8,  # Safest to store JSON as String in Parquet
+    TypeGroup.OBJECT: pl.Utf8,  # JSON stored as string in Parquet
+    TypeGroup.NULL: pl.Null,
 }
+
+DEFAULT_TYPE_GROUP: Final = TypeGroup.TEXT
+DEFAULT_POLARS_TYPE: Final = pl.Utf8
 
 
 class TypeResolver:
-    # Registries as defined in your dtypes.py
-    _MAPS: ClassVar[dict[str, dict[str, TypeGroup]]] = {
-        "postgres": POSTGRES_MAP,
-        "oracle": ORACLE_MAP,
-        "clickhouse": CLICKHOUSE_MAP,
-    }
+    """Resolves database-specific types to canonical Polars types."""
 
     @classmethod
+    @lru_cache(maxsize=1000)
     def resolve_to_group(cls, db_type: str, raw_type: str) -> TypeGroup:
-        """
-        Factory method to convert a DB-specific string to a TypeGroup.
-        """
-        # Clean the input (e.g., 'varchar(255)' -> 'varchar')
-        base_type = raw_type.split("(", maxsplit=1)[0].lower().strip()
+        """Convert DB-specific type string to canonical TypeGroup."""
+        base_type = cls._normalize_type(raw_type)
+        db_key = db_type.lower()
 
-        provider_map = cls._MAPS.get(db_type.casefold())
+        provider_map = _TYPE_REGISTRY.get(db_key)
         if not provider_map:
-            return TypeGroup.TEXT  # Default fallback
+            return DEFAULT_TYPE_GROUP
 
-        return provider_map.get(base_type, TypeGroup.TEXT)
-
-    @classmethod
-    def group_to_polars(cls, group: TypeGroup) -> pl.DataType:
-        """
-        Maps a LogicalGroup to the canonical Polars type for normalization.
-        """
-        return POLARS_OUT_MAP.get(group, pl.Utf8)
+        return provider_map.get(base_type, DEFAULT_TYPE_GROUP)
 
     @classmethod
+    @lru_cache(maxsize=100)
+    def group_to_polars(cls, group: TypeGroup) -> Any:
+        """Map TypeGroup to canonical Polars data type."""
+        return _POLARS_MAP.get(group, DEFAULT_POLARS_TYPE)
+
+    @classmethod
+    @lru_cache(maxsize=1000)
     def resolve_to_polars(cls, db_type: str, raw_type: str) -> pl.DataType:
-        return cls.group_to_polars(cls.resolve_to_group(db_type, raw_type))
+        """Complete resolution: DB type -> Polars type."""
+        group = cls.resolve_to_group(db_type, raw_type)
+        return cls.group_to_polars(group)
+
+    @classmethod
+    def _normalize_type(cls, raw_type: str) -> str:
+        """Normalize type string (handle arrays, parameters, case)."""
+        if not raw_type:
+            return ""
+
+        raw = raw_type.strip().lower()
+
+        # Handle PostgreSQL array notation (_int4, _text)
+        if raw.startswith("_"):
+            return raw
+
+        # Remove parameters (varchar(255) -> varchar)
+        if "(" in raw:
+            raw = raw.split("(", maxsplit=1)[0]
+
+        return raw
+
+    # Convenience methods
+    @classmethod
+    def is_numeric(cls, db_type: str, raw_type: str) -> bool:
+        """Check if a type belongs to the NUMERIC group."""
+        return cls.resolve_to_group(db_type, raw_type) == TypeGroup.NUMERIC
+
+    @classmethod
+    def is_text(cls, db_type: str, raw_type: str) -> bool:
+        """Check if a type belongs to the TEXT group."""
+        return cls.resolve_to_group(db_type, raw_type) == TypeGroup.TEXT
+
+    @classmethod
+    def clear_cache(cls) -> None:
+        """Clear all LRU caches (useful for testing)."""
+        cls.resolve_to_group.cache_clear()
+        cls.group_to_polars.cache_clear()
+        cls.resolve_to_polars.cache_clear()

@@ -1,194 +1,97 @@
-from typing import Any
+"""Transform stage for data processing."""
 
-import msgspec
-import polars as pl
-import ray
 from apps.ingestion.src.core.models.task import Task
 from apps.ingestion.src.core.models.task.manifest import TransformPayload
 from apps.ingestion.src.core.strategies.transform import (
+    TRANSFORMERS,
     TransformContext,
     TransformFactory,
 )
-from apps.ingestion.src.utils.exceptions import RewindTask
-from libs.utils.dates import get_current_timestamp
+from apps.ingestion.src.utils.exceptions import RollbackRequired
+from libs.utils.dates import current_timestamp
 from loguru import logger
 
 from .base import ExecutionStage
-from .enums import StageName
+from .enums import Stage
+from .utils import stage
 
 LOG = logger
-APP_TRANSFORM_OUTPUT_EXT = "parquet"
+OUTPUT_FORMAT = "parquet"
 
 
+@stage(Stage.TRANSFORM.value)
 class TransformStage(ExecutionStage):
-    name = StageName.TRANSFORM.label
-    manifest: TransformPayload
+    """Stage for transforming extracted data."""
 
     def pre_flight(self, task: Task) -> None:
-        """
-        Verify that the artifacts from the EXTRACT stage are present and valid.
-        """
+        """Verify extract artifacts exist."""
         super().pre_flight(task)
-        meta = task.manifest.extract
 
-        # 1. Gate: Metadata must exist (Differentiates 'no data' from 'never ran')
-        if meta is None:
-            raise RewindTask(StageName.EXTRACT.label, "Extraction metadata missing.")
+        extract = task.manifest.extract
+        extract_path = task.workspace.path / Stage.EXTRACT.value
 
-        # 2. Gate: The extraction marker/folder must exist.
-        # If the symlink is broken or missing, the dependency is lost.
-        extract_path = task.workspace.run_path / StageName.EXTRACT.label
-        if not extract_path.exists():
-            raise RewindTask(StageName.EXTRACT.label, "Extraction data marker missing.")
+        # Check conditions
+        checks = [
+            (extract is not None, "Extraction metadata missing"),
+            (extract_path.exists(), "Extraction data marker missing"),
+            (extract is None or extract.file_count > 0, "No data files found"),
+        ]
 
-        # 3. Gate: If we expect data, verify physical artifacts are non-zero.
-        if meta.file_count > 0 and (
-            not any(f.stat().st_size > 0 for f in extract_path.glob("*.parquet"))
-        ):
-            raise RewindTask(
-                StageName.EXTRACT.label, "Physical artifacts missing or empty."
-            )
+        if extract and extract.file_count > 0:
+            has_data = any(f.stat().st_size > 0 for f in extract_path.glob("*.parquet"))
+            checks.append((has_data, "Physical artifacts missing or empty"))
 
-        # 3. Gate: Validate Transformer Registration
+        for ok, msg in checks:
+            if not ok:
+                raise RollbackRequired(Stage.EXTRACT.value, msg)
+
+        # Validate transformer exists
         try:
-            # We check if we can get the transformer class
-            TransformFactory.get_transformer(
-                task.context.transform.transform_type,
-                dataset_id=task.dataset_id,
-                job_id=task.job_id,
-            )
+            TransformFactory.get(self.config.type)
         except Exception:
-            # If the transformer type is unknown or config is broken, fail early
-            LOG.exception("Invalid transformer configuration in pre_flight")
+            LOG.exception("Invalid transformer configuration")
+            raise
 
-        # 4. Gate: TransformContext Validation
-        if not task.context.transform.transform_type:
-            raise ValueError("Transform type is not defined in TaskContext.")
+        if not self.config.type:
+            raise ValueError("Transform type not defined")
 
-    def execute(self, task: "Task") -> str:
-        """
-        Decision: Use LazyFrame Streaming for 50M rows.
-        By reading from the 'active/extract' symlink, we ensure we are
-        always processing the latest sanitized data without needing
-        to know the specific physical timestamped folder.
-        """
-        start_ts = get_current_timestamp(strip_tz=True).isoformat(sep=" ")
-        LOG.info(
-            "Starting transformation",
-            stage=self.name,
-            type=task.context.transform.transform_type,
-        )
+    def execute(self, task: Task) -> str:
+        """Execute transformation using distributed executor."""
+        start_time = current_timestamp(naive=True).isoformat(sep=" ")
+        LOG.info(f"Starting transform: {self.config.type}")
+
         try:
-            # 1. Guard: Skip transformation if no files were extracted
-            extract_payload = task.manifest.extract
-            if not extract_payload or extract_payload.file_count == 0:
-                LOG.info(
-                    "No data extracted in previous stage. Skipping transformation.",
-                    stage=self.name,
-                )
-
-                payload = TransformPayload(
-                    logic_version="1.0.0",
-                    transform_type=task.context.transform.transform_type,
-                    artifact_folder="",
-                    output_row_count=0,
-                    schema_validation_pass=True,
-                    refined_schema={},
-                    start_timestamp=start_ts,
-                )
-
-                self.finalize(task, results=msgspec.to_builtins(payload))
-                return str(self._transit(task))
-
-            # 1. Setup Context and Data Store
-            extract_path = (task.workspace.run_path / StageName.EXTRACT.label).resolve()
-            # Get the deterministic physical folder from the workspace
-            data_store = task.workspace.clear_stage_data(self.name)
+            source_path = (task.workspace.path / Stage.EXTRACT.value).resolve()
+            target_path = task.workspace.reset_data_dir(self.name)
 
             ctx = TransformContext(
-                options=task.context.transform.transform_params,
-                source_dir=(extract_path / "part_*.parquet").resolve(),
-                destination_dir=data_store,
-                output_format=APP_TRANSFORM_OUTPUT_EXT,
-                type=task.context.transform.transform_type,
+                params=self.config.params,
+                source=source_path,
+                target=target_path,
+                format=OUTPUT_FORMAT,
+                logic=self.config.type,
+                job_id=task.job_id,
+                dataset_id=task.dataset_id,
             )
 
-            # 2. Parallel Transformation via Ray Data
-            # This reads all part_*.parquet files from the extract stage
-            # into a distributed dataset
-            ds = ray.data.read_parquet(str(extract_path))
-
-            # 3. Define the Distributed Task
-            # We capture the transformer type and params to recreate it on the workers
-            transform_type = task.context.transform.transform_type
-            dataset_id = task.context.dataset_id
-            job_id = task.job_id
-
-            def transform_batch(batch: Any) -> Any:
-                # Re-initialize the transformer on the worker node
-                # Ray provides pyarrow.Table when batch_format is "pyarrow"
-                df = pl.from_arrow(batch)
-                worker_transformer = TransformFactory.get_transformer(
-                    transform_type,
-                    dataset_id=dataset_id,
-                    job_id=job_id,
-                )
-                # Apply transformation logic to this specific chunk
-                # Ray 2.5+ requires a supported batch format (PyArrow, Pandas, etc.)
-                # Converting to Arrow is zero-copy and satisfies the requirement.
-                processed_df = worker_transformer.apply(df.lazy(), ctx).collect()
-                return processed_df.to_arrow()
-
-            # 4. Execute the Map and Write
-            # map_batches handles the parallelism;
-            # write_parquet produces multiple files automatically
-            transformed_ds = ds.map_batches(transform_batch, batch_format="pyarrow")
-
-            # Ray will write one file per task/partition
-            # (e.g., part_000.parquet, part_001.parquet)
-            transformed_ds.write_parquet(str(data_store))
-
-            # Re-initialize a local transformer just for metadata/versioning info
-            transformer = TransformFactory.get_transformer(
-                transform_type, dataset_id=dataset_id, job_id=job_id
-            )
-
-            # 5. DECISION: Get accurate stats after the stream is closed
-            # We scan the generated output to get the final row count and schema
-            output_glob = str(data_store / "*.parquet")
-            stats = pl.scan_parquet(output_glob).select(count=pl.len()).collect()
-
-            output_rows = int(stats["count"][0])
-
-            # 6. Extract final schema info from the generated artifacts
-            sample_file = next(data_store.glob("*.parquet"))
-            final_schema_dict = pl.read_parquet_schema(sample_file)
+            # TODO: Add support for other executors
+            # Execute distributed transformation
+            transformer = TRANSFORMERS["data"]()
+            row_count, schema = transformer.transform(context=ctx)
 
             payload = TransformPayload(
-                logic_version=getattr(transformer, "version", "1.0.0"),
-                transform_type=task.context.transform.transform_type,
-                artifact_folder=str(data_store),
-                output_row_count=output_rows or 0,
-                schema_validation_pass=True,
-                refined_schema={k: str(v) for k, v in final_schema_dict.items()},
-                start_timestamp=start_ts,
+                transform_type=self.config.type,
+                output_count=row_count,
+                artifact_folder=str(target_path),
+                schema_valid=True,
+                output_schema=schema,
+                start_time=start_time,
             )
 
-            LOG.info(
-                "Transformation complete",
-                stage=self.name,
-                output_rows=output_rows,
-                output_folder=str(data_store.name),
-            )
-
-            # 4. Finalize & Flip the Link
-            # Decision: Create active/{job_id}/transform -> ../../data/transform/{dir}
-            # This makes the transformed data available for the WriteStep.
-            self.finalize(
-                task, data_folder=data_store, results=msgspec.to_builtins(payload)
-            )
-            return str(self._transit(task))
+            self.checkpoint(task, data_folder=target_path, payload=payload)
+            LOG.info(f"Transform complete: {row_count:_} rows -> {target_path.name}")
+            return self._next_stage()
 
         except Exception as e:
-            self.finalize(task=task, exception=e)
+            self.checkpoint(task, error=e)
             raise

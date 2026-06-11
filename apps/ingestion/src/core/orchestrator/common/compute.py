@@ -1,129 +1,174 @@
+"""Compute resource management for Ray-based task execution.
+
+Manages resource allocation, workload costing, and worker spawning with
+adaptive backpressure based on system health.
+"""
+
 from collections import defaultdict
 from enum import StrEnum
-from typing import Any
 
 import psutil
 import ray
 import ray.util.state
 from apps.ingestion.src.core.contexts import RayMode
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
-from apps.ingestion.src.core.models.stages.enums import StageName
-from apps.ingestion.src.utils.common import make_short_hash
+from apps.ingestion.src.core.models.stages.enums import Stage
+from apps.ingestion.src.utils.common import short_hash
 from libs.utils.system import get_system_vitals
 from loguru import logger
 
 LOG = logger
-CRITICAL_CPU_THRESHOLD = 90.0  # Stop spawning if system CPU % exceeds this
-RAY_RESOURCE_MAP = {"CPU": "CPU", "IO": "IO", "MEM": "memory"}
+
+# System thresholds
+CRITICAL_CPU_THRESHOLD = 90.0  # Stop spawning if CPU exceeds this
+CRITICAL_MEM_THRESHOLD = 85.0  # Stop spawning if memory exceeds this
+RESOURCE_BUFFER = 0.1  # Small buffer for floating point comparisons
+
+# Resource mapping between logical and Ray names
+RAY_RESOURCE_NAMES = {"CPU": "CPU", "IO": "IO", "MEM": "memory"}
 
 
-class WorkloadType(StrEnum):
+class WorkloadClass(StrEnum):
+    """Classification of workload types for resource costing."""
+
     DEFAULT = "default"
-    CPU = "cpu"
-    IO = "io"
+    CPU_INTENSIVE = "cpu"
+    IO_INTENSIVE = "io"
 
 
-# 1. Map Workload Types to logical resource costs
-WORKLOAD_COSTS: dict[WorkloadType, dict[str, float]] = {
-    WorkloadType.DEFAULT: {
-        "CPU": 0.2,
-        "IO": 0.1,
-        "MEM": 0.5,
-    },  # Units: Cores, Slots, GB
-    WorkloadType.CPU: {"CPU": 1.0, "IO": 0.2, "MEM": 2.0},
-    WorkloadType.IO: {"CPU": 0.2, "IO": 1.0, "MEM": 1.0},
+# Resource costs per workload class (CPU cores, IO slots, Memory GB)
+WORKLOAD_COSTS = {
+    WorkloadClass.DEFAULT: {"CPU": 0.2, "IO": 0.1, "MEM": 0.5},
+    WorkloadClass.CPU_INTENSIVE: {"CPU": 1.0, "IO": 0.2, "MEM": 2.0},
+    WorkloadClass.IO_INTENSIVE: {"CPU": 0.2, "IO": 1.0, "MEM": 1.0},
 }
 
-# 2. Assign every stage to a Workload Type
-STAGE_WORKLOAD_MAP: dict[StageName, WorkloadType] = {
-    StageName.START: WorkloadType.DEFAULT,
-    StageName.EXTRACT: WorkloadType.IO,  # Network heavy, moderate RAM
-    StageName.TRANSFORM: WorkloadType.CPU,  # Computation heavy, high RAM
-    StageName.WRITE: WorkloadType.IO,
-    StageName.PUBLISH: WorkloadType.IO,
-    StageName.ARCHIVE: WorkloadType.DEFAULT,
+# Map pipeline stages to workload classes
+STAGE_WORKLOAD_MAP = {
+    Stage.START: WorkloadClass.DEFAULT,
+    Stage.EXTRACT: WorkloadClass.IO_INTENSIVE,  # Network I/O heavy
+    Stage.TRANSFORM: WorkloadClass.CPU_INTENSIVE,  # Computation heavy
+    Stage.WRITE: WorkloadClass.IO_INTENSIVE,
+    Stage.PUBLISH: WorkloadClass.IO_INTENSIVE,
+    Stage.ARCHIVE: WorkloadClass.DEFAULT,
 }
 
 
-def get_limits(cpu_limit_pct: float = 0.8, mem_limit_pct: float = 0.7):
-    """Detects hardware and defines the logical resource pool.
+def calculate_resource_limits(
+    cpu_ratio: float = 0.8,
+    memory_ratio: float = 0.7,
+) -> tuple[int, int, int]:
+    """Calculate logical resource limits based on physical hardware.
 
     Args:
-        cpu_limit_pct: Percentage of physical cores to reserve (0.0 to 1.0).
-        mem_limit_pct: Percentage of total RAM to reserve (0.0 to 1.0).
+        cpu_ratio: Percentage of physical cores to use (0.0 to 1.0)
+        memory_ratio: Percentage of RAM to use (0.0 to 1.0)
 
     Returns:
-        tuple: (logical_cores, total_io_slots, logical_mem_gb).
-
-    Decision: Integer Resource Mapping.
-    Ray requires static resource capacities to be integers for custom
-    resources like 'IO'. We calculate an IO budget (slots) based on
-    physical core count to ensure a balanced ratio between computation
-    and network/disk I/O.
+        Tuple of (cpu_cores, io_slots, memory_gb)
     """
-    cores = psutil.cpu_count(logical=False) or 2  # Physical cores
-    # Ensure logical cores is an integer to satisfy Ray requirements for static node capacity
-    logical_cores = int(max(1, float(cores) * cpu_limit_pct))
-    # IO budget represents discrete slots/concurrency limits and must be an integer
-    total_io_budget = int(logical_cores * 5)
+    physical_cores = psutil.cpu_count(logical=False) or 2
+    logical_cores = max(1, int(physical_cores * cpu_ratio))
 
-    # Detect Memory
-    total_mem_bytes = psutil.virtual_memory().total
-    logical_mem_gb = (total_mem_bytes / (1024**3)) * mem_limit_pct
+    # IO slots = cores * 5 (one IO slot can handle multiple concurrent operations)
+    io_slots = logical_cores * 5
 
-    return logical_cores, total_io_budget, int(logical_mem_gb)
+    total_memory_bytes = psutil.virtual_memory().total
+    memory_gb = int((total_memory_bytes / (1024**3)) * memory_ratio)
+
+    return logical_cores, io_slots, memory_gb
 
 
 class Compute:
-    def __init__(
-        self,
-        exec_ctx: ExecutionContext,
-    ):
-        """Initializes the Compute manager and hooks into the Ray mesh.
+    """Manages Ray cluster resources and worker scheduling."""
+
+    def __init__(self, exec_ctx: ExecutionContext):
+        """Initializes the compute manager and provisions Ray resources.
 
         Args:
-            exec_ctx: The global execution context for the run.
+            exec_ctx: The global execution context.
 
-        Decision: Safe Default Capping.
-        We default to 80% CPU and 70% RAM reservation. This ensures the
-        system is resilient to 'Noisy Neighbor' scenarios on shared nodes
-        and leaves headroom for OS-level operations.
+        Decision: Fail-Fast Initialization.
+        The Ray cluster is initialized during the Compute manager's constructor.
+        This ensures that any Ray-related configuration errors are caught
+        early in the orchestrator's lifecycle, preventing silent failures.
         """
         self.exec_ctx = exec_ctx
-
-        # Use 80% of cores and 70% of RAM by default as a safe cap
-        num_cores, num_io_slots, num_mem_gb = get_limits(
-            cpu_limit_pct=0.8, mem_limit_pct=0.7
-        )
-
-        # Resource Capping: Prevent app from consuming whole server
-        self._resource_limits = {
-            "CPU": num_cores,
-            "IO": num_io_slots,
-            "MEM": num_mem_gb,
-        }
-        self._saturated_resources: set[str] = set()
-        # Track how many workers of each stage are currently active
-        self._stage_counts: dict[StageName, set[str]] = defaultdict(set)
+        self._resource_limits = self._get_resource_limits()
+        self._active_stage_counts: dict[Stage, set[str]] = defaultdict(set)
         self._available_resources: dict[str, float] = {}
-        self._remote_executor: Any | None = None
-        self._initialize_cluster(
-            ray_mode=self.exec_ctx.ray_mode,
-            limits=self._resource_limits,
-            address=getattr(self.exec_ctx, "ray_address", None),
-            runtime_env=getattr(self.exec_ctx, "ray_runtime_env", None),
-        )
+        self._saturated_resources: set[str] = set()
+        self._remote_executor = None
 
-        # Self-Healing: Purge orphaned workers from previous runs to reset the budget
-        self.purge_leaked_tasks()
+        self._init_ray_cluster()
+        self._purge_orphaned_tasks()
+
+    def _get_resource_limits(self) -> dict[str, int]:
+        """Calculates and returns the logical resource limits based on hardware.
+
+        Returns:
+            dict[str, int]: A dictionary mapping resource names (CPU, IO, MEM)
+                to their calculated integer limits.
+
+        Decision: Dynamic Resource Allocation.
+        Instead of hardcoding resource limits, we dynamically calculate them
+        based on physical hardware. This allows the orchestrator to adapt
+        to different deployment environments (e.g., local dev vs. cloud VM)
+        without requiring manual configuration changes.
+        """
+        cores, io_slots, memory_gb = calculate_resource_limits()
+        return {"CPU": cores, "IO": io_slots, "MEM": memory_gb}
+
+    def _init_ray_cluster(self) -> None:
+        """Initialize Ray cluster with custom resources."""
+        ray_mode = self.exec_ctx.ray_mode
+        address = getattr(self.exec_ctx, "ray_address", None)
+        runtime_env = getattr(self.exec_ctx, "ray_runtime_env", None)
+
+        # Local mode cannot use custom address
+        if address:
+            ray_mode = RayMode.CLUSTER
+
+        LOG.info(f"Initializing Ray (mode={ray_mode})...")
+
+        if not ray.is_initialized():
+            ctx = ray.init(
+                address=address,
+                ignore_reinit_error=True,
+                local_mode=(ray_mode == RayMode.LOCAL),
+                include_dashboard=True,
+                dashboard_host="0.0.0.0",
+                dashboard_port=8265,
+                namespace="ingestion",
+                num_cpus=self._resource_limits["CPU"],
+                runtime_env=runtime_env,
+                _memory=self._resource_limits["MEM"] * (1024**3),
+                resources={"IO": self._resource_limits["IO"]},
+            )
+            dashboard_url = (
+                ctx.dashboard_url if ray_mode != RayMode.LOCAL else "localhost:8265"
+            )
+        else:
+            dashboard_url = ray.get_runtime_context().dashboard_url
+
+        resources = ray.cluster_resources()
+        LOG.info(
+            f"Ray initialized | CPUs: {resources.get('CPU', 0)} | "
+            f"Memory: {resources.get('memory', 0) / (1024**3):.1f}GB | "
+            f"Dashboard: http://{dashboard_url}"
+        )
 
     @property
-    def remote_executor(self) -> Any:
-        """Lazy-loaded Ray actor class to minimize GCS overhead.
+    def remote_executor(self):
+        """Lazy-loaded Ray actor for task execution.
 
-        Decision: Worker Isolation.
-        By using ray.remote on a standalone function (process_stage_task),
-        we ensure that every task runs in its own clean process space.
+        Returns:
+            ray.actor.ActorHandle: A handle to the remote executor actor.
+
+        Decision: Lazy Loading.
+        The remote executor is only initialized when first accessed. This
+        reduces startup overhead for CLI commands that don't require Ray
+        workers, while ensuring the actor is ready when tasks are dispatched.
         """
         if self._remote_executor is None:
             from .executor import process_stage_task
@@ -131,319 +176,235 @@ class Compute:
             self._remote_executor = ray.remote(process_stage_task)
         return self._remote_executor
 
-    def _initialize_cluster(
-        self,
-        ray_mode: str = RayMode.LOCAL,
-        limits: dict[str, float] | None = None,
-        address: str | None = None,
-        runtime_env: dict[str, Any] | None = None,
-    ) -> str:
-        """Initializes the Ray cluster with custom resource definitions.
-
-        Args:
-            ray_mode: LOCAL or CLUSTER mode.
-            limits: Physical capacity constraints.
-            address: Optional remote cluster address.
-            runtime_env: Ray environment configuration.
-
-        Returns:
-            str: Initialization status.
-
-        Decision: Protocol-Aware Init.
-        local_mode is incompatible with explicit addresses. We detect if an
-        address is provided to automatically switch from local to cluster.
-        """
-        local_mode = ray_mode == RayMode.LOCAL
-        dashboard_url = "N/A"
-        limits = limits or {}
-
-        # local_mode is incompatible with 'address'. If connecting to a cluster,
-        # we must disable local_mode.
-        if address:
-            local_mode = False
-            LOG.info(f"Connecting to existing Ray cluster at: {address}")
-
-        LOG.info(f"Initializing Ray (mode={ray_mode}, local={local_mode})...")
-
-        if not ray.is_initialized():
-            ctx = ray.init(
-                address=address,
-                ignore_reinit_error=True,
-                local_mode=local_mode,
-                include_dashboard=True,
-                dashboard_host="0.0.0.0",
-                dashboard_port=8265,
-                namespace="ingestion",
-                num_cpus=int(limits.get("CPU", 1)),
-                runtime_env=runtime_env,
-                # _memory is the total heap memory available to Ray (in bytes).
-                # Note: Only used when Ray starts the cluster (not when connecting via address)
-                _memory=int(limits.get("MEM", 8) * (1024**3)),
-                resources={"IO": limits.get("IO")},
-            )
-
-            dashboard_url = ctx.dashboard_url if not local_mode else "localhost:8265"
-        elif not local_mode:  # If already initialized, get URL from runtime context
-            dashboard_url = ray.get_runtime_context().dashboard_url
-
-        resources = ray.cluster_resources()
-        cpu_count = resources.get("CPU", 0)
-        memory_gb = resources.get("memory", 0) / (1024**3)
-
-        LOG.info(
-            f"🚀 Ray Initialized | Cores: {cpu_count} | Mem: {memory_gb:.2f}GB | "
-            f"Dashboard: http://{dashboard_url}"
-        )
-        return "already_initialized"
-
     def refresh_resources(self) -> None:
-        """Snapshots the current cluster resources.
+        """Updates the internal state with current Ray cluster resource availability.
 
-        Decision: Temporal Consistency.
-        Resources are snapshotted once per Tick. This ensures the
-        TaskManager makes all dispatch decisions for a batch using
-        consistent telemetry, preventing race conditions where tasks compete
-        for the same last core.
+        Decision: Real-time Resource Awareness.
+        By frequently refreshing the available resources, the Compute manager
+        can make informed decisions about task dispatch, preventing over-subscription
+        and ensuring fair resource allocation across stages.
         """
         self._available_resources = ray.available_resources()
-        self.check_system_saturation(self._available_resources)
+        self._check_resource_saturation()
 
-    def get_cost(self, stage: StageName) -> dict[str, float]:
-        """Returns the logical resource cost for a specific execution stage."""
-        workload = STAGE_WORKLOAD_MAP.get(stage, WorkloadType.DEFAULT)
-        return WORKLOAD_COSTS[workload]
-
-    def _can_fit(self, stage: StageName) -> bool:
-        """Checks both physical Ray availability and logical resource capping.
+    def get_workload_cost(self, stage: Stage) -> dict[str, float]:
+        """Retrieves the estimated resource cost for a given pipeline stage.
 
         Args:
-            stage: The stage requesting dispatch.
+            stage: The pipeline stage (e.g., EXTRACT, TRANSFORM).
 
         Returns:
-            bool: True if the stage can be dispatched immediately.
+            dict[str, float]: A dictionary mapping resource types (CPU, IO, MEM)
+                to their estimated cost for the given stage.
 
-        Decision: Adaptive Backpressure.
-        We check global system vitals before Ray resources. If the server
-        is already under heavy pressure (90% CPU), we halt dispatch even
-         if Ray 'thinks' there are slots, preventing system-wide instability.
+        Decision: Workload-Driven Costing.
+        Different stages have different resource profiles. By assigning
+        workload classes, we can more accurately model the resource demands
+        of each stage, leading to better scheduling decisions.
         """
-        cost = self.get_cost(stage)
-        current_usage = self._get_logical_usage()
+        workload = STAGE_WORKLOAD_MAP.get(stage, WorkloadClass.DEFAULT)
+        return WORKLOAD_COSTS[workload]
 
-        # 0. Global System Safety Check
+    def can_spawn_worker(self, stage: Stage) -> bool:
+        """Check if enough resources are available to spawn a worker."""
+        # Check system health first
         vitals = get_system_vitals()
-        if vitals.cpu_pct > CRITICAL_CPU_THRESHOLD or vitals.mem_pct > 85.0:
+        if (
+            vitals.cpu_pct > CRITICAL_CPU_THRESHOLD
+            or vitals.mem_pct > CRITICAL_MEM_THRESHOLD
+        ):
             LOG.warning(
-                "System resources exhausted. Adaptive throttling engaged.",
-                cpu=f"{vitals.cpu_pct}%",
-                mem=f"{vitals.mem_pct}%",
+                f"System overloaded - CPU: {vitals.cpu_pct}%, MEM: {vitals.mem_pct}%"
             )
             return False
 
-        for resource, required_val in cost.items():
-            resource_key = RAY_RESOURCE_MAP.get(resource, resource)
-            # 1. Physical Check (What does the hardware say?)
-            # In local mode, available_resources is often empty;
-            # we fall back to logical limits
-            physical_val = self._available_resources.get(resource_key)
+        cost = self.get_workload_cost(stage)
+        current_usage = self._get_current_resource_usage()
 
-            # Conversion: Logical MEM is in GB, Ray 'memory' is in Bytes
-            if resource == "MEM":
-                required_phys_val = required_val * (1024**3)
-            else:
-                required_phys_val = required_val
+        for resource, required in cost.items():
+            ray_resource = RAY_RESOURCE_NAMES.get(resource, resource)
+            physical_available = self._available_resources.get(ray_resource)
 
-            # 2. Logical Check (Are we over our own internal cap?)
-            limit_val = self._resource_limits[resource]
+            # Convert memory to bytes for Ray comparison
+            required_physical = required * 1024**3 if resource == "MEM" else required
 
-            # Round to avoid floating point precision issues (e.g. 4.000000001 > 4)
-            # that trigger false-positive backpressure.
-            projected_usage = round(current_usage[resource] + required_val, 4)
+            # Check logical limit
+            limit = self._resource_limits[resource]
+            projected_usage = round(current_usage[resource] + required, 4)
 
-            # Only apply physical constraint if Ray is actually reporting it
-            # (prevents local mode lock)
-            is_physically_constrained = (
-                physical_val is not None and physical_val < required_phys_val
-            )
-            is_logically_constrained = projected_usage > (
-                limit_val + 0.1
-            )  # Add a tiny 0.1 buffer
-
-            if is_physically_constrained or is_logically_constrained:
-                # Convert physical free bytes to GB for readable logs
-                phys_free_str = "N/A"
-                if physical_val is not None:
-                    phys_free_gb = (
-                        physical_val / (1024**3) if resource == "MEM" else physical_val
-                    )
-                    phys_free_str = (
-                        f"{phys_free_gb:.2f}GB"
-                        if resource == "MEM"
-                        else str(physical_val)
-                    )
-
+            if projected_usage > (limit + RESOURCE_BUFFER):
                 LOG.debug(
-                    f"Backpressure: {stage.label} waiting for {resource}",
-                    stage=stage.label,
-                    resource=resource,
-                    usage=f"{projected_usage}/{limit_val}",
-                    physical_free=phys_free_str,
+                    f"Resource {resource} at logical limit: {projected_usage}/{limit}"
                 )
+                return False
+
+            # Check physical availability
+            if (
+                physical_available is not None
+                and physical_available < required_physical
+            ):
+                LOG.debug(f"Resource {resource} physically constrained")
                 return False
 
         return True
 
-    def check_system_saturation(self, available: dict[str, float]) -> None:
-        """Detects if specific hardware resources are near exhaustion.
-
-        Decision: Variable Shadowing Prevention.
-        We use 'effective_val' to process telemetry adjustments without
-        overwriting the loop iterator 'val', preventing static analysis
-        warnings and logic errors.
-        """
-        for res, val in available.items():
-            if res not in ["CPU", "IO", "memory"]:
-                continue
-
-            effective_val = val
-            threshold = 0.5
-            if res == "memory":
-                # If available memory is less than 10% of our logical limit, warn
-                limit_bytes = self._resource_limits.get("MEM", 0) * (1024**3)
-                if val < (limit_bytes * 0.1):
-                    effective_val = 0.0  # Force saturation signal
-
-            if effective_val < threshold:  # Threshold for resource saturation
-                if res not in self._saturated_resources:
-                    LOG.warning(
-                        f"Resource {res} is now SATURATED (Available: {effective_val})"
-                    )
-                    self._saturated_resources.add(res)
-            elif res in self._saturated_resources:
-                LOG.info(
-                    f"Resource {res} saturation cleared (Available: {effective_val})"
-                )
-                self._saturated_resources.remove(res)
-
-    def _get_logical_usage(self) -> dict[str, float]:
-        """Calculates current resource usage based on active stage counts.
-
-        Decision: Logical Accounting.
-        We track resources logically (what we 'expect' a task to use)
-        rather than just physically. This provides more deterministic
-        scheduling than relying on raw pids which might have spikey usage.
-        """
-        usage = defaultdict(float)
-        for stage, actor_ids in self._stage_counts.items():
-            count = len(actor_ids)
-            cost = self.get_cost(stage)
-            for res, val in cost.items():
-                usage[res] += val * count
-        return usage
-
-    def spawn_worker(self, stage: StageName, key: str) -> ray.ObjectRef | None:
-        """Creates a worker and increments internal resource tracking.
+    def spawn_worker(self, stage: Stage, task_key: str) -> ray.ObjectRef | None:
+        """Dispatches a Ray worker to execute a specific task stage.
 
         Args:
-            stage: The execution stage to spawn.
-            key: The unique cache key for the task.
+            stage: The pipeline stage to be executed by the worker.
+            task_key: The unique identifier for the task in the cache.
 
         Returns:
-            ray.ObjectRef | None: The Ray handle, or None if backpressured.
+            ray.ObjectRef | None: A Ray ObjectRef if the worker was spawned,
+                None if resources were insufficient.
 
-        Decision: Resource Tagging.
-        We pass precise resource requirements to Ray .options. This ensures
-        Ray's scheduler places 'CPU' tasks on compute nodes and 'IO' tasks
-        on nodes with faster networking/PVC mounts.
-        """
-        if not self._can_fit(stage):
+        Decision: Resource-Aware Dispatch.
+        Workers are only spawned if `can_spawn_worker` returns True, ensuring
+        that the cluster is not overloaded and tasks are not immediately
+        killed due to resource starvation."""
+        if not self.can_spawn_worker(stage):
             return None
 
-        # Construct options directly from cost
-        cost = self.get_cost(stage)
+        cost = self.get_workload_cost(stage)
 
-        # 2. Tell Ray exactly what this SPECIFIC task costs
+        # Prepare Ray options
         options = {
             "num_cpus": cost.get("CPU", 0.1),
             "resources": {"IO": cost.get("IO", 0.1)},
-            # Ray also handles memory reservations if specified
-            "memory": cost.get("MEM", 0.5) * (1024**3) if "MEM" in cost else None,
         }
-        options = {k: v for k, v in options.items() if v is not None}
+        if "MEM" in cost:
+            options["memory"] = cost["MEM"] * (1024**3)
 
-        # Trigger a stateless TASK instead of an ACTOR
+        worker_name = f"{stage.value}_{short_hash(8)}"
         ref = self.remote_executor.options(**options).remote(
-            f"{stage.label}_{make_short_hash(8)}",  # worker_name,
+            worker_name,
             ray.put(self.exec_ctx),
-            key,
+            task_key,
         )
 
-        # Track the task ID for logical resource counting
-        self._stage_counts[stage].add(ref)
+        self._active_stage_counts[stage].add(ref)
         return ref
 
-    def reclaim_resources(self, ref: ray.ObjectRef | None) -> None:
-        """Reclaims logical resource capacity once a worker completes."""
-        if not ref:
+    def reclaim_resources(self, task_ref: ray.ObjectRef | None) -> None:
+        """Releases the logical resources associated with a completed Ray task.
+
+        Args:
+            task_ref: The Ray ObjectRef of the completed task.
+
+        Decision: Logical Resource Tracking.
+        While Ray handles physical resource deallocation, the Compute manager
+        maintains a logical count of active tasks per stage. This method
+        updates that count, ensuring the `can_spawn_worker` logic remains
+        accurate.
+        """
+        if not task_ref:
             return
 
-        found_stage = None
-
-        # Search for the actor ID across all tracked stages to perform the discard.
-        # This allows the Manager to be agnostic of the stage when reclaiming.
-        for stage, refs in self._stage_counts.items():
-            if ref in refs:
-                refs.discard(ref)
-                found_stage = stage.label
+        for stage, refs in self._active_stage_counts.items():
+            if task_ref in refs:
+                refs.discard(task_ref)
+                LOG.debug(f"Resources reclaimed for {stage.value}")
                 break
 
-        if found_stage:
-            LOG.info("Logical resources reclaimed", stage=found_stage, task_id=str(ref))
         self.refresh_resources()
 
     def reconcile_counts(self) -> None:
-        """Synchronizes internal stage counts with actual running Ray Tasks."""
+        """Synchronizes internal task counts with Ray's global state.
+
+        Decision: Physical Reconciliation.
+        This method acts as a periodic heartbeat to Ray's Global Control Store (GCS).
+        It helps detect and correct any discrepancies between the Compute manager's
+        internal view of active tasks and Ray's actual running tasks, preventing
+        'ghost' tasks from consuming logical resources.
+        """
         try:
-            # 1. List all physically RUNNING tasks in this namespace
-            all_tasks = ray.util.state.list_tasks(filters=[("state", "=", "RUNNING")])
+            running_tasks = ray.util.state.list_tasks(
+                filters=[("state", "=", "RUNNING")]
+            )
+            LOG.debug(f"Physical reconciliation: {len(running_tasks)} active tasks")
+        except Exception:
+            LOG.exception("Failed to reconcile")
 
-            # 2. We keep our current refs, but we can use this to double-check
-            # if our logical budget is way off from reality.
-            # However, because Tasks are short-lived, it's often safer to just
-            # trust the cleanup_finished_tasks loop.
+    def _get_current_resource_usage(self) -> dict[str, float]:
+        """Calculates the current logical resource usage based on active tasks.
 
-            LOG.debug(f"Physical task reconciliation: {len(all_tasks)} tasks active.")
-        except Exception as e:
-            LOG.error("Failed to reconcile task counts", error=str(e))
+        Returns:
+            dict[str, float]: A dictionary mapping resource types (CPU, IO, MEM)
+                to their currently consumed values.
 
-    def purge_leaked_tasks(self) -> None:
-        """Terminates RUNNING tasks from previous sessions on startup.
+        Decision: Aggregated Costing.
+        By summing the costs of all currently active tasks, we get a real-time
+        view of the logical resource footprint, which is then used to enforce limits.
+        """
+        usage = defaultdict(float)
+        for stage, task_ids in self._active_stage_counts.items():
+            count = len(task_ids)
+            cost = self.get_workload_cost(stage)
+            for resource, value in cost.items():
+                usage[resource] += value * count
+        return usage
 
-        Decision: Logical Budget Reset.
-        Ray workers can survive an orchestrator crash (Zombie workers). We
-        purge any active tasks matching our namespace convention to ensure
-        the logical resource budget is 100% accurate on cold start.
+    def _check_resource_saturation(self) -> None:
+        """Detects and logs when Ray cluster resources are nearing saturation.
+
+        Decision: Proactive Warning.
+        Logging saturation warnings helps operators identify potential bottlenecks
+        before they lead to task failures or performance degradation. The use of
+        `_saturated_resources` prevents log spam by only reporting state changes.
+
+        Decision: Memory-Specific Threshold.
+        Memory is treated differently due to its critical nature. A lower threshold
+        (10% remaining) triggers a saturation warning for memory.
+        """
+        for resource, available in self._available_resources.items():
+            if resource not in RAY_RESOURCE_NAMES.values():
+                continue
+
+            is_saturated = False
+
+            if resource == "memory":
+                limit_bytes = self._resource_limits["MEM"] * (1024**3)
+                if available < (limit_bytes * 0.1):
+                    is_saturated = True
+            elif available < 0.5:
+                is_saturated = True
+
+            if is_saturated and resource not in self._saturated_resources:
+                LOG.warning(f"Resource {resource} is saturated")
+                self._saturated_resources.add(resource)
+            elif not is_saturated and resource in self._saturated_resources:
+                LOG.info(f"Resource {resource} recovered")
+                self._saturated_resources.remove(resource)
+
+    def _purge_orphaned_tasks(self) -> None:
+        """Terminates any orphaned Ray tasks left over from previous runs.
+
+        Decision: Clean Slate Initialization.
+        During startup, the Compute manager actively scans for and cancels
+        any Ray tasks that might have been left running by a crashed or
+        improperly shut down orchestrator. This prevents 'ghost' tasks
+        from consuming resources or interfering with new runs.
+
+        Decision: Stage-Based Filtering.
+        We only target tasks whose names start with a known pipeline stage
+        label, avoiding the accidental termination of unrelated Ray actors.
         """
         try:
             if not ray.is_initialized():
                 return
 
-            # 1. List all physically RUNNING tasks
             all_tasks = ray.util.state.list_tasks(filters=[("state", "=", "RUNNING")])
+            stage_labels = {s.value for s in Stage}
             purged = 0
-            valid_labels = {s.label for s in StageName}
 
             for task in all_tasks:
-                name = task.get("name")
-                # Our convention: {stage_label}_{hash}
-                if name and "_" in name:
-                    label = name.split("_")[0]
-                    if label in valid_labels:
-                        # 2. Cancel the task to free up resources immediately
-                        ray.cancel(task["task_id"], force=True)
-                        purged += 1
+                name = task.get("name", "")
+                if "_" in name and name.split("_")[0] in stage_labels:
+                    ray.cancel(task["task_id"], force=True)
+                    purged += 1
 
             if purged > 0:
-                LOG.info("Purged leaked Ray tasks on startup", count=purged)
+                LOG.info(f"Purged {purged} orphaned Ray tasks")
         except Exception as e:
-            LOG.debug("Leaked task purge skipped or failed", error=str(e))
+            LOG.debug(f"Orphan purge skipped: {e}")

@@ -32,11 +32,13 @@ def test_zero_row_extraction_graceful_exit(runtime, tmp_path):
     """
     GIVEN a source that returns 0 rows
     WHEN the extraction stage runs
-    THEN the pipeline should complete successfully with 0 rows documented in the manifest
+    THEN the pipeline should complete successfully with 0 rows
+        documented in the manifest
     """
     # Mock the reader to return an empty list of files
     with patch(
-        "apps.ingestion.src.core.strategies.extract.DataReader.fetch", return_value=[]
+        "apps.ingestion.src.core.strategies.extract.DataExtractor.fetch",
+        return_value=[],
     ):
         run_ids = runtime.orchestrator._trigger_job("test_job", "test_dataset")
         run_id = next(iter(run_ids))
