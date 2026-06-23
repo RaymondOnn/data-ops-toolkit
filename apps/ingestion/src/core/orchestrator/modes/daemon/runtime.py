@@ -284,7 +284,7 @@ class DaemonRuntime:
 
     def _poll_and_trigger(self) -> None:
         """Poll database and evaluate triggers."""
-        self.orchestrator.builder._settings_cache.clear()
+        # self.orchestrator.builder._settings_cache.clear()
         self.orchestrator.state.flush()
 
         active_runs = self.state.refresh()

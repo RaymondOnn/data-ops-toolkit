@@ -6,7 +6,7 @@ from .diskcache import DiskCache
 from .redis import RedisCache
 
 
-def get_cache(workspace_dir: Path, cache_cfg: dict[str, Any]) -> KeyValueCache:
+def get_cache(cache_cfg: dict[str, Any]) -> KeyValueCache:
     """
     Standalone factory to create a normalized CacheService.
     Infrastructure-level: does not depend on Core or Services.
@@ -20,6 +20,9 @@ def get_cache(workspace_dir: Path, cache_cfg: dict[str, Any]) -> KeyValueCache:
     Returns:
         KeyValueCache: A concrete implementation of the cache interface.
     """
+
+    print(f"cache_cfg: {cache_cfg}")
+
     if cache_cfg.get("type") == "redis":
         return RedisCache(
             host=cache_cfg["host"],
@@ -29,4 +32,4 @@ def get_cache(workspace_dir: Path, cache_cfg: dict[str, Any]) -> KeyValueCache:
 
     # Default to lean mode (Diskcache)
     cache_filepath = cache_cfg.get("filepath", ".cache")
-    return DiskCache(cache_path=(workspace_dir / cache_filepath).resolve())
+    return DiskCache(cache_path=Path(cache_filepath).expanduser().resolve())

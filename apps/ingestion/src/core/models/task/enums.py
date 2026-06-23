@@ -47,7 +47,7 @@ class TaskRef(msgspec.Struct, frozen=True):
     namespace: str = "task"
 
     @classmethod
-    def from_str(cls, key: str) -> "TaskRef":
+    def from_key(cls, key: str) -> "TaskRef":
         """Parse colon-delimited string into TaskRef."""
         parts = key.split(":")
         if len(parts) != 7:

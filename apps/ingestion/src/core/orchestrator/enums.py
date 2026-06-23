@@ -59,6 +59,7 @@ class TaskMetadata(msgspec.Struct):
     current_stage: str
     status: str = "WAITING"
     last_hb: float = msgspec.field(default_factory=time.time)
+    next_attempt_ts: str | None = None
     retry_count: int = 0
     rewind_history: dict[str, str] = msgspec.field(default_factory=dict)
     expires_at: float | None = None

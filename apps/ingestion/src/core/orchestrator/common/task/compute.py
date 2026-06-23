@@ -248,12 +248,15 @@ class Compute:
 
         return True
 
-    def spawn_worker(self, stage: Stage, task_key: str) -> ray.ObjectRef | None:
+    def spawn_worker(
+        self, stage: Stage, task_key: str, msg_id: str | None = None
+    ) -> ray.ObjectRef | None:
         """Dispatches a Ray worker to execute a specific task stage.
 
         Args:
             stage: The pipeline stage to be executed by the worker.
             task_key: The unique identifier for the task in the cache.
+            msg_id: The FlashQ message ID to be passed to the executor.
 
         Returns:
             ray.ObjectRef | None: A Ray ObjectRef if the worker was spawned,
@@ -281,6 +284,7 @@ class Compute:
             worker_name,
             ray.put(self.exec_ctx),
             task_key,
+            msg_id,
         )
 
         self._active_stage_counts[stage].add(ref)

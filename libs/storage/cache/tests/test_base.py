@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from typing import Any
 
 import pytest
-from libs.cache.base import KeyValueCache
+from libs.storage.cache.base import KeyValueCache
 
 
 class MockCache(KeyValueCache):

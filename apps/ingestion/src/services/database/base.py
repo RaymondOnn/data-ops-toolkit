@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
+from apps.ingestion.src.core.monitor import monitor
 from apps.ingestion.src.services.base import Service, Sink, Source
-from apps.ingestion.src.services.monitor import monitor
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitBreaker
 from loguru import logger

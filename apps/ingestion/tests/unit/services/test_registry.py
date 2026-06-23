@@ -1,7 +1,7 @@
 import time
 
 import pytest
-from apps.ingestion.src.services.monitor import ServiceMonitor, monitor
+from apps.ingestion.src.core.monitor import ServiceMonitor, monitor
 from libs.resilience.circuit_breaker import CircuitBreaker, CircuitOpen
 
 

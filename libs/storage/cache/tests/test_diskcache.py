@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from libs.cache.diskcache import DiskCache
+from libs.storage.cache.diskcache import DiskCache
 
 
 class TestDiskCache:

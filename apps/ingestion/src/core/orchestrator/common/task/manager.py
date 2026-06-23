@@ -1,49 +1,35 @@
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import msgspec
 from apps.ingestion.src.core.contexts import ExecutionContext
 from apps.ingestion.src.core.models.stages.enums import Stage
 from apps.ingestion.src.core.models.task import ExecutionStatus
+from apps.ingestion.src.core.monitor import ServiceMonitor
+from apps.ingestion.src.core.orchestrator.common.state import StateHub
 from apps.ingestion.src.core.orchestrator.contracts.policies import (
     AdmissionPolicy,
     MaintenancePolicy,
 )
-from apps.ingestion.src.core.orchestrator.enums import TaskMetadata, TaskRef, TaskUpdate
+from apps.ingestion.src.core.orchestrator.enums import TaskMetadata, TaskRef
 from apps.ingestion.src.services.factory import ServiceFactory
-from apps.ingestion.src.services.monitor import ServiceMonitor
-from apps.ingestion.src.utils.constants import (
-    CACHE_TASK_NAMESPACE,
-    STRIP_TZ_FOR_DB,
-)
+from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE
 from apps.ingestion.src.utils.dates import end_of_day_timestamp
 from filelock import FileLock
-from libs.cache.factory import get_cache
-from libs.utils.dates import current_timestamp
+from libs.storage.cache.factory import get_cache
+from libs.utils.dates import seconds_diff
 from loguru import logger
 
 from .compute import Compute
-from .state import StateHub
+from .queue import TaskQueue
 
 if TYPE_CHECKING:
     import ray
 
 LOG = logger
-STAGES_PRIORITY: dict[Stage, int] = {
-    Stage.ARCHIVE: 100,
-    Stage.PUBLISH: 80,
-    Stage.WRITE: 60,
-    Stage.TRANSFORM: 40,
-    Stage.EXTRACT: 20,
-    Stage.START: 10,
-}
-
-# Internal weights to prioritize status within the same stage.
-STATUS_WEIGHTS: dict[ExecutionStatus, int] = {
-    ExecutionStatus.RETRY: 5,  # Highest: Finish what we started
-    ExecutionStatus.BLOCKED: 3,  # High: Clear backlogs after service recovery
-    ExecutionStatus.WAITING: 0,  # Baseline: New work
-}
+PROBE_COOLDOWN_SECS = 3600
 
 
 class TaskManager:
@@ -69,7 +55,6 @@ class TaskManager:
         state_store: StateHub,
         admission_policy: AdmissionPolicy,
         maintenance_policy: MaintenancePolicy,
-        cache_dir: str = ".cache/ingestion",
     ):
         """Initializes the TaskManager and provisions workspace roots.
 
@@ -94,7 +79,10 @@ class TaskManager:
 
         # 2. Initialize the Global Registry (Diskcache)
         # This ensures the shared cache path exists for all Ray workers
-        ServiceMonitor.setup(self.exec_ctx.workspace_dir, self.exec_ctx.cache_config)
+        ServiceMonitor.setup(
+            signal_dir=self.exec_ctx.signal_path,
+            cache_config=self.exec_ctx.cache_config,
+        )
         self.registry = ServiceMonitor()
 
         # CRITICAL: Create cache directory in the parent process BEFORE
@@ -105,7 +93,9 @@ class TaskManager:
                 parents=True, exist_ok=True
             )
 
-        self.cache = get_cache(self.exec_ctx.workspace_dir, self.exec_ctx.cache_config)
+        self.cache = get_cache(self.exec_ctx.cache_config)
+        self.queue = TaskQueue(self.exec_ctx.task_queue_config)
+
         self._loop_counter = 0
         self.lock = FileLock(self.exec_ctx.lock_file)
         self.is_degraded = False
@@ -115,7 +105,6 @@ class TaskManager:
         self._last_summary_state: tuple[int, bool] = (0, False)
 
         # Decision: Probing Cooldown.
-        self.PROBE_COOLDOWN_SEC = 300  # 5 minutes
         self._last_probe_ts: float = 0
 
         try:
@@ -192,22 +181,19 @@ class TaskManager:
             LOG.info(
                 "Queued Task", run_id=task_ref.identity.run_id, stage=task_ref.stage
             )
+
+            # Push to FlashQ with priority and group (concurrency control per job)
+            self.queue.push(meta, task_ref.stage, task_ref.status)
+
             return task_ref
         return None
 
     def dispatch(self) -> None:
         """Main dispatch loop: reconciles resource status and spawns workers.
 
-        Decision: Priority Dispatch.
-        We score tasks based on their Stage (e.g., ARCHIVE before EXTRACT)
-        to ensure the system clears its local disk backlog before
-        ingesting more data.
-
-        Decision: Tactical Reclamation.
-        We call cleanup_tasks at the start of every tick. This ensures that
-        ObjectRefs for finished tasks are released immediately, giving
-        the TaskManager an accurate view of available compute slots
-        before it attempts a new dispatch.
+        Notes:
+        - Higher priority on stages that reduce disk usage to ensure the
+        system clears its local disk backlog before ingesting more data.
         """
         # Delegate resource cleanup to maintenance policy
         self.maintenance_policy.cleanup_tasks(self._active_tasks, self.compute)
@@ -217,145 +203,90 @@ class TaskManager:
 
         # Active Recovery: Attempt to clear circuit breakers
         self.probe_blocked_services()
-
         self.compute.refresh_resources()
 
-        valid_statuses = {
-            ExecutionStatus.WAITING,
-            ExecutionStatus.RETRY,
-            ExecutionStatus.BLOCKED,
-        }
-        # now_ts, midnight_ts = time.time(), self._get_midnight_ts()
         now_ts = time.time()
-        scored_keys = []
-        for status in valid_statuses:
-            for k in self.cache.iterkeys(
-                pattern=f"{CACHE_TASK_NAMESPACE}:{status.value}:*"
-            ):
-                try:
-                    ref = TaskRef.from_str(k)
-                    # Calculate priority: Stage Base + Status Bonus
-                    base_priority = STAGES_PRIORITY.get(Stage(ref.stage), 0)
-                    status_bonus = STATUS_WEIGHTS.get(status, 0)
-                    priority = base_priority + status_bonus
-
-                    scored_keys.append((priority, k))
-                except ValueError:
-                    continue
-
-        candidate_keys = [k for _, k in sorted(scored_keys, reverse=True)]
         dispatch_count = 0
-        deferred_count = 0
 
-        for key in candidate_keys:
-            task_ref = TaskRef.from_str(key)
-            task_meta: TaskMetadata = self.cache.get(key)
+        # Pop and process messages from FlashQ
+        while True:
+            msg = self.queue.pop(visibility_timeout=300)
+            if not msg:
+                break
+
+            task_meta = self._decode_message(msg)
             if not task_meta:
                 continue
 
-            # # Once past midnight, BLOCKED tasks transition to FAILED
-            # if task_ref.status == ExecutionStatus.BLOCKED and now_ts >= midnight_ts:
-            #     LOG.error(
-            #         "Failing blocked task: outage exceeded midnight threshold.",
-            #         run_id=task_ref.identity.run_id,
-            #         service=task_meta.blocked_by,
-            #     )
-            #     remark = "Failed: Service outage persisted past midnight."
-            #     self.state_store.update_task(
-            #         task_ref.identity.run_id,
-            #         TaskUpdate(
-            #             JOB_ID=task_meta.job_id,
-            #             DATASET_ID=task_meta.dataset_id,
-            #             PARTITION_DATE=task_meta.partition_date,
-            #             JOB_STATUS=ExecutionStatus.FAILED.value,
-            #             REMARKS=remark,
-            #             LAST_UPDATED_AT_TS_LC=current_timestamp(
-            #                 naive=STRIP_TZ_FOR_DB
-            #             ).isoformat(sep=" "),
-            #         ),
-            #     )
-            #     self.cache.pop(key, None)
-            #     failed_key = task_ref.build(status=ExecutionStatus.FAILED)
-            #     task_meta.status = ExecutionStatus.FAILED.value
-            #     self.cache[failed_key] = task_meta
-            #     continue
-
-            ready = (
-                (task_ref.status == ExecutionStatus.WAITING)
-                or (
-                    task_ref.status == ExecutionStatus.RETRY
-                    and now_ts >= task_meta.last_hb
-                )
-                or (
-                    task_ref.status == ExecutionStatus.BLOCKED
-                    and ServiceMonitor.is_healthy(task_meta.blocked_by or "")
-                    and now_ts >= task_meta.last_hb
-                )
-            )
-
-            if not ready:
+            if not self._is_task_ready(task_meta, now_ts):
                 continue
 
-            # Prepare state update
-            task_meta.status = ExecutionStatus.DISPATCHED.value
-            task_meta.last_hb = time.time()
-            new_key = task_ref.build(status=ExecutionStatus.DISPATCHED)
-
-            # We must update the cache BEFORE spawning the worker. Otherwise,
-            # a fast-starting worker will look for its key before the manager
-            # has finished writing it.
-            with self.lock:
-                self.cache.pop(key, None)
-                self.cache[new_key] = task_meta
-
-            ref = self.compute.spawn_worker(
-                stage=Stage(task_ref.stage), task_key=new_key
-            )
-
-            if ref:
-                self.state_store.update_task(
-                    task_ref.identity.run_id,
-                    TaskUpdate(
-                        JOB_ID=task_meta.job_id,
-                        DATASET_ID=task_meta.dataset_id,
-                        PARTITION_DATE=task_meta.partition_date,
-                        JOB_STATUS=task_meta.status,
-                        CURRENT_STAGE=task_ref.stage,
-                        LAST_UPDATED_AT_TS_LC=current_timestamp(
-                            naive=STRIP_TZ_FOR_DB
-                        ).isoformat(sep=" "),
-                    ),
-                )
-                self._active_tasks[ref] = new_key
+            if self._dispatch_task(task_meta, msg):
                 dispatch_count += 1
-                LOG.success(
-                    "Dispatching task",
-                    job_id=task_meta.job_id,
-                    run_id=task_ref.identity.run_id,
-                    stage=task_ref.stage,
-                )
             else:
-                # Rollback cache if spawn failed (e.g. Ray resources suddenly full)
-                with self.lock:
-                    self.cache.pop(new_key, None)
-                    task_meta.status = task_ref.status  # Restore old status
-                    self.cache[key] = task_meta
+                # System saturated, stop popping
+                break
 
-                deferred_count += 1
+        if dispatch_count > 0:
+            LOG.debug(f"Tick Summary: Dispatched {dispatch_count} tasks.")
 
-        if deferred_count > 0 and dispatch_count == 0:
-            LOG.info(
-                f"Resource Backpressure: {deferred_count} tasks (RETRY/WAITING) "
-                "are ready but blocked by physical CPU/MEM or logical limits."
-            )
+    def _decode_message(self, msg) -> TaskMetadata | None:
+        """Decode message data into TaskMetadata."""
+        try:
+            match msg.data:
+                case dict():
+                    return msgspec.convert(msg.data, type=TaskMetadata)
+                case bytes():
+                    return msgspec.json.decode(msg.data, type=TaskMetadata)
+                case str():
+                    return msgspec.json.decode(msg.data.encode(), type=TaskMetadata)
+                case _:
+                    LOG.error(f"Unsupported message data type: {type(msg.data)}")
+                    return None
+        except (msgspec.DecodeError, TypeError, ValueError) as e:
+            LOG.error(f"Failed to decode message: {e}")
+            return None
 
-    def _get_all_keys(self) -> list[str]:
-        """Fetches a snapshot of all task keys from the cache.
+    def _is_task_ready(self, task_meta: TaskMetadata, now_ts: float) -> bool:
+        """Check if task is ready for dispatch."""
+        if task_meta.status != ExecutionStatus.RETRY:
+            return True
 
-        Returns:
-            list[str]: All keys in the task namespace.
-        """
-        return list(self.cache.iterkeys(pattern=f"{CACHE_TASK_NAMESPACE}:*"))
+        # For RETRY status, check if next_attempt_ts has passed
+        if task_meta.next_attempt_ts is not None:
+            if seconds_diff(task_meta.next_attempt_ts, now_ts) < 0:
+                LOG.debug(
+                    "Task is not ready for retry",
+                    run_id=TaskMetadata.to_ref(task_meta).identity.run_id,
+                )
+                return False
+            # Clear the retry timestamp since we're about to dispatch
+            task_meta.next_attempt_ts = None
+
+        return True
+
+    def _dispatch_task(self, task_meta: TaskMetadata, msg) -> bool:
+        """Dispatch a single task to a worker."""
+        task_ref = TaskMetadata.to_ref(task_meta)
+
+        # Update status for dispatch
+        task_meta.status = ExecutionStatus.DISPATCHED.value
+        task_meta.last_hb = time.time()
+        new_key = task_ref.build(status=ExecutionStatus.DISPATCHED)
+
+        # Spawn worker
+        ref = self.compute.spawn_worker(
+            stage=Stage(task_ref.stage),
+            task_key=new_key,
+            msg_id=msg.id,
+        )
+
+        if not ref:
+            return False  # System saturated
+
+        self._active_tasks[ref] = new_key
+        LOG.success("Dispatching task", run_id=task_ref.identity.run_id)
+        return True
 
     def recover_zombie_tasks(self) -> None:
         """Reclaims tasks in RUNNING state without active Ray workers.
@@ -365,9 +296,13 @@ class TaskManager:
         self-heals from worker SIGKILLs without requiring manual
         intervention.
         """
-        self.maintenance_policy.run(
+        recovered = self.maintenance_policy.run(
             self.cache, self.lock, self._active_tasks, self.compute, self.exec_ctx
         )
+        if recovered:
+            for meta, stage in recovered:
+                self.queue.push(meta, stage)
+                LOG.info(f"Re-queued recovered zombie task: {meta.run_id}")
 
     def probe_blocked_services(self) -> None:
         """Identifies unique blocked services and performs health probes.
@@ -378,34 +313,31 @@ class TaskManager:
         connection check.
 
         Decision: Throttled Probing.
-        We enforce a PROBE_COOLDOWN_SEC to prevent excessive network traffic
+        We enforce a PROBE_COOLDOWN_SECS to prevent excessive network traffic
         during long-duration infrastructure outages.
         """
         now = time.time()
-        if now - self._last_probe_ts < self.PROBE_COOLDOWN_SEC:
+        if now - self._last_probe_ts < PROBE_COOLDOWN_SECS:
             return
 
         self._last_probe_ts = now
-        blocked_info = {}  # service_name -> sample_task_key
-        for k in self.cache.iterkeys(
-            pattern=f"{CACHE_TASK_NAMESPACE}:{ExecutionStatus.BLOCKED.value}:*"
+        blocked_info = defaultdict(str)  # service_name -> sample_task_key
+        for k in set(
+            self.cache.iterkeys(
+                pattern=f"{CACHE_TASK_NAMESPACE}:{ExecutionStatus.BLOCKED.value}:*"
+            )
         ):
             meta = self.cache.get(k)
-            if meta and meta.blocked_by and meta.blocked_by not in blocked_info:
+            if meta and meta.blocked_by:
                 blocked_info[meta.blocked_by] = k
 
         if not blocked_info:
             return
 
         for svc_name, task_key in blocked_info.items():
-            if not ServiceMonitor.is_healthy(svc_name):
+            if ServiceMonitor.is_healthy(svc_name):
                 LOG.debug(f"Probing blocked service: {svc_name}")
 
-                # Decision: Late Binding Fix.
-                # We capture svc_name as a default argument (s_name) to ensure
-                # the closure binds to the value at definition time,
-                # preventing loop-variable leakage during asynchronous
-                # execution or deferred evaluation.
                 def _ping(s_name: str = svc_name, t_key: str = task_key) -> bool:
                     try:
                         svc = ServiceFactory.get(s_name)
@@ -434,4 +366,9 @@ class TaskManager:
                     except Exception:
                         return False
 
-                ServiceMonitor.probe(svc_name, _ping)
+                if ServiceMonitor.probe(svc_name, _ping):
+                    # Re-queue tasks for the recovered service
+                    task_ref = TaskRef.from_key(task_key)
+                    meta = self.cache.get(task_key)
+                    self.queue.push(meta, task_ref.stage, ExecutionStatus.BLOCKED)
+                    LOG.info(f"Re-queued blocked task: {task_ref.identity.run_id}")

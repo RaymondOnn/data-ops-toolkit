@@ -23,9 +23,9 @@ from libs.utils.system import get_disk_usage, get_system_vitals
 from loguru import logger
 
 from .janitor import Janitor
-from .manager import TaskManager
 from .signals import SignalEvent, SignalScanner
 from .state import StateHub
+from .task import TaskManager
 
 LOG = logger
 
@@ -61,12 +61,11 @@ class Orchestrator:
 
     def _init_services(self) -> None:
         """Initialize service providers."""
-        (self.exec_ctx.workspace_dir / "logs").mkdir(parents=True, exist_ok=True)
+        # Ensure standard directories and vaults exist
+        for dir_name in ["logs", "FAILED"]:
+            (self.exec_ctx.workspace_dir / dir_name).mkdir(parents=True, exist_ok=True)
 
         try:
-            self.exec_ctx.provider_config = self.builder.app_settings.get(
-                "secret_provider", {}
-            ).to_dict()
             ServiceFactory.get_provider(
                 self.exec_ctx.env, self.exec_ctx.provider_config
             )
@@ -111,18 +110,20 @@ class Orchestrator:
     def _on_terminal_task(self, event: SignalEvent, success: bool) -> None:
         """Unified handler for terminal task states."""
         log_fn = LOG.success if success else LOG.error
+        task = None
 
         error_context = ""
         traceback_str = None
         if event.folder_path:
             with suppress(Exception):
                 task = Task.from_path(event.folder_path, self.exec_ctx)
-                err = task.manifest.error
-                if err:
-                    error_context = (
-                        f" | Stage: {err.stage.upper()} | Error: {err.message}"
-                    )
-                    traceback_str = err.traceback
+                if task:
+                    err = task.manifest.error
+                    if err:
+                        error_context = (
+                            f" | Stage: {err.stage.upper()} | Error: {err.message}"
+                        )
+                        traceback_str = err.traceback
 
         log_fn(
             f"Task {'completed' if success else 'failed'}: "
@@ -133,11 +134,15 @@ class Orchestrator:
 
         if event.folder_path:
             self.state.sync_manifest(event.folder_path, deep_sync=True)
+
+            # Ensure we have the rehydrated task to check its terminal status
+            if not task:
+                with suppress(Exception):
+                    task = Task.from_path(event.folder_path, self.exec_ctx)
+
             if success:
-                self.janitor._cleanup_task(
-                    Task.from_path(event.folder_path, self.exec_ctx)
-                )
-            else:
+                self.janitor._cleanup_task(task)
+            elif task and task.manifest.status != ExecutionStatus.BLOCKED:
                 self.janitor.quarantine(event.folder_path, "FAILED")
 
     def _on_task_sync(self, event: SignalEvent) -> None:
@@ -163,7 +168,7 @@ class Orchestrator:
         run_ids = set()
         contexts = self.builder.build(
             job_id=job_id,
-            dataset_id=dataset_id,
+            dataset_ids=dataset_id,
             partition_date=partition_date,
             overrides=overrides,
         )
@@ -237,13 +242,17 @@ class Orchestrator:
 
         for run_id in run_ids:
             record = self.state.store.records.get(run_id)
-            if record and ExecutionStatus(record.JOB_STATUS) == ExecutionStatus.FAILED:
+            if record and ExecutionStatus(record.JOB_STATUS) in (
+                ExecutionStatus.FAILED,
+                ExecutionStatus.BLOCKED,
+            ):
+                status = ExecutionStatus(record.JOB_STATUS).value
                 error_info = record.ERRORS or {}
                 error_type = error_info.get("error_type", "RuntimeError")
                 message = error_info.get("message", "Unknown Error")
                 stage = error_info.get("stage", record.CURRENT_STAGE or "Unknown")
                 failures.append(
-                    f"[Run: {run_id} | Stage: {stage}] {error_type}: {message}"
+                    f"[Run: {run_id} | Stage: {stage} | Status: {status}] {error_type}: {message}"
                 )
 
         if failures:

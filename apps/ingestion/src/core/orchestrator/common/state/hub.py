@@ -38,10 +38,6 @@ class StateHub:
             db_config: Configuration for the ClickHouse telemetry sink.
             exec_ctx: The global execution context for workspace pathing.
 
-        Decision: Workspace Ownership.
-        The Hub ensures the state directory exists during initialization.
-        This guarantees that the append-only stream file has a valid
-        destination before any tasks are dispatched.
         """
         self.exec_ctx = exec_ctx
         self.workspace_dir = exec_ctx.state_path
@@ -81,10 +77,10 @@ class StateHub:
             run_id: Unique identifier for the run.
             updates: A TaskUpdate struct or dictionary of changes.
 
-        Decision: Conditional Streaming.
-        The stream only receives an update if the store detects an
-        actual value change. This prevents redundant I/O for
-        idempotent heartbeats.
+        Notes:
+            The stream only receives an update if the store detects an
+            actual value change. This prevents redundant I/O for
+            idempotent heartbeats.
         """
         LOG.debug("Updating task state", run_id=run_id, updates=str(updates)[:200])
 
@@ -102,20 +98,17 @@ class StateHub:
         Args:
             run_id: The ID to remove.
         """
-        LOG.debug("Removing task from state tracking", run_id=run_id)
         self.store.remove(run_id)
 
     def sync_manifest(self, folder_path: Path | str, deep_sync: bool = False) -> None:
         """Synchronizes a physical manifest file back into the state engine.
 
+        The manifest file is used as canonical log for the task.
+        Hence, saving ir to database for audit purposes
+
         Args:
             folder_path: Path to the task's workspace folder.
             deep_sync: If True, includes the full manifest JSON in the update.
-
-        Decision: Path Resolution Fallback.
-        If a run_id string is passed, we attempt a deep search in the
-        workspace. This allows the CLI to sync tasks that may have
-        been moved to the FAILED or HOLD vaults.
         """
         if isinstance(folder_path, str) and not Path(folder_path).exists():
             resolved = find_path(self.exec_ctx.workspace_dir, folder_path)
@@ -126,7 +119,6 @@ class StateHub:
                 return
             folder_path = resolved
 
-        LOG.debug("Syncing manifest to state", path=str(folder_path), deep=deep_sync)
         self.source.sync_folder(Path(folder_path), deep_sync)
 
     def find_task_path(self, identifier: str) -> Path | None:
@@ -140,9 +132,9 @@ class StateHub:
         """
         path = find_path(self.exec_ctx.workspace_dir, identifier)
         if path and path.exists():
-            LOG.debug("Found task path", identifier=identifier, path=str(path))
+            LOG.trace("Found task path", identifier=identifier, path=str(path))
         else:
-            LOG.debug("Task path not found", identifier=identifier)
+            LOG.trace("Task path not found", identifier=identifier)
         return path if path and path.exists() else None
 
     def flush(self) -> None:

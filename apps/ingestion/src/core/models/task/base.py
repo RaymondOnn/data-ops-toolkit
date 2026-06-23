@@ -188,3 +188,20 @@ class Task:
     def purge(self) -> None:
         """Delete all task data (metadata and artifacts)."""
         self.workspace.delete(include_data=True)
+
+    def get_archive_path(self, base_path: str = "", suffix: str = "") -> str:
+        """Generate standardized archive path for this task.
+
+        Args:
+            base_path: Base archive path (e.g., s3://archive-vault)
+            suffix: Optional suffix like "/extract" or "/transform"
+
+        Returns:
+            Formatted archive path: {base_path}/{job_id}/{partition_date}/{run_id}{suffix}
+        """
+        path = f"{self.job_id}/{self.partition_date}/{self.run_id}"
+        if base_path:
+            f"{base_path.rstrip('/')}/{path}"
+        if suffix:
+            path = f"{path}/{suffix.lstrip('/')}"
+        return path

@@ -93,7 +93,7 @@ class ExtractConfig(BaseConfig):
     """Configuration for data extraction."""
 
     type: str  # "postgres", "s3", "local", etc.
-    resource: str | None  # Table name, path, or endpoint
+    resource: str  # Table name, path, or endpoint
     num_workers: int = 10
     load_mode: Literal["snapshot", "delta"] = "snapshot"
     service: dict[str, Any] = msgspec.field(default_factory=dict)
@@ -292,9 +292,8 @@ class ArchiveConfig(BaseConfig, omit_defaults=True):
 
         return cls(
             enabled=archive_enabled,
-            retention_days=overrides.get("retention_days")
-            or params.pop("retention_days", None),
-            base_path=overrides.get("base_path") or params.pop("base_path", None),
+            retention_days=overrides.get("retention_days"),
+            base_path=service["url"],
             type=service["type"].casefold(),
             service=service,
         )

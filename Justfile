@@ -211,4 +211,4 @@ local-serve clean="false":
     just docker-up
     just wait-for-ch
     @echo "🤖 Starting Orchestrator in ALWAYS-ON mode..."
-    uv run python -m apps.ingestion start --debug
+    uv run python -m apps.ingestion start -vv

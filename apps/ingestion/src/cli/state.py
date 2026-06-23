@@ -12,7 +12,11 @@ modules to inspect runtime flags (like dry_run) without importing the
 heavy Typer action implementations.
 """
 
-state: dict[str, Any] = {"dry_run": False, "debug": False, "ray_mode": RayMode.CLUSTER}
+state: dict[str, Any] = {
+    "dry_run": False,
+    "verbose_level": 0,
+    "ray_mode": RayMode.CLUSTER,
+}
 
 # Decision: Centralized App Instance.
 # We instantiate the Typer app here so that implementation modules can use
@@ -21,11 +25,11 @@ state: dict[str, Any] = {"dry_run": False, "debug": False, "ray_mode": RayMode.C
 app = typer.Typer(help="50M Row Ingest Pipeline")
 
 
-def configure_runtime(debug: bool, dry_run: bool, ray_mode: str = "cluster") -> None:
+def configure_runtime(verbose: int, dry_run: bool, ray_mode: str = "cluster") -> None:
     """Applies global runtime configurations to the internal state.
 
     Args:
-        debug: Enables verbose logging and diagnostic hooks.
+        verbose: Countable verbosity level (0-5).
         dry_run: Prevents physical side-effects (DB writes, file moves).
         ray_mode: Determines the compute backend (local vs cluster).
 
@@ -36,16 +40,18 @@ def configure_runtime(debug: bool, dry_run: bool, ray_mode: str = "cluster") -> 
     actions and the entry point.
     """
     state["dry_run"] = dry_run
-    state["debug"] = debug
+    state["verbose_level"] = verbose
     state["ray_mode"] = RayMode(ray_mode.lower())
 
-    if debug:
-        typer.secho("🔧 DEBUG MODE: ON", fg="cyan")
+    if verbose > 0:
+        typer.secho(f"📢 VERBOSITY LEVEL: {verbose}", fg="cyan")
 
 
 def apply_global_options(
     dry_run: bool = typer.Option(False, "--dry-run", help="Simulate execution"),
-    debug: bool = typer.Option(False, "--debug", help="Global debug logging"),
+    verbose: int = typer.Option(
+        0, "--verbose", "-v", count=True, help="Set verbosity level"
+    ),
     ray_mode: str = typer.Option(
         "cluster", "--ray_mode", help="Ray execution mode (local/cluster)"
     ),
@@ -54,7 +60,7 @@ def apply_global_options(
 
     Args:
         dry_run: Flag to simulate data processing.
-        debug: Flag to enable verbose platform logging.
+        verbose: Countable verbosity level.
         ray_mode: Mode string for the Ray initialization logic.
 
     Decision: Centralized Injection.
@@ -62,4 +68,4 @@ def apply_global_options(
     automatically inherits the same configuration behavior and state logic,
     maintaining a consistent developer experience across the CLI.
     """
-    configure_runtime(debug, dry_run, ray_mode)
+    configure_runtime(verbose, dry_run, ray_mode)

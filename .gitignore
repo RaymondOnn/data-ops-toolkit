@@ -22,3 +22,11 @@ mock_data/test_large_job.zip
 # direnv
 .envrc
 .direnv/
+
+
+# notes
+**/tasks.md
+**/checklist.md
+**/requirements.md
+
+apps/ingestion/src/tasks.md

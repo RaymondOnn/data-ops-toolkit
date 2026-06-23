@@ -16,7 +16,6 @@ class TestTaskSession:
         executor.worker_id = "worker-123"
         executor.exec_ctx.workspace_dir = MagicMock()
         executor.exec_ctx.is_prod = False
-        executor.exec_ctx.is_debug = True
         return executor
 
     @pytest.fixture

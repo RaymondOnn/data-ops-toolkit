@@ -250,12 +250,12 @@ class Archive(Service, ABC):
     """Base class for archival and backup services."""
 
     @abstractmethod
-    def store(self, source_dir: Any, archive_path: str) -> None:
+    def store(self, source: Any, dest: str) -> None:
         """
         Moves or copies data to a persistent archival destination.
 
         Args:
-            source_dir: The path containing items to archive.
-            archive_path: The destination root or specific identifier.
+            source: The path containing items to archive.
+            dest: The destination root or specific identifier.
         """
         pass

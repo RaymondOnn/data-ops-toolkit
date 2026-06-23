@@ -1,0 +1,12 @@
+[project]
+name = "storage"
+version = "0.1.0"
+dependencies = [
+    "diskcache>=4.1.0",
+    "redis>=4.3.4",
+]
+requires-python = ">=3.11"
+
+[tool.setuptools]
+packages = ["storage"]
+package-dir = { "storage" = "." }

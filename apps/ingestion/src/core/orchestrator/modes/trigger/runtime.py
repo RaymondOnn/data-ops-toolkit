@@ -118,7 +118,7 @@ class TriggerRuntime:
             key = next(iter(self.scheduler.cache.iterkeys(pattern=pattern)), None)
             if key:
                 try:
-                    return TaskRef.from_str(key).status
+                    return TaskRef.from_key(key).status
                 except ValueError:
                     return ExecutionStatus.RUNNING
 

@@ -1,6 +1,5 @@
 """General utility functions for the ingestion pipeline."""
 
-import logging
 from pathlib import Path
 
 from libs.utils.log import setup_logging
@@ -24,13 +23,10 @@ def short_hash(length: int = 8) -> str:
 
 def setup_logger(*args, **kwargs):
     """Setup application logging with silenced third-party loggers."""
-    # Silence noisy loggers
-    for name in ["botocore", "boto3", "urllib3", "ray", "apscheduler", "filelock"]:
-        logging.getLogger(name).setLevel(logging.WARNING)
-
     # Extract parameters
     log_dir = kwargs.get("log_dir")
-    is_debug = kwargs.get("is_debug", True)  # Force debug for now
+    verbose_level = kwargs.get("verbose_level", 0)
+    silence_packages = kwargs.get("silence_packages")
     filename = kwargs.get("filename", "platform.jsonl")
     enqueue = kwargs.get("enqueue", False)
 
@@ -42,18 +38,9 @@ def setup_logger(*args, **kwargs):
 
     setup_logging(
         log_dir=log_dir,
-        is_debug=is_debug,
+        verbose_level=verbose_level,
         filename=filename,
+        silence_packages=silence_packages,
         enqueue=enqueue,
         highlight_keys=LOG_HIGHLIGHT_KEYS,
     )
-
-    import sys
-
-    from loguru import logger
-
-    print(
-        f"Number of handlers after setup: {len(logger._core.handlers)}", file=sys.stderr
-    )
-    for handler_id, handler in logger._core.handlers.items():
-        print(f"Handler {handler_id}: {handler}", file=sys.stderr)

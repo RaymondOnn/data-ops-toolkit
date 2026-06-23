@@ -1,0 +1,16 @@
+[project]
+name = "silt"
+version = "0.1.0"
+description = ""
+dependencies = []
+requires-python = ">=3.11"
+
+[tool.uv.sources]
+# This tells uv: "Don't look on PyPI, look inside this monorepo"
+auth = { workspace = true }
+clients = { workspace = true }
+database = { workspace = true }
+file = { workspace = true }
+resilience = { workspace = true }
+utils = { workspace = true }
+storage = { workspace = true }

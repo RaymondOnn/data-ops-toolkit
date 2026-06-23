@@ -2,16 +2,15 @@ import functools
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
-from apps.ingestion.src.utils.constants import DISKCACHE_FILE_PATH
-from libs.cache.base import KeyValueCache
-from libs.cache.factory import get_cache
 from libs.resilience.circuit_breaker import (
     BreakerState,
     CircuitBreaker,
     CircuitOpen,
 )
+from libs.storage.cache.base import KeyValueCache
+from libs.storage.cache.factory import get_cache
 from loguru import logger
 
 LOG = logger
@@ -32,15 +31,11 @@ class ServiceMonitor:
     _signal_dir: ClassVar[Path | None] = None
 
     @classmethod
-    def setup(cls, workspace: Path, cache_config: dict | None = None) -> None:
+    def setup(cls, signal_dir: str | Path, cache_config: dict[str, Any]) -> None:
         """Initialize the health registry."""
         if cls.__cache is None:
-            cls._signal_dir = workspace / "signals"
-            config = cache_config or {
-                "type": "diskcache",
-                "filepath": DISKCACHE_FILE_PATH,
-            }
-            cls.__cache = get_cache(workspace, config)
+            cls._signal_dir = Path(signal_dir)
+            cls.__cache = get_cache(cache_config)
 
     @classmethod
     def _get_cache(cls) -> KeyValueCache:

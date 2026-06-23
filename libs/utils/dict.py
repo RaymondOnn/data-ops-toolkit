@@ -2,6 +2,7 @@
 
 import re
 from collections.abc import Iterator
+from copy import deepcopy
 from typing import Any
 
 
@@ -32,20 +33,26 @@ def find_keys_by_pattern(
     return _recurse(data, "")
 
 
-def set_nested_key(data: dict, path: str, new_key: str, new_value: Any = None) -> None:
+def set_nested_key(
+    data: dict, path: str, new_key: str | None = None, new_value: Any = None
+) -> dict[str, Any]:
     """Replace a key at dot-notation path with a new key/value."""
     parts = path.split(".")
-    target = data
+    target = deepcopy(data)
+    current = target  # Keep a reference to navigate
 
     # Navigate to parent
     for key in parts[:-1]:
-        target = target[key]
+        current = current[key]  # Navigate through the copy
 
     old_key = parts[-1]
-    if old_key in target:
-        value = new_value if new_value is not None else target[old_key]
-        del target[old_key]
-        target[new_key] = value
+    if old_key in current:
+        value = new_value if new_value is not None else current[old_key]
+        new_key = new_key or old_key
+        del current[old_key]
+        current[new_key] = value
+
+    return target  # Return the full root dictionary
 
 
 def deep_merge(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:

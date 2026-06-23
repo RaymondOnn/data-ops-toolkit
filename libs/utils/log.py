@@ -103,16 +103,31 @@ class LogInterceptor(logging.Handler):
 
 def setup_logging(
     log_dir: Path,
-    is_debug: bool = False,
+    verbose_level: int = 0,
     filename: str = "platform.jsonl",
     enqueue: bool = False,
     highlight_keys: set[str] | None = None,
+    silence_packages: list[str] | None = None,
 ) -> None:
     """Initialize logging with console and JSON file sinks."""
-    print(
-        f"!!! setup_logging called with log_dir={log_dir}, is_debug={is_debug} !!!",
-        file=sys.stderr,
-    )
+
+    # Verbosity Mapping Logic
+    # 0: App=WARNING, Silenced=WARNING
+    # 1: App=INFO,    Silenced=WARNING
+    # 2: App=DEBUG,   Silenced=WARNING
+    # 3: App=TRACE,   Silenced=WARNING
+    # 4: App=TRACE,   Silenced=INFO
+    # 5: App=TRACE,   Silenced=DEBUG
+
+    app_level_map = {0: "WARNING", 1: "INFO", 2: "DEBUG"}
+    app_level = app_level_map.get(verbose_level, "TRACE")
+
+    silenced_level = "WARNING"
+    if verbose_level == 4:
+        silenced_level = "INFO"
+    elif verbose_level >= 5:
+        silenced_level = "DEBUG"
+
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / filename
     log_file.touch(exist_ok=True)
@@ -123,12 +138,12 @@ def setup_logging(
     # Console sink
     logger.add(
         sys.stderr,
-        level="DEBUG" if is_debug else "INFO",
+        level=app_level,
         format=console_formatter(highlight_keys or set()),
         colorize=True,
         serialize=False,
         backtrace=True,
-        diagnose=is_debug,
+        diagnose=verbose_level >= 2,
         enqueue=enqueue,
     )
 
@@ -147,8 +162,17 @@ def setup_logging(
     logging.basicConfig(handlers=[LogInterceptor()], level=0, force=True)
 
     # Silence noisy loggers
-    for name in ["filelock", "apscheduler", "ray"]:
-        logging.getLogger(name).setLevel(logging.WARNING)
+    packages_to_silence = silence_packages or [
+        "filelock",
+        "apscheduler",
+        "ray",
+        "botocore",
+        "boto3",
+        "urllib3",
+    ]
+
+    for name in packages_to_silence:
+        logging.getLogger(name).setLevel(silenced_level)
 
 
 def mask_secrets(secrets: str | list[str]) -> None:

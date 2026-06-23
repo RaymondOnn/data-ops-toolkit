@@ -1,7 +1,11 @@
 from typing import TYPE_CHECKING
 
 from apps.ingestion.src.core.models.task.manifest import StagePayload
-from apps.ingestion.src.utils.constants import STRIP_TZ_FOR_DB
+from apps.ingestion.src.utils.constants import (
+    CONFIG_FILENAME,
+    MANIFEST_FILENAME,
+    STRIP_TZ_FOR_DB,
+)
 from libs.utils.dates import current_timestamp
 from loguru import logger
 
@@ -19,6 +23,28 @@ LOG = logger
 @stage(Stage.START.value)
 class StartStage(ExecutionStage):
     requires_disk_space: bool = False
+
+    def pre_flight(self, task: "Task") -> None:
+        """Verifies the physical integrity of the task workspace."""
+        task_folder = task.workspace.path
+
+        # 1. Verify Task Folder
+        if not task_folder.exists():
+            raise FileNotFoundError(f"Isolated task directory missing: {task_folder}")
+
+        # 2. Verify manifest.json (The state source of truth)
+        if not (task_folder / MANIFEST_FILENAME).exists():
+            raise FileNotFoundError(
+                f"Manifest missing at {task_folder / MANIFEST_FILENAME}"
+            )
+
+        # 3. Verify config.json (The runtime instructions)
+        if not (task_folder / CONFIG_FILENAME).exists():
+            raise FileNotFoundError(
+                f"Runtime config missing at {task_folder / CONFIG_FILENAME}"
+            )
+
+        LOG.debug("Physical task artifacts verified", run_id=task.run_id)
 
     def execute(self, task: "Task") -> str:
         # persist job-start metadata using engine helper

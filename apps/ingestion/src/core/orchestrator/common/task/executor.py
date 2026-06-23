@@ -11,18 +11,21 @@ from apps.ingestion.src.core.models.stages.enums import Stage
 from apps.ingestion.src.core.models.states import (
     FailureOutcome,
     ProgressOutcome,
+    RetryOutcome,
     SuccessOutcome,
 )
 from apps.ingestion.src.core.models.task import ExecutionStatus, Task
-from apps.ingestion.src.core.orchestrator.common.session import TaskSession
+from apps.ingestion.src.core.monitor import ServiceMonitor
 from apps.ingestion.src.core.orchestrator.enums import TaskMetadata, TaskRef
 from apps.ingestion.src.services.factory import ServiceFactory
-from apps.ingestion.src.services.monitor import ServiceMonitor
 from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE
-from apps.ingestion.src.utils.exceptions import RollbackRequired
-from libs.cache.factory import get_cache
-from libs.utils.exceptions import install_exception_hooks
+from apps.ingestion.src.utils.dates import epoch_to_iso
+from apps.ingestion.src.utils.exceptions import RollbackRequired, TryAgainLater
+from libs.storage.cache.factory import get_cache
+from libs.utils.exceptions import TransientError, install_exception_hooks
 from loguru import logger
+
+from .session import TaskSession
 
 LOG = logger
 
@@ -51,20 +54,31 @@ class Executor:
         self.worker_id = worker_id
         self.exec_ctx = exec_ctx
         self.cache = self._init_cache()
+        self.queue = self._init_queue()
         self.is_busy = False
 
-        ServiceMonitor.setup(self.exec_ctx.workspace_dir, self.exec_ctx.cache_config)
+        ServiceMonitor.setup(
+            signal_dir=self.exec_ctx.signal_path,
+            cache_config=self.exec_ctx.cache_config,
+        )
         ServiceFactory.get_provider(self.exec_ctx.env, self.exec_ctx.provider_config)
 
     def _init_cache(self):
         """Initializes the shared state cache with a filesystem lock."""
-        return get_cache(self.exec_ctx.workspace_dir, self.exec_ctx.cache_config)
+        return get_cache(self.exec_ctx.cache_config)
 
-    def execute_stage(self, cache_key: str) -> None:
+    def _init_queue(self):
+        """Initializes the task queue for acknowledging completions."""
+        from .queue import TaskQueue
+
+        return TaskQueue(self.exec_ctx.task_queue_config)
+
+    def execute_stage(self, cache_key: str, msg_id: str | None = None) -> None:
         """Coordinates the execution of a specific stage defined by a cache key.
 
         Args:
             cache_key: The formatted string identifier for the task in the cache.
+            msg_id: The FlashQ message ID to ACK upon completion.
 
         Decision: Atomic Entry.
         We transition the task state to RUNNING before entering the
@@ -72,7 +86,7 @@ class Executor:
         the same task if the maintenance loop ticks while the worker
         is still bootstrapping its local environment.
         """
-        task_ref = TaskRef.from_str(cache_key)
+        task_ref = TaskRef.from_key(cache_key)
         metadata = self._update_task_state(cache_key, ExecutionStatus.RUNNING)
         if not metadata:
             LOG.error(f"Failed to load task metadata for {cache_key}")
@@ -80,12 +94,36 @@ class Executor:
 
         task = None
         try:
-            with TaskSession(self, task_ref, LOG) as session_task:
+            self.is_busy = True
+            with TaskSession(
+                self.worker_id, self.exec_ctx, task_ref, LOG
+            ) as session_task:
                 task = session_task
                 self._run_stage(session_task, metadata)
+
+            if msg_id:
+                self.queue.ack(msg_id)
+
         except RollbackRequired as e:
             if task:
                 self._apply_rollback(task, e, LOG, metadata)
+
+        except (TransientError, ConnectionError, TimeoutError, TryAgainLater) as e:
+            # Step 4: Transient error → App-level retry (with backoff)
+            # No ACK, re-queue via app logic
+            if task:
+                if isinstance(e, TryAgainLater):
+                    self._try_again(task, e)
+                self._try_again(task, TryAgainLater(str(e)))
+
+        except Exception as e:
+            if task:
+                self.conclude_task(task, runtime_exception=e)
+            raise
+        else:
+            self.conclude_task(task)
+        finally:
+            self.is_busy = False
 
     def _run_stage(self, task: Task, metadata: TaskMetadata) -> None:
         """Dispatches the execution logic based on the environment configuration.
@@ -201,10 +239,13 @@ class Executor:
         the state machine's rules, allowing for easier maintenance of
         complex terminal conditions.
         """
-        if SuccessOutcome.matches(task, runtime_exception):
+        if runtime_exception:
+            if RetryOutcome.matches(task, runtime_exception):
+                self._try_again(task, runtime_exception)
+            elif FailureOutcome.matches(task, runtime_exception):
+                policy = FailureOutcome
+        elif SuccessOutcome.matches(task):
             policy = SuccessOutcome
-        elif FailureOutcome.matches(task, runtime_exception):
-            policy = FailureOutcome
         else:
             policy = ProgressOutcome
 
@@ -247,11 +288,81 @@ class Executor:
         task.update_manifest(updates)
         task.send_signal(policy.signal)
 
-        cache_key = task.task_ref.build(status=ExecutionStatus.RUNNING)
+        current_cache_key = task.task_ref.build(status=ExecutionStatus.RUNNING)
         if policy == SuccessOutcome:
-            self.cache.pop(cache_key, None)
+            self.cache.pop(current_cache_key, None)
         else:
-            self._update_task_state(cache_key, target_status, next_stage=next_stage)
+            metadata = self._update_task_state(
+                current_cache_key, target_status, next_stage=next_stage
+            )
+            if policy == ProgressOutcome and metadata:
+                print(f"Task {task.run_id} PROGRESS at {task.task_ref.stage}")
+                self.queue.push(metadata, next_stage, target_status)
+
+    def _try_again(self, task: Task, exc: Exception) -> None:
+        """Handles backoff scheduling configurations and writes operational markers."""
+        retry_count = task.manifest.retry_count
+        service_name = getattr(exc, "service_name", None)
+        message = str(exc)
+
+        if service_name:
+            # Circuit breakern write a .blocked file for external recovery checks
+            wait_secs = 0
+            task.workspace.create_marker(".blocked")
+            task.workspace.remove_marker(".retrying")
+            target_status = ExecutionStatus.BLOCKED
+
+            metadata = self._update_task_state(
+                task.task_ref.build(status=target_status.value),
+                new_status=target_status,
+            )
+        else:
+            wait_secs = min(600, (2**retry_count) * 30)
+            import msgspec
+            from libs.utils.dates import current_timestamp
+
+            retry_info = {
+                "retry_at": current_timestamp(naive=True).isoformat(),
+                "reason": message,
+                "wait_seconds": wait_secs,
+                "attempt": retry_count + 1,
+            }
+            task.workspace.write_text(
+                ".retrying", msgspec.json.encode(retry_info).decode()
+            )
+            task.workspace.remove_marker(".blocked")
+            target_status = ExecutionStatus.RETRY
+
+            metadata = self._update_task_state(
+                task.task_ref.build(status=target_status.value),
+                new_status=target_status,
+                next_attempt_ts=epoch_to_iso(time.time() + wait_secs),
+            )
+
+        task.update_manifest(
+            {
+                "status": target_status.value,
+                "error": {"message": message, "type": type(exc).__name__},
+            }
+        )
+
+        logger.info(
+            "Task transitioning to {target_status.name} state",
+            job_id=task.job_id,
+            run_id=task.run_id,
+            attempt=task.manifest.retry_count,
+            wait_seconds=wait_secs,
+        )
+
+        if target_status == ExecutionStatus.RETRY and metadata:
+            self.queue.push(metadata, task.task_ref.stage, target_status)
+
+        # Bubble control flow out to Ray cluster mesh layer cleanly
+        if not isinstance(exc, TryAgainLater):
+            raise TryAgainLater(
+                reason=message, wait_seconds=wait_secs, service_name=service_name
+            ) from exc
+        raise exc
 
     def _update_task_state(
         self,
@@ -274,7 +385,7 @@ class Executor:
         if metadata is None:
             # Fallback logic to recover metadata if the key was externally rotated
             try:
-                run_id = TaskRef.from_str(old_key).identity.run_id
+                run_id = TaskRef.from_key(old_key).identity.run_id
                 pattern = f"{CACHE_TASK_NAMESPACE}:*:*:*:*:*:{run_id}"
                 for key in list(self.cache.iterkeys(pattern=pattern)):
                     metadata = self.cache.pop(key, None)
@@ -293,7 +404,7 @@ class Executor:
         metadata.last_hb = time.time() + heartbeat_offset
 
         new_key = (
-            TaskRef.from_str(old_key)
+            TaskRef.from_key(old_key)
             .with_updates(status=new_status, stage=next_stage or metadata.current_stage)
             .build()
         )
@@ -302,13 +413,18 @@ class Executor:
         return metadata
 
 
-def process_stage_task(worker_id: str, exec_ctx: ExecutionContext, cache_key: str):
+def process_stage_task(
+    worker_id: str,
+    exec_ctx: ExecutionContext,
+    cache_key: str,
+    msg_id: str | None = None,
+):
     """Entry point for Ray task execution."""
     install_exception_hooks()
     executor = Executor(worker_id, exec_ctx)
 
     try:
-        executor.execute_stage(cache_key)
+        executor.execute_stage(cache_key, msg_id=msg_id)
     finally:
         # logger.remove()
         executor.is_busy = False

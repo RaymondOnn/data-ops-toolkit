@@ -14,13 +14,12 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-05-25T23:43:42.573794Z"
+exclude-newer = "2026-06-12T11:44:13.242576Z"
 exclude-newer-span = "P7D"
 
 [manifest]
 members = [
     "auth",
-    "cache",
     "clients",
     "cloud",
     "database",
@@ -29,6 +28,8 @@ members = [
     "ingestion",
     "queue",
     "resilience",
+    "silt",
+    "storage",
     "utils",
 ]
 overrides = [{ name = "polars", specifier = ">=1.21.0" }]
@@ -456,21 +457,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/66/54/b80e1fcee4f732e0e9314bbb8679be9d5690caa1566c4a4cd14e9724d2dd/botocore-1.42.70.tar.gz", hash = "sha256:9ee17553b7febd1a0c1253b3b62ab5d79607eb6163c8fb943470a8893c31d4fa", size = 14997068, upload-time = "2026-03-17T19:43:10.678Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fb/51/08f32aea872253173f513ba68122f4300966290677c8e59887b4ffd5d957/botocore-1.42.70-py3-none-any.whl", hash = "sha256:54ed9d25f05f810efd22b0dfda0bb9178df3ad8952b2e4359e05156c9321bd3c", size = 14671393, upload-time = "2026-03-17T19:43:06.777Z" },
-]
-
-[[package]]
-name = "cache"
-version = "0.1.0"
-source = { editable = "libs/cache" }
-dependencies = [
-    { name = "diskcache" },
-    { name = "redis" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "diskcache" },
-    { name = "redis" },
 ]
 
 [[package]]
@@ -1007,6 +993,15 @@ wheels = [
 ]
 
 [[package]]
+name = "flashq"
+version = "0.2.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a1/98/89a8b3849d970f914cc791aeb514986d84319ee4cd34aeb4d325f5b79ed9/flashq-0.2.2.tar.gz", hash = "sha256:dc1e45681eb832a97c33d6d217e6b563ce8c4a1e1f0d57655d698b9195c54ba3", size = 113750, upload-time = "2026-03-19T07:28:13.625Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e4/bc/5a9a144a4c389e6bcb1e1e98e628e2fd6023dbe974f3718a2d81fca07fda/flashq-0.2.2-py3-none-any.whl", hash = "sha256:3c234df2d44c749debd378577273517961c8c3963f0e80d447ce0dda3168955b", size = 60127, upload-time = "2026-03-19T07:28:12.315Z" },
+]
+
+[[package]]
 name = "frozenlist"
 version = "1.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1496,11 +1491,10 @@ source = { editable = "apps/ingestion" }
 dependencies = [
     { name = "apscheduler" },
     { name = "auth" },
-    { name = "cache" },
     { name = "clients" },
     { name = "database" },
+    { name = "diskcache" },
     { name = "dynaconf" },
-    { name = "faker" },
     { name = "file" },
     { name = "filelock" },
     { name = "msgspec" },
@@ -1508,10 +1502,11 @@ dependencies = [
     { name = "pandas" },
     { name = "polars" },
     { name = "pyarrow" },
+    { name = "queue" },
     { name = "ray", extra = ["default"] },
     { name = "resilience" },
+    { name = "storage" },
     { name = "typer" },
-    { name = "universal-pathlib" },
     { name = "utils" },
 ]
 
@@ -1519,11 +1514,10 @@ dependencies = [
 requires-dist = [
     { name = "apscheduler" },
     { name = "auth", editable = "libs/auth" },
-    { name = "cache", editable = "libs/cache" },
     { name = "clients", editable = "libs/clients" },
     { name = "database", editable = "libs/database" },
+    { name = "diskcache" },
     { name = "dynaconf" },
-    { name = "faker" },
     { name = "file", editable = "libs/file" },
     { name = "filelock" },
     { name = "msgspec" },
@@ -1531,10 +1525,11 @@ requires-dist = [
     { name = "pandas" },
     { name = "polars" },
     { name = "pyarrow" },
+    { name = "queue", editable = "libs/queue" },
     { name = "ray", extras = ["default"], specifier = ">=2.39.0" },
     { name = "resilience", editable = "libs/resilience" },
+    { name = "storage", editable = "libs/storage" },
     { name = "typer" },
-    { name = "universal-pathlib" },
     { name = "utils", editable = "libs/utils" },
 ]
 
@@ -2991,10 +2986,14 @@ version = "0.1.0"
 source = { editable = "libs/queue" }
 dependencies = [
     { name = "diskcache" },
+    { name = "flashq" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "diskcache" }]
+requires-dist = [
+    { name = "diskcache" },
+    { name = "flashq" },
+]
 
 [[package]]
 name = "ray"
@@ -3328,6 +3327,11 @@ wheels = [
 ]
 
 [[package]]
+name = "silt"
+version = "0.1.0"
+source = { virtual = "apps/silt" }
+
+[[package]]
 name = "six"
 version = "1.17.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3355,6 +3359,21 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f8/5c/48a7d9495be3d1c651198fd99dbb6ce190e2274d0f28b9051307bdec6b85/socksio-1.0.0.tar.gz", hash = "sha256:f88beb3da5b5c38b9890469de67d0cb0f9d494b78b106ca1845f96c10b91c4ac", size = 19055, upload-time = "2020-04-17T15:50:34.664Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/37/c3/6eeb6034408dac0fa653d126c9204ade96b819c936e136c5e8a6897eee9c/socksio-1.0.0-py3-none-any.whl", hash = "sha256:95dc1f15f9b34e8d7b16f06d74b8ccf48f609af32ab33c608d08761c5dcbb1f3", size = 12763, upload-time = "2020-04-17T15:50:31.878Z" },
+]
+
+[[package]]
+name = "storage"
+version = "0.1.0"
+source = { editable = "libs/storage" }
+dependencies = [
+    { name = "diskcache" },
+    { name = "redis" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "diskcache", specifier = ">=4.1.0" },
+    { name = "redis", specifier = ">=4.3.4" },
 ]
 
 [[package]]
@@ -3507,6 +3526,7 @@ name = "utils"
 version = "0.1.0"
 source = { editable = "libs/utils" }
 dependencies = [
+    { name = "faker" },
     { name = "httptap" },
     { name = "httpx" },
     { name = "loguru" },
@@ -3517,6 +3537,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "faker" },
     { name = "httptap" },
     { name = "httpx" },
     { name = "loguru" },

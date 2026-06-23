@@ -11,7 +11,7 @@ from apps.ingestion.src.core.models.task import (
     TaskRef,
     TaskSignal,
 )
-from apps.ingestion.src.core.orchestrator.common.compute import Compute
+from apps.ingestion.src.core.orchestrator.common.task.compute import Compute
 from apps.ingestion.src.core.orchestrator.contracts.policies import (
     AdmissionPolicy,
     MaintenancePolicy,
@@ -78,7 +78,7 @@ class ProactiveMaintenance(MaintenancePolicy):
         active_refs: dict[ray.ObjectRef, str],
         compute: Compute,
         exec_ctx: ExecutionContext,
-    ) -> None:
+    ) -> list[tuple[TaskMetadata, str]] | None:
         """Executes one full maintenance cycle.
 
         Args:
@@ -101,7 +101,7 @@ class ProactiveMaintenance(MaintenancePolicy):
         compute.reconcile_counts()
 
         # Phase 3: Find and recover zombie tasks
-        self._recover_zombie_tasks(cache, lock, active_refs, compute, exec_ctx)
+        return self._recover_zombie_tasks(cache, lock, active_refs, compute, exec_ctx)
 
     def cleanup_tasks(
         self,
@@ -138,7 +138,7 @@ class ProactiveMaintenance(MaintenancePolicy):
         active_refs: dict[ray.ObjectRef, str],
         compute: Compute,
         exec_ctx: ExecutionContext,
-    ) -> None:
+    ) -> list[tuple[TaskMetadata, str]]:
         """Identifies and resurrects stalled (zombie) tasks from the hot cache.
 
         Decision: Integrated Maintenance.
@@ -148,9 +148,10 @@ class ProactiveMaintenance(MaintenancePolicy):
         """
         dispatched_statuses = {s.value for s in ExecutionStatus.dispatched_statuses()}
         pattern = f"{CACHE_TASK_NAMESPACE}:*:*"
+        recovered_tasks = []
 
         for cache_key in cache.iterkeys(pattern=pattern):
-            task_ref = TaskRef.from_str(cache_key)
+            task_ref = TaskRef.from_key(cache_key)
 
             # 1. Filter: Only check tasks in dispatched (non-terminal) states
             if task_ref.status not in dispatched_statuses:
@@ -182,7 +183,7 @@ class ProactiveMaintenance(MaintenancePolicy):
             self._reclaim_resources(cache_key, active_refs, compute)
 
             # Perform physical and logical resurrection
-            self._resurrect_task(
+            resurrected = self._resurrect_task(
                 cache_key,
                 task_ref,
                 metadata,
@@ -192,6 +193,10 @@ class ProactiveMaintenance(MaintenancePolicy):
                 compute,
                 exec_ctx,
             )
+            if resurrected:
+                recovered_tasks.append(resurrected)
+
+        return recovered_tasks
 
     def _mark_task_failed(
         self,
@@ -250,7 +255,7 @@ class ProactiveMaintenance(MaintenancePolicy):
         active_refs: dict[ray.ObjectRef, str],
         compute: Compute,
         exec_ctx: ExecutionContext,
-    ) -> None:
+    ) -> tuple[TaskMetadata, str] | None:
         """Updates task state to trigger a re-execution of a stalled run.
 
         Decision: Clean Slate Resume.
@@ -299,3 +304,5 @@ class ProactiveMaintenance(MaintenancePolicy):
 
         # 5. Signal engine to re-evaluate
         task.send_signal(TaskSignal.SYNC)
+
+        return (metadata, resume_stage)

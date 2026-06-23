@@ -20,7 +20,6 @@ LOG = logger
 
 class ExecutionMode(StrEnum):
     NORMAL = "normal"
-    DEBUG = "debug"
     TEST = "test"
     DRY_RUN = "dry_run"
 
@@ -50,6 +49,7 @@ class ExecutionContext(msgspec.Struct, kw_only=True):
     deps_pex_path: Path | None = None
     cache_config: dict[str, Any] = {}
     provider_config: dict[str, str] = {}
+    task_queue_config: dict[str, str] = {}
     disable_self_healing: bool = False
     stop_at_ts: float | None = None
     drain_timeout_secs: int = 600
@@ -98,10 +98,6 @@ class ExecutionContext(msgspec.Struct, kw_only=True):
     # =========================================================================
     # Mode Properties
     # =========================================================================
-
-    @property
-    def is_debug(self) -> bool:
-        return self.execution_mode == ExecutionMode.DEBUG
 
     @property
     def is_test(self) -> bool:

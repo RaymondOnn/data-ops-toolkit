@@ -20,4 +20,4 @@ for info in pkgutil.iter_modules([pkg_path]):
         except ImportError as e:
             logger.warning(f"Failed to import service {info.name}: {e}")
 
-logger.debug(f"Discovered service modules: {discovered}")
+logger.trace(f"Discovered service modules: {discovered}")

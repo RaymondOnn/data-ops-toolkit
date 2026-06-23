@@ -1,14 +1,12 @@
-import copy
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any, ClassVar
 
 from apps.ingestion.src.utils.exceptions import TryAgainLater
 from libs.auth.factory import AuthFactory, SecretProvider
 from libs.auth.secret import Secret
-from libs.cache.base import KeyValueCache
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitOpen
+from libs.storage.cache.base import KeyValueCache
 from libs.utils.dict import find_keys_by_pattern, set_nested_key
 from libs.utils.exceptions import AuthFailure, HostUnreachable
 from loguru import logger
@@ -95,24 +93,26 @@ class ServiceFactory:
     @classmethod
     def _create(cls, key: str, config: dict) -> Any:
         """Create new service instance with secret resolution."""
-        # Use deepcopy to ensure nested configuration changes don't leak
-        config_copy = copy.deepcopy(config)
 
         # Automatically resolve secret identifiers into Secret objects
-        for path, value in list(
-            find_keys_by_pattern(
-                config_copy, pattern="secret|password", ignore_case=True
-            )
+        has_secrets_keys = False
+        config_copy = {}
+        for path, value in find_keys_by_pattern(
+            config, pattern="secret|password", ignore_case=True
         ):
+            has_secrets_keys = True
             # If we have a provider and the value is a string, wrap it
             if isinstance(value, str):
                 if not cls._provider:
                     raise ValueError(f"SecretProvider required to resolve: {value}")
                 secret_obj = Secret(secret_id=value, provider=cls._provider)
-                set_nested_key(config_copy, path, "password", secret_obj)
+                config_copy = set_nested_key(config, path, "password", secret_obj)
             # Ensure existing Secret instances are mapped to the 'password' key
             elif isinstance(value, Secret):
-                set_nested_key(config_copy, path, "password", value)
+                config_copy = set_nested_key(config, path, "password", value)
+
+        if not has_secrets_keys:
+            LOG.warning(f"No secret keys found in config: {config}")
 
         try:
             return cls._registry[key](name=key, **config_copy)
@@ -158,9 +158,9 @@ class ServiceFactory:
         return cls.get(service_type, flags=flags, **config)
 
     @classmethod
-    def get_cache(cls, workspace: Path, config: dict) -> KeyValueCache:
+    def get_cache(cls, config: dict) -> KeyValueCache:
         """Get cache implementation."""
-        from libs.cache import DiskCache, RedisCache
+        from libs.storage.cache import DiskCache, RedisCache
 
         if config.get("type") == "redis":
             return RedisCache(
@@ -169,5 +169,5 @@ class ServiceFactory:
                 db=config.get("db", 0),
             )
 
-        cache_path = (workspace / config.get("filepath", ".cache")).resolve()
+        cache_path = (config.get("filepath", ".cache")).resolve()
         return DiskCache(cache_path=cache_path, shards=8, timeout=0.01)

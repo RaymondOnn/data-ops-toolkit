@@ -12,10 +12,10 @@ def assemble_runtime(
     Assembles the Orchestrator components for testing or advanced use cases.
     This allows for manual wiring of dependencies and is not intended for general use.
     """
-    exec_ctx.provider_config = builder.app_settings.get("secret_provider", {}).to_dict()
+    exec_ctx.provider_config = builder.app_settings.get("secret_provider").to_dict()
 
     ServiceFactory.get_provider(exec_ctx.env, exec_ctx.provider_config)
-    db_config = builder.app_settings.get("services.clickhouse", {}).to_dict()
+    db_config = builder.app_settings.get("meta_db.service", {}).to_dict()
 
     # 1. Build common baseline infrastructure
     signal_processor = SignalScanner(exec_ctx=exec_ctx)

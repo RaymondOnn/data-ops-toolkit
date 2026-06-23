@@ -1,1 +1,0 @@
-Can we add unit tests for `JobRecord.is_misfired` and `CronScheduleRule.apply` to specifically test comparisons between naive `pendulum.DateTime` objects?

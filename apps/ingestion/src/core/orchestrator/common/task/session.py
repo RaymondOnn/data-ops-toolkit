@@ -1,15 +1,12 @@
 """Task execution session manager with lifecycle hooks."""
 
 import time
-from typing import TYPE_CHECKING
 
+from apps.ingestion.src.core.contexts import ExecutionContext
 from apps.ingestion.src.core.models.task import ExecutionStatus, Task
 from apps.ingestion.src.core.models.task.enums import TaskRef
 from apps.ingestion.src.utils.exceptions import RollbackRequired
 from loguru import logger
-
-if TYPE_CHECKING:
-    from apps.ingestion.src.core.orchestrator.common.executor import Executor
 
 
 class TaskSession:
@@ -19,11 +16,14 @@ class TaskSession:
     ensures proper cleanup and state conclusion upon exit.
     """
 
-    def __init__(self, executor: "Executor", task_ref: TaskRef, log):
+    def __init__(
+        self, worker_id: str, exec_ctx: ExecutionContext, task_ref: TaskRef, log
+    ):
         """Initializes the task session.
 
         Args:
-            executor: The TaskExecutor instance driving this session.
+            worker_id: The unique identifier for the current worker.
+            exec_ctx: Global execution context.
             task_ref: The reference to the task being executed.
             log: A Loguru logger instance for this session.
 
@@ -31,7 +31,8 @@ class TaskSession:
         Each TaskSession gets a dedicated logger handler that writes to a
         specific file for that task, ensuring isolated and searchable logs.
         """
-        self.executor = executor
+        self.worker_id = worker_id
+        self.exec_ctx = exec_ctx
         self.task_ref = task_ref
         self.log = log
         self.task: Task | None = None
@@ -54,7 +55,6 @@ class TaskSession:
         """
         self._start_time = time.perf_counter()
 
-        self.executor.is_busy = True
         self._context_manager = logger.contextualize(
             run_id=self.task_ref.identity.run_id,
             job_id=self.task_ref.identity.job_id,
@@ -62,18 +62,12 @@ class TaskSession:
         )
         self._context_manager.__enter__()
 
-        log_dir = self.executor.exec_ctx.workspace_dir / "logs"
+        log_dir = self.exec_ctx.workspace_dir / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_name = log_dir / (
             f"{self.task_ref.identity.task_key}_"
             f"{self.task_ref.identity.run_id}.jsonl".replace(":", "_")
         )
-        # self._handler_id = setup_logger(
-        #     log_dir=self.executor.exec_ctx.workspace_dir / "logs",
-        #     is_debug=self.executor.exec_ctx.is_debug,
-        #     filename=log_name,
-        #     enqueue=False,
-        # )
         self._handler_id = logger.add(
             str(log_name),
             level="DEBUG",
@@ -86,8 +80,8 @@ class TaskSession:
 
         self.task = Task(
             task_ref=self.task_ref.with_updates(status=ExecutionStatus.RUNNING),
-            worker_id=self.executor.worker_id,
-            exec_ctx=self.executor.exec_ctx,
+            worker_id=self.worker_id,
+            exec_ctx=self.exec_ctx,
         )
 
         # Verify workspace exists
@@ -98,7 +92,13 @@ class TaskSession:
 
         # Initialize
         self.task.check_in(self.task_ref.stage)
-        self.task.workspace.remove_marker(".retrying")
+
+        if (self.task.workspace.path / ".retrying").exists():
+            self.task.update_manifest(
+                {"retry_count": self.task.manifest.retry_count + 1}
+            )
+            self.task.workspace.remove_marker(".retrying")
+
         self.task.workspace.remove_marker(".blocked")
         self.log.info(f"Stage {self.task_ref.stage.upper()} started")
         return self.task
@@ -111,20 +111,12 @@ class TaskSession:
             exc_val: The exception instance, or None.
             exc_tb: The traceback object, or None.
 
-        Decision: Unified Conclusion.
-        Regardless of success or failure, `conclude_task` is called to ensure
-        the task's state is properly updated in the cache and manifest.
-
         Decision: Rollback Exception Handling.
         `RollbackRequired` is a special exception that signals a non-terminal
         failure, allowing the task to be rewound without being marked as
         permanently FAILED.
         """
         duration = time.perf_counter() - self._start_time
-
-        # Finalize unless this was a rewind
-        if self.task and not isinstance(exc_val, RollbackRequired):
-            self.executor.conclude_task(self.task, runtime_exception=exc_val)
 
         # Log completion
         if exc_val:
@@ -146,5 +138,3 @@ class TaskSession:
         # Exit the logging context
         if self._context_manager:
             self._context_manager.__exit__(exc_type, exc_val, exc_tb)
-
-        self.executor.is_busy = False

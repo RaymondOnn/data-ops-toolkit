@@ -1,0 +1,61 @@
+# Dynaconf environments=True format:
+#   - 'default' keys apply to all environments
+#   - named env keys (local, production, etc.) override defaults
+
+version: "1.0"
+
+default:
+  workspace_dir: "./.workspace"
+
+  extract:
+    num_workers: 10
+
+  transform:
+    type: default
+    options: {}
+
+  archive:
+    retention_days: 2555  # 7-year default
+    enable_archival: true
+    archive_type: "standard_archive"
+
+  partition_date:
+    offset:
+      days: -1
+      months: 0
+      years: 0
+    format: "%Y-%m-%d"
+    wrap_quotes: false
+
+  timeouts:
+    schedule_to_start: 60
+    start_to_close: 900
+    multiplier: 3.0
+
+  # Global Feature Flag Defaults
+  feature_flags:
+    benchmark_mode: false       # Logic gate for ServiceFactory tool swapping
+    pre_prod_sim: false         # Enable environment mocks or shadow logic
+    shadow_write_enabled: false # concurrent writes to primary and experimental sinks
+    archive_first: false        # Default flow: Load -> Archive
+    dry_run: false              # Process but skip terminal DB/S3 commits
+
+local:
+ # This can be an env var name or plain text for local dev
+  # archive:
+  #   base_path: "s3://archive-vault"
+
+  timeouts:
+    multiplier: 4.0
+
+
+dev:
+
+  archive:
+    base_path: "s3://dev-vault/archival"
+
+
+prod:
+
+  archive:
+    base_path: "s3://prod-vault/archival"

@@ -1,6 +1,7 @@
 from typing import Annotated
 
 import typer
+from apps.ingestion.src.cli.state import state
 from apps.ingestion.src.core.contexts import TaskContextBuilder
 from apps.ingestion.src.core.orchestrator.common import StateHub
 from apps.ingestion.src.core.orchestrator.doctor import Doctor
@@ -55,9 +56,6 @@ def _exit_on_failure(success: bool) -> None:
 @doctor_app.callback(invoke_without_command=True)
 def doctor_main(
     ctx: typer.Context,
-    debug: bool = typer.Option(
-        False, "--debug", help="Show detailed diagnostic output."
-    ),
 ):
     """Runs all diagnostic checks by default.
 
@@ -74,13 +72,11 @@ def doctor_main(
     doctor = _get_doctor()
 
     if ctx.invoked_subcommand is None:
-        doctor.run_all(debug)
+        doctor.run_all(state["verbose_level"] >= 2)
 
 
 @doctor_app.command("fs")
-def doctor_fs(
-    debug: bool = typer.Option(False, "--debug", help="Show detailed output."),
-):
+def doctor_fs():
     """Checks filesystem health including disk space and permissions.
 
     Args:
@@ -93,7 +89,7 @@ def doctor_fs(
     """
     doctor = _get_doctor()
 
-    doctor.check_filesystem(debug)
+    doctor.check_filesystem(state["verbose_level"] >= 2)
 
 
 @network_app.command("check")
@@ -105,7 +101,6 @@ def network_check(
     proxy_url: Annotated[
         str, typer.Option("--proxy", help="Proxy URL to use for the check")
     ] = "http://127.0.0.1:3128",
-    debug: bool = typer.Option(False, "--debug", help="Show detailed output."),
 ):
     """
     Deep-dive diagnostic of the network path to a specific host and port.
@@ -134,7 +129,6 @@ def network_trace(
     target_host: Annotated[
         str, typer.Argument(help="The host to visualize (e.g. 'clickhouse.prod')")
     ],
-    debug: bool = typer.Option(False, "--debug", help="Show detailed output."),
 ):
     """
     Visualizes every network hop between this machine and the target host.
@@ -164,7 +158,6 @@ def doctor_connect(
     env: Annotated[
         str, typer.Option("--env", help="Target environment to load credentials from")
     ] = "local",
-    debug: bool = typer.Option(False, "--debug", help="Show detailed output."),
 ):
     """
     Tests connectivity for a specific service type across all its configured instances.
@@ -195,7 +188,6 @@ def doctor_config(
     env: Annotated[
         str, typer.Option("--env", help="Environment context for validation")
     ] = "local",
-    debug: bool = typer.Option(False, "--debug", help="Show detailed output."),
 ):
     """
     Validates YAML syntax and schema models for configurations.

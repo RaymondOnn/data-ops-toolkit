@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Queues"
 dependencies = [
     "diskcache",
+    "flashq",
+    # "redis"
 ]
 requires-python = ">=3.11"
 

@@ -4,168 +4,69 @@
 
 version: "1.0"
 
-# --- Configuration Templates ---
-x-localstack-base: &localstack_base
-  s3_endpoint_url: "http://${LOCALSTACK_HOST:-localhost}:4566"
-  use_ssl: false
-
-x-localstack-client: &localstack_client
-  region: ap-southeast-1
-  sts_endpoint_url: http://${LOCALSTACK_HOST:-localhost}:4566
-  role_arn: arn:aws:iam::000000000000:role/ProdIngestionRole
-  aws_access_key_id: test
-  secret_key: AWS_SECRET_ACCESS_KEY
-  use_ssl: false
-  anon: false
-
-x-aws-dev-client: &aws_dev_client
-  region: "ap-southeast-1"
-  sts_endpoint_url: "http://${LOCALSTACK_HOST:-localhost}:4566"
-  role_arn: "arn:aws:iam::123456789012:role/DevIngestionRole"
-
-x-aws-prod-client: &aws_prod_client
-  region: "ap-southeast-1"
-  sts_endpoint_url: "https://sts.us-west-2.amazonaws.com"
-  role_arn: "arn:aws:iam::123456789012:role/ProdIngestionRole"
-
-x-s3-archive-base: &s3_archive_base
-  type: "standard_archive"
-  storage_options:
-    s3_storage_class: "DEEP_ARCHIVE"
-
-x-s3-cas-base: &s3_cas_base
-  type: "cas_archive"
-  storage_options:
-    s3_storage_class: "GLACIER"
-
-x-s3-source-base: &s3_source_base
-  type: "data_lake"
-
-x-secrets-dev-svc: &secrets_dev_svc
-  endpoint_url: "http://${LOCALSTACK_HOST:-localhost}:4566"
-
-x-secrets-prod-svc: &secrets_prod_svc
-  endpoint_url: "https://secretsmanager.ap-southeast-1.amazonaws.com"
-
-
 default:
-  workspace_dir: "~/.ingestion/data/"
-  extract:
-    num_workers: 10
-  transform:
-    type: default
-    options: {}
-  archive:
-    retention_days: 2555  # 7-year default
-    enable_archival: true
-    archive_type: "standard_archive"
-  partition_date:
-    offset:
-      days: -1
-      months: 0
-      years: 0
-    format: "%Y-%m-%d"
-    wrap_quotes: false
+  workspace_dir: "./.workspace"
+  timezone: "Asia/Singapore"
 
-  # Global Feature Flag Defaults
-  feature_flags:
-    benchmark_mode: false       # Logic gate for ServiceFactory tool swapping
-    pre_prod_sim: false         # Enable environment mocks or shadow logic
-    shadow_write_enabled: false # concurrent writes to primary and experimental sinks
-    archive_first: false        # Default flow: Load -> Archive
-    dry_run: false              # Process but skip terminal DB/S3 commits
+  # Secret Provider (global, environment-specific)
+  secret_provider:
+    type: "env_file"           # env_file, aws_secrets_manager, file_encrypted
+    path: "./secrets.json"     # for env_file type
+    master_key_env: "MASTER_KEY"  # for encrypted secrets
+
+  cache:
+    type: diskcache
+    filepath: "@format {this.workspace_dir}/.cache/task_cache"
+
+  task_queue:
+    type: diskcache
+    filepath: "@format {this.workspace_dir}/.cache/task_queue"
+
+  meta_db:
+    service_ref: clickhouse
+
+  timeouts:
+    schedule_to_start: 60
+    start_to_close: 900
+    multiplier: 3.0
 
 local:
-  workspace_dir: "./.workspace/"
   secret_provider:
     type: "local_file"
     path: "./apps/ingestion/infra/environments/local/.secrets.json"
     master_key: "SECRET_MASTER_KEY" # This can be an env var name or plain text for local dev
-  archive:
-    base_path: "s3://archive-vault"
+
+  # archive:
+  #   base_path: "s3://archive-vault"
+
   cache:
     type: diskcache
-    filepath: ".cache/cache.db"
-  services:
-    file:
-      type: flat_file
-      url: "."
-    clickhouse: # Now pointing to a Docker container
-      type: clickhouse_db
-      host: localhost
-      port: 8123
-      user: default
-      secret_key: CLICKHOUSE_PASSWORD
-      secure: false
-    s3_source:
-      <<: *s3_source_base
-      url: "s3://landing-zone"
-      client: *localstack_client
-      storage_options:
-        <<: *localstack_base
-        anon: false
-    s3_archive:
-      <<: *s3_archive_base
-      url: "s3://archive-vault"
-      client: *localstack_client
-      storage_options:
-        <<: *localstack_base
-        anon: false
-    s3_cas:
-      <<: *s3_cas_base
-      url: "s3://cas-vault"
-      client: *localstack_client
-      storage_options:
-        <<: *localstack_base
-        anon: false
+    filepath: "@format {this.workspace_dir}/.cache/task_cache"
+
+  timeouts:
+    multiplier: 4.0
+
 
 dev:
   secret_provider:
     type: aws_secrets_manager
-    service: *secrets_dev_svc
-    client: *aws_dev_client
+    service:
+      endpoint_url: "http://${LOCALSTACK_HOST:-localhost}:4566"
+    client:
+      region: "ap-southeast-1"
+      sts_endpoint_url: "http://${LOCALSTACK_HOST:-localhost}:4566"
+      role_arn: "arn:aws:iam::123456789012:role/DevIngestionRole"
   services:
-    file:
-      type: flat_file
-    clickhouse: # Now pointing to a Docker container
-      type: "clickhouse_db"
-      host: "localhost"
-      port: 8123
-      user: "default"
-      secret_key: "CLICKHOUSE_PASSWORD"
-    s3_source:
-      <<: *s3_source_base
-      url: "s3://dev-landing-zone"
-      client: *aws_dev_client
-    s3_archive:
-      <<: *s3_archive_base
-      url: "s3://dev-vault/archival"
-      client: *aws_dev_client
-    s3_cas:
-      <<: *s3_cas_base
-      url: "s3://dev-cas-vault"
-      client: *aws_dev_client
+
 
 prod:
   secret_provider:
     type: aws_secrets_manager
-    service: *secrets_prod_svc
-    client: *aws_prod_client
-  storage_options:
-    s3_storage_class: "DEEP_ARCHIVE"
-    region: "us-west-2"
+    service:
+      endpoint_url: "https://secretsmanager.ap-southeast-1.amazonaws.com"
+    client:
+      region: "ap-southeast-1"
+      sts_endpoint_url: "https://sts.us-west-2.amazonaws.com"
+      role_arn: "arn:aws:iam::123456789012:role/ProdIngestionRole"
   archive:
     base_path: "s3://prod-vault/archival"
-  services:
-    s3_source:
-      <<: *s3_source_base
-      url: "s3://prod-landing-zone"
-      client: *aws_prod_client
-    s3_archive:
-      <<: *s3_archive_base
-      url: "s3://prod-vault/archival"
-      client: *aws_prod_client
-    s3_cas:
-      <<: *s3_cas_base
-      url: "s3://prod-cas-vault"
-      client: *aws_prod_client

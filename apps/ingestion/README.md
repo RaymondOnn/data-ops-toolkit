@@ -96,7 +96,7 @@ The service uses a dual-layered storage strategy:
 
 * **Vault Layer (`data/`)**: Stores the physical, immutable Parquet checkpoints.
 * **Active Layer (`active/`)**: Uses symlinks to point to the current data for easy job relocation.
-Moving a job to `HOLD` or `FAILED` is a metadata-only operation (rewiring symlinks), which is near-instant regardless of whether the underlying data is 1MB or 1TB.
+Moving a job to `FAILED` is a metadata-only operation (rewiring symlinks), which is near-instant regardless of whether the underlying data is 1MB or 1TB.
 
 ## Getting Started
 

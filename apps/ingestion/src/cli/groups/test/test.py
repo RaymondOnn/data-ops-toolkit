@@ -305,9 +305,6 @@ def _execute_scenario(
 
     builder = TaskContextBuilder(env=env)
     mode = ExecutionMode.DRY_RUN if state.get("dry_run") else ExecutionMode.NORMAL
-    if state.get("debug"):
-        mode = ExecutionMode.DEBUG
-
     exec_ctx = builder.build_execution_context(mode=mode)
     runtime = assemble_runtime(exec_ctx, builder)
 

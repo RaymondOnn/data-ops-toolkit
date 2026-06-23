@@ -15,7 +15,6 @@ import typer
 from apps.ingestion.src.cli.state import app, configure_runtime, state
 from apps.ingestion.src.cli.utils import _write_signal_file
 from apps.ingestion.src.core.contexts import (
-    ExecutionMode,
     TaskContextBuilder,
     parse_cli_overrides,
 )
@@ -87,12 +86,12 @@ def _report_run_failures(eg: ExceptionGroup) -> None:
 
 
 def _get_trigger_runtime(
-    debug: bool, ray_mode: Any
+    verbose: int, ray_mode: Any
 ) -> tuple[TriggerRuntime, TaskContextBuilder]:
     """Bootstraps the execution context and TriggerRuntime for a synchronous run.
 
     Args:
-        debug: Whether to enable verbose logging and debug mode.
+        verbose: The verbosity level for logging and diagnostics.
         ray_mode: The distribution mode (LOCAL, CLUSTER, etc.) to use.
 
     Returns:
@@ -103,9 +102,8 @@ def _get_trigger_runtime(
     ExecutionMode is correctly mapped from the CLI flags before the
     Orchestrator begins discovery, preventing environment mismatch.
     """
-    exec_mode = ExecutionMode.DEBUG if debug else ExecutionMode.NORMAL
     builder = TaskContextBuilder()
-    exec_ctx = builder.build_execution_context(mode=exec_mode)
+    exec_ctx = builder.build_execution_context()
     exec_ctx.ray_mode = ray_mode
 
     runtime = assemble_runtime(exec_ctx, builder)
@@ -231,9 +229,9 @@ def execute_pipeline(
     to_stage: Annotated[
         str | None, typer.Option("--to", help="Stop execution after this stage")
     ] = None,
-    debug: Annotated[
-        bool, typer.Option("--debug", help="Enable verbose logging")
-    ] = False,
+    verbose: Annotated[
+        int, typer.Option("--verbose", "-v", count=True, help="Set verbosity level")
+    ] = 0,
     settings: Annotated[
         list[str] | None,
         typer.Option(
@@ -267,7 +265,7 @@ def execute_pipeline(
         raise typer.BadParameter("Missing required arguments: date, job-id, dataset")
 
     configure_runtime(
-        debug=debug,
+        verbose=verbose,
         dry_run=state["dry_run"],
         ray_mode=state["ray_mode"].value,
     )
@@ -279,13 +277,13 @@ def execute_pipeline(
         )
         setup_logger(
             log_dir=Path("./.workspace/logs"),
-            is_debug=state["debug"],
+            verbose_level=state["verbose_level"],
             filename=f"{job_id}.jsonl",
             enqueue=True,
         )
 
         # 2. Assemble and Run
-        runtime, _ = _get_trigger_runtime(state["debug"], state["ray_mode"])
+        runtime, _ = _get_trigger_runtime(state["verbose_level"], state["ray_mode"])
         _log_startup_msg(dataset, partition_date, from_stage, to_stage)
 
         runtime.run(
@@ -303,7 +301,7 @@ def execute_pipeline(
 
     except Exception as e:
         logger.critical(f"Execution failed: {e}")
-        if state["debug"]:
+        if state["verbose_level"] >= 2:
             traceback.print_exc()
         raise typer.Exit(code=1) from e
     finally:

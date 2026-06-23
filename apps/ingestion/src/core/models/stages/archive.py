@@ -5,7 +5,6 @@ from apps.ingestion.src.core.models.task.manifest import ArchivePayload
 from apps.ingestion.src.services.factory import ServiceFactory
 from libs.utils.dates import current_timestamp
 from loguru import logger
-from upath import UPath
 
 from .base import ExecutionStage
 from .enums import Stage
@@ -27,15 +26,17 @@ class ArchiveStage(ExecutionStage):
 
         if not (archive_type := self.config.type):
             raise ValueError("Archive type is required when archive is enabled")
-        self.archive = ServiceFactory.get(archive_type, **self.config.service)
+        self.archive = ServiceFactory.get_archive(
+            service_type=archive_type, **self.config.service
+        )
 
         # Validate bucket/root exists (not just prefix)
-        check_url = self.archive.url
+        check_url = self.config.base_path
         if "://" in check_url:
             # Extract protocol + bucket: s3://my-bucket/prefix -> s3://my-bucket
             check_url = "/".join(check_url.split("/")[:3])
 
-        if not self.archive.fs.exists(check_url):
+        if not self.archive.exists(check_url):
             raise ConnectionError(f"Archive destination unreachable: {check_url}")
 
     def execute(self, task: Task) -> str:
@@ -74,8 +75,7 @@ class ArchiveStage(ExecutionStage):
             raise ValueError("Archive base path required")
 
         # Build archive path: base/job_id/partition_date/run_id
-        base = UPath(self.config.base_path, **self.archive.options)
-        archive_root = str(base / task.job_id / task.partition_date / task.run_id)
+        archive_root = task.get_archive_path(base_path=self.config.base_path)
 
         # Archive each stage's data
         for stage_name in [Stage.EXTRACT.value, Stage.TRANSFORM.value]:

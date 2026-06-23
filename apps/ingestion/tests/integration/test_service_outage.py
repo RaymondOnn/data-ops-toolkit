@@ -2,7 +2,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 from apps.ingestion.src.core.models.task import ExecutionStatus, Task
-from apps.ingestion.src.services.monitor import ServiceMonitor
+from apps.ingestion.src.core.monitor import ServiceMonitor
 from libs.clients.base import ClientCantConnect
 
 

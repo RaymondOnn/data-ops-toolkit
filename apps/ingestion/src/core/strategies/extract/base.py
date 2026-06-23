@@ -22,6 +22,7 @@ class ExtractContext(msgspec.Struct, frozen=True):
     partition_date: str
     job_id: str
     workspace: str | None = None
+    monitor_params: dict[str, Any] = {}
     params: dict[str, Any] = {}
     schema: list[ColumnMapping] = []
 

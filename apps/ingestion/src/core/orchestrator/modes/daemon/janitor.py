@@ -43,7 +43,7 @@ class DaemonJanitor:
         reason = "TTL_EXPIRED" if triggered else "UNTRIGGERED_STALE"
         full_reason = f"{reason} | Scheduled: {record.SCHEDULED_TIMESTAMP_LC}"
 
-        LOG.warning(f"Evicting run {run_id}: {full_reason}")
+        LOG.debug(f"Evicting run {run_id}: {full_reason}")
 
         # Log expiry to state stream
         self.state.log_expiry(run=record, context=task_context, reason=full_reason)

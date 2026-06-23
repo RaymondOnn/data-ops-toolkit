@@ -2,11 +2,12 @@
 
 import time
 from contextlib import suppress
-from copy import deepcopy
 from functools import cached_property
 from pathlib import Path
+from typing import Any
 
 import polars as pl
+from apps.ingestion.src.core.monitor import monitor
 from apps.ingestion.src.utils.exceptions import TryAgainLater
 from libs.auth.secret import Secret
 from libs.clients.base import ClientCantConnect
@@ -17,7 +18,6 @@ from loguru import logger
 
 from .base import Archive, Service, Sink, Source
 from .factory import ServiceFactory
-from .monitor import monitor
 
 LOG = logger
 MIN_BLOCK = 50 * 1024 * 1024  # 50MB
@@ -38,10 +38,19 @@ class BaseStorage(Service):
         name: str,
         url: str,
         capabilities: set[FileSystemSkills],
-        storage_options: dict,
+        storage_options: dict[str, Any],
         **config,
     ):
-        super().__init__(name, **config)
+        # Remove storage_options from config if present to avoid duplication
+        config.pop("storage_options", None)
+
+        super().__init__(
+            name,
+            url=url,
+            capabilities=capabilities,
+            storage_options=storage_options,
+            **config,
+        )
         self.url = url
         self.capabilities = capabilities
         self.options = storage_options
@@ -52,18 +61,19 @@ class BaseStorage(Service):
         """Lazy-initialized filesystem client."""
         from libs.file.base import create_fs_client
 
-        config = deepcopy(self._config)
-
+        resolved_config = {}
         for path, value in find_keys_by_pattern(
-            self.config, pattern="secret|password", ignore_case=True
+            self._config, pattern="secret|password", ignore_case=True
         ):
             if isinstance(value, Secret):
-                set_nested_key(config, path, "password", value.resolve(url_encode=True))
+                resolved_config = set_nested_key(
+                    self._config, path, "password", value.resolve(url_encode=True)
+                )
 
         return create_fs_client(
             url=self.url,
             capabilities=self.capabilities,
-            options={**self.options, **config},
+            options={**self.options, **resolved_config},
         )
 
     @property
@@ -394,18 +404,24 @@ class StorageArchive(BaseStorage, Archive):
     @monitor(breaker)
     def store(self, source: Path, dest: str) -> None:
         """Archive data to destination."""
-        self.client.cp(str(source), dest, recursive=True)
+        bucket = self.client.url
+        final_path = dest if "://" in dest else f"{bucket}/{dest}"
+        self.client.cp(str(source), final_path, recursive=True)
 
 
 # Service registrations
 @ServiceFactory.register("flat_file")
 class FlatFileService(StorageSource):
     def __init__(self, name: str, **config):
+        # Extract storage_options from config
+        storage_options = config.pop("storage_options", {})
+        url = config.pop("url", "")
+
         super().__init__(
             name=name,
-            url=config.pop("url", ""),
+            url=url,
             capabilities={FileSystemSkills.FILE},
-            storage_options=config.pop("storage_options", {}),
+            storage_options=storage_options,
             **config,
         )
 
@@ -413,11 +429,14 @@ class FlatFileService(StorageSource):
 @ServiceFactory.register("standard_archive")
 class StandardArchive(StorageArchive):
     def __init__(self, name: str, **config):
+        storage_options = config.pop("storage_options", {})
+        url = config.pop("url", "")
+
         super().__init__(
             name=name,
-            url=config.pop("url"),
+            url=url,
             capabilities={FileSystemSkills.ARCHIVE},
-            storage_options=config.pop("storage_options", {}),
+            storage_options=storage_options,
             **config,
         )
 
@@ -443,10 +462,14 @@ class CASArchive(StorageArchive):
 @ServiceFactory.register("data_lake")
 class DataLake(StorageSource, StorageSink):
     def __init__(self, name: str, **config):
+        # Extract storage_options from config
+        storage_options = config.pop("storage_options", {})
+        url = config.pop("url", "")
+
         super().__init__(
             name=name,
-            url=config.pop("url", "s3://data-lake"),
+            url=url,
             capabilities={FileSystemSkills.FILE},
-            storage_options=config.pop("storage_options", {}),
+            storage_options=storage_options,
             **config,
         )

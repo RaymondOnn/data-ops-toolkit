@@ -24,24 +24,31 @@ default:
   # ── Datasets (each key = dataset_id, values override job defaults) ─────────
   datasets:
     orders:
-      num_workers: 1          # overrides job-level num_workers if different
       partition_date:
         offset:
           days: -1
       extract:
+        service_ref: "file"
+        num_workers: 1          # overrides job-level num_workers if different
         load_mode: "snapshot"
-        source_params:
+        params:
           type: file
           file_pattern:
              archive:
              glob: ./mock_data/sample_orders.csv
+          remove_after:
+            enabled: true
+            mode: # file / directory / directory_if_empty
+          backup:
+            enabled: true
+            service_ref: s3_archive
         schema_file: "schema.csv"
       transform:
         type: default
         params:
       load:
         service_ref: "clickhouse"
-        sink_params:
+        params:
           type: database
           destination: TEST.ORDERS
       archive:

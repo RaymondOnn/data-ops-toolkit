@@ -9,7 +9,8 @@ dependencies = [
     "resilience", # Depends on libs/resilience
     "utils", # Depends on libs/utils
     "database", # Depends on libs/database
-    "cache", # Depends on libs/cache
+    "storage", # Depends on libs/storage
+    "queue", # Depends on libs/queue
     "ray[default]>=2.39.0",
     "polars",
     "pandas", # Required by Ray Data
@@ -20,8 +21,7 @@ dependencies = [
     "filelock",
     "dynaconf",
     "apscheduler",
-    "universal-pathlib",
-    "faker",
+    "diskcache"
 ]
 requires-python = ">=3.11"
 
@@ -33,4 +33,5 @@ database = { workspace = true }
 file = { workspace = true }
 resilience = { workspace = true }
 utils = { workspace = true }
-cache = { workspace = true }
+storage = { workspace = true }
+queue = { workspace = true }

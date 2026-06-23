@@ -5,7 +5,7 @@ from apps.ingestion.src.core.contexts.execution import ExecutionContext
 from apps.ingestion.src.core.models.task import (
     TaskRef,
 )
-from apps.ingestion.src.core.orchestrator.common.compute import Compute
+from apps.ingestion.src.core.orchestrator.common.task.compute import Compute
 from apps.ingestion.src.core.orchestrator.enums import TaskMetadata
 from loguru import logger
 
@@ -38,7 +38,7 @@ class MaintenancePolicy(Protocol):
         active_refs: dict[ray.ObjectRef, str],
         compute: Compute,
         exec_ctx: ExecutionContext,
-    ) -> None:
+    ) -> list[tuple[TaskMetadata, str]] | None:
         """Run one maintenance cycle."""
         ...
 

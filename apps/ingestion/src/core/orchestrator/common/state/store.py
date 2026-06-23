@@ -153,7 +153,7 @@ class StateStore:
                     return False
 
                 self.records[run_id] = new_record
-                LOG.debug("Updated record in cache", run_id=run_id)
+                LOG.trace("Updated record in cache", run_id=run_id)
                 return True
 
             except msgspec.ValidationError:
@@ -169,4 +169,4 @@ class StateStore:
         with self._lock:
             if run_id in self.records:
                 self.records.pop(run_id)
-                LOG.debug("Removed record from state cache", run_id=run_id)
+                LOG.trace("Removed record from state cache", run_id=run_id)

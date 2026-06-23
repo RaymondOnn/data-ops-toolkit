@@ -153,47 +153,55 @@ class Janitor:
         self._remove_orphaned_config(task.id, task.run_id)
 
     def _cleanup_external_sources(self, task: "Task") -> None:
-        """Clean up external source files/directories based on custom parameters."""
-        is_test = getattr(task.exec_ctx, "is_test", False)
-        params = task.context.overrides
+        """Clean up external source files/directories after successful ingestion."""
 
-        if not params.get("purge_external_source") or is_test:
+        # Skip conditions
+        if self.exec_ctx.is_test:
             return
 
-        source_id = task.context.extract.resource
-        if not source_id:
+        extract_ctx = task.context.extract
+        if not extract_ctx:
             return
 
-        path = Path(source_id)
-        if not path.exists():
+        params = extract_ctx.params
+        source_path = extract_ctx.resource
+
+        # Check if cleanup is needed
+        if params.get("type") != "file":
             return
 
-        mode = params.get("source_cleanup_mode", SourceCleanupMode.FILE.value)
+        cleanup = params.get("remove_after", {})
+        if (
+            not cleanup.get("enabled")
+            or not source_path
+            or not Path(source_path).exists()
+        ):
+            return
 
-        # Validate mode early
-        try:
-            cleanup_mode = SourceCleanupMode(mode)
-        except ValueError:
-            LOG.warning(f"Unknown source cleanup mode '{mode}', defaulting to FILE")
-            cleanup_mode = SourceCleanupMode.FILE
+        # Perform cleanup
+        self._execute_source_cleanup(Path(source_path), cleanup.get("mode", "file"))
 
-        if cleanup_mode == SourceCleanupMode.FILE and path.is_file():
-            LOG.info(f"Unlinking source file {path}")
+    def _execute_source_cleanup(self, path: Path, mode: str) -> None:
+        """Execute the actual source cleanup based on mode."""
+        mode = mode.lower()
+        parent = path.parent if path.is_file() else path
+
+        if mode == "file" and path.is_file():
+            LOG.info(f"Deleting source file: {path}")
             path.unlink(missing_ok=True)
 
-        elif cleanup_mode == SourceCleanupMode.DIRECTORY:
-            parent = path.parent if path.is_file() else path
-            LOG.info(f"Removing source directory {parent}")
+        elif mode == "directory":
+            LOG.info(f"Deleting source directory: {parent}")
             shutil.rmtree(parent, ignore_errors=True)
 
-        elif cleanup_mode == SourceCleanupMode.DIRECTORY_IF_EMPTY:
-            parent = path.parent if path.is_file() else path
+        elif mode == "directory_if_empty":
             if path.is_file():
                 path.unlink(missing_ok=True)
-
             if parent.is_dir() and not any(parent.iterdir()):
-                LOG.info(f"Removing empty source directory {parent}")
+                LOG.info(f"Removing empty directory: {parent}")
                 parent.rmdir()
+        else:
+            LOG.warning(f"Unknown cleanup mode '{mode}', skipping")
 
     def _remove_orphaned_config(self, task_id: str, run_id: str) -> None:
         """Remove orphaned config file."""
@@ -259,7 +267,7 @@ class Janitor:
 
         # Don't purge active tasks
         active_ids = {
-            TaskRef.from_str(v).identity.run_id
+            TaskRef.from_key(v).identity.run_id
             for v in self._get_active_tasks().values()
         }
         if folder.name in active_ids:

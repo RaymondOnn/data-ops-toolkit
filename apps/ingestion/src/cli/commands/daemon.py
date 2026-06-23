@@ -12,7 +12,7 @@ from typing import Annotated
 import typer
 from apps.ingestion.src.cli.state import app, configure_runtime, state
 from apps.ingestion.src.cli.utils import _write_signal_file
-from apps.ingestion.src.core.contexts import ExecutionMode, TaskContextBuilder
+from apps.ingestion.src.core.contexts import TaskContextBuilder
 from apps.ingestion.src.core.orchestrator.factory import assemble_runtime
 from apps.ingestion.src.core.orchestrator.modes.daemon import DaemonRuntime
 from apps.ingestion.src.utils.common import setup_logger
@@ -20,9 +20,9 @@ from apps.ingestion.src.utils.common import setup_logger
 
 @app.command(name="start")
 def start_orchestrator(
-    debug: Annotated[
-        bool, typer.Option("--debug", help="Enable verbose logging")
-    ] = False,
+    verbose: Annotated[
+        int, typer.Option("--verbose", "-v", count=True, help="Set verbosity level")
+    ] = 0,
 ) -> None:
     """Start the Ingestion Orchestrator in ALWAYS-ON mode (Daemon).
 
@@ -31,15 +31,14 @@ def start_orchestrator(
     """
 
     configure_runtime(
-        debug=debug or state["debug"],
+        verbose=verbose or state["verbose_level"],
         dry_run=state["dry_run"],
         ray_mode=state["ray_mode"].value,
     )
 
     builder = TaskContextBuilder()
     try:
-        mode = ExecutionMode.DEBUG if state["debug"] else ExecutionMode.NORMAL
-        exec_ctx = builder.build_execution_context(mode=mode)
+        exec_ctx = builder.build_execution_context()
         exec_ctx.always_on = True
         runtime = assemble_runtime(exec_ctx, builder)
 
@@ -49,7 +48,7 @@ def start_orchestrator(
 
         setup_logger(
             log_dir=Path("./.workspace/logs"),
-            is_debug=state["debug"],
+            verbose_level=state["verbose_level"],
             filename="orchestrator_daemon.jsonl",
         )
 
@@ -66,7 +65,7 @@ def start_orchestrator(
         typer.secho(
             f"INFRA FAILURE: {len(eg.exceptions)} tasks failed to connect.", fg="red"
         )
-        if state["debug"]:
+        if state["verbose_level"] >= 2:
             for e in eg.exceptions:
                 typer.echo(f"Details: {e}")
 
@@ -76,7 +75,7 @@ def start_orchestrator(
                 f"❌ CRITICAL FAILURE ({type(e).__name__}):", fg="red", bold=True
             )
             typer.secho(f"  {e}", fg="white")
-            if state["debug"]:
+            if state["verbose_level"] >= 2:
                 traceback.print_exception(type(e), e, e.__traceback__)
 
 

@@ -58,7 +58,7 @@ class StateSource:
             LOG.warning("No manifest found for sync", path=str(folder_path))
             return
 
-        LOG.debug("Syncing manifest to state", path=str(folder_path), deep=deep_sync)
+        LOG.trace("Syncing manifest to state", path=str(folder_path), deep=deep_sync)
 
         try:
             manifest = msgspec.json.decode(
@@ -147,7 +147,7 @@ class StateSource:
             context.overrides if context else getattr(record, "RUNTIME_OVERRIDES", None)
         )
 
-        LOG.debug(
+        LOG.trace(
             "Emitting state update",
             run_id=manifest.run_id,
             status=status,
@@ -179,14 +179,14 @@ class StateSource:
         )
 
         if self.store.update(manifest.run_id, update):
-            LOG.debug(
+            LOG.trace(
                 "Updated state from manifest",
                 run_id=manifest.run_id,
                 status=status,
                 remarks=remarks,
             )
         else:
-            LOG.debug("No changes from manifest", run_id=manifest.run_id)
+            LOG.trace("No changes from manifest", run_id=manifest.run_id)
 
     def _build_remarks(
         self, manifest: TaskManifest, status: str, metadata: dict | None
@@ -205,9 +205,9 @@ class StateSource:
             if manifest.error and manifest.error.message:
                 return manifest.error.message
 
-            from libs.cache.factory import get_cache
+            from libs.storage.cache.factory import get_cache
 
-            cache = get_cache(self.exec_ctx.workspace_dir, self.exec_ctx.cache_config)
+            cache = get_cache(self.exec_ctx.cache_config)
             pattern = f"{CACHE_TASK_NAMESPACE}:*:*:*:*:*:{manifest.run_id}"
 
             for key in list(cache.iterkeys(pattern=pattern)):

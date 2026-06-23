@@ -1,9 +1,7 @@
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import ray
-from apps.ingestion.src.core.contexts.execution import ExecutionContext
 from apps.ingestion.src.core.models.task import TaskRef
-from apps.ingestion.src.core.orchestrator.common.compute import Compute
 from apps.ingestion.src.core.orchestrator.contracts.policies import (
     AdmissionPolicy,
     MaintenancePolicy,
@@ -11,6 +9,10 @@ from apps.ingestion.src.core.orchestrator.contracts.policies import (
 from apps.ingestion.src.core.orchestrator.enums import TaskMetadata
 from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE
 from loguru import logger
+
+if TYPE_CHECKING:
+    from apps.ingestion.src.core.contexts.execution import ExecutionContext
+    from apps.ingestion.src.core.orchestrator.common.task.compute import Compute
 
 LOG = logger
 
@@ -63,9 +65,9 @@ class NoOpMaintenance(MaintenancePolicy):
         cache: Any,
         lock: Any,
         active_refs: dict[ray.ObjectRef, str],
-        compute: Compute,
-        exec_ctx: ExecutionContext,
-    ) -> None:
+        compute: "Compute",
+        exec_ctx: "ExecutionContext",
+    ) -> list[tuple[TaskMetadata, str]] | None:
         """Performs basic resource reclamation without active self-healing.
 
         Args:
@@ -83,11 +85,12 @@ class NoOpMaintenance(MaintenancePolicy):
         execution thread.
         """
         self.cleanup_tasks(active_refs, compute)
+        return None
 
     def cleanup_tasks(
         self,
         active_refs: dict[ray.ObjectRef, str],
-        compute: Compute,
+        compute: "Compute",
     ) -> None:
         """Identifies finished Ray tasks and releases compute slots.
 

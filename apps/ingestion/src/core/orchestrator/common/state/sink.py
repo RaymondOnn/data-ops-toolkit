@@ -145,6 +145,7 @@ class StateSink:
         held by short-lived CLI processes.
         """
         if self._db is None:
+            print(self.db_config)
             config = self.db_config.copy()
             service_type = config.pop("type")
             LOG.debug("Initializing database client", service_type=service_type)

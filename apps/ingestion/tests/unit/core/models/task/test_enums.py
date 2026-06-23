@@ -19,11 +19,11 @@ def sample_ref():
 def test_task_ref_from_str_success():
     """
     GIVEN a valid 7-part colon-delimited string
-    WHEN TaskRef.from_str is called
+    WHEN TaskRef.from_key is called
     THEN it should return a correctly populated TaskRef instance
     """
     raw = "task:PENDING:start:my_job:my_ds:2023-10-27:run_999"
-    ref = TaskRef.from_str(raw)
+    ref = TaskRef.from_key(raw)
 
     assert ref.namespace == "task"
     assert ref.status == "PENDING"
@@ -34,11 +34,11 @@ def test_task_ref_from_str_success():
 def test_task_ref_from_str_malformed():
     """
     GIVEN a string with incorrect number of parts
-    WHEN TaskRef.from_str is called
+    WHEN TaskRef.from_key is called
     THEN it should raise a ValueError
     """
     with pytest.raises(ValueError, match="Invalid TaskRef format"):
-        TaskRef.from_str("invalid:format:too_short")
+        TaskRef.from_key("invalid:format:too_short")
 
 
 def test_task_ref_from_signal_stem():

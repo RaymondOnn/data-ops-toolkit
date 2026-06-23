@@ -84,13 +84,12 @@ class DataExtractor(Extractor[T_Source], Generic[T_Source]):
             Returns:
                 pyarrow.Table: The extracted and schema-aligned data.
             """
-            from pathlib import Path
 
             import msgspec
             import polars as pl
+            from apps.ingestion.src.core.monitor import ServiceMonitor
             from apps.ingestion.src.core.schema import apply_schema_contract
             from apps.ingestion.src.services.factory import ServiceFactory
-            from apps.ingestion.src.services.monitor import ServiceMonitor
             from loguru import logger as worker_log
 
             ctx = msgspec.json.decode(batch["context"][0], type=ExtractContext)
@@ -98,7 +97,7 @@ class DataExtractor(Extractor[T_Source], Generic[T_Source]):
             unit = batch["unit"][0]
 
             if ctx.workspace:
-                ServiceMonitor.setup(Path(ctx.workspace))
+                ServiceMonitor.setup(**ctx.monitor_params)
 
             svc = ServiceFactory.get_source(ctx.kind, **config)
             worker_log.info(f"Worker processing: {unit}")
@@ -186,7 +185,6 @@ class FileExtractor(DataExtractor[StorageSource]):
         """
         target, pattern = self.resolve_file_params(context)
         LOG.debug(f"Resolved target: {target}, pattern: {pattern}")
-        print(f"{context.params=}")
         return source.parallelize(
             target=target,
             num_workers=context.num_workers,

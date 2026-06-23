@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import polars as pl
+from apps.ingestion.src.core.contexts import SERVICE_REF_NEW_KEY
 from apps.ingestion.src.core.models.task.manifest import ExtractPayload, FileInfo
 from apps.ingestion.src.core.strategies.extract import (
     ExtractContext,
@@ -59,7 +60,6 @@ class ExtractStage(ExecutionStage):
                 LOG.debug(f"  Filter condition: {original} -> {condition}")
 
             if "file" in self.config.type:
-                print("Adding workspace to options")
                 options["workspace"] = str(task.workspace.path)
                 options["cleanup"] = False
 
@@ -72,9 +72,13 @@ class ExtractStage(ExecutionStage):
                 partition_date=task.partition_date,
                 job_id=task.job_id,
                 workspace=str(task.exec_ctx.workspace_dir),
+                monitor_params={
+                    "signal_dir": str(task.exec_ctx.signal_path),
+                    "cache_config": task.exec_ctx.cache_config,
+                },
                 params=options,
             )
-            LOG.info(
+            LOG.trace(
                 f"  Extract context: type={ctx.kind}, source={ctx.resource}, "
                 f"workers={ctx.num_workers}, params={ctx.params}"
             )
@@ -135,8 +139,11 @@ class ExtractStage(ExecutionStage):
                     f"{total_rows:_} rows"
                 )
 
+            # Backup source files if configured (non-blocking)
+            self._backup_source_files(task, ctx)
+
             final_schema = self._merge_schemas(schemas)
-            audit_identity = self.resolve_resource_identify(task, extractor)
+            audit_identity = self.resolve_resource_identify(extractor)
             LOG.info(f"  Audit identity: {audit_identity}")
 
             payload = ExtractPayload(
@@ -222,7 +229,41 @@ class ExtractStage(ExecutionStage):
         LOG.debug(f"  Final schema: {len(result)} columns")
         return result
 
-    def resolve_resource_identify(self, task: "Task", extractor: "Extractor") -> str:
+    def _backup_source_files(self, task: "Task", ctx: "ExtractContext") -> None:
+        """Backup source files to archive storage if configured (non-blocking)."""
+        backup_config = ctx.params.get("backup", {})
+        if not backup_config.get("enabled"):
+            return
+
+        source_path = ctx.resource  # or ctx.resource
+        if not source_path:
+            LOG.debug("No source path to backup")
+            return
+
+        # Check if source path exists
+        if not Path(source_path).exists():
+            LOG.debug(f"Source path does not exist, skipping backup: {source_path}")
+            return
+
+        backup_service_cfg = backup_config.get(SERVICE_REF_NEW_KEY)
+        if not backup_service_cfg:
+            LOG.warning("Backup enabled but no service config not found")
+            return
+
+        try:
+            backup_type = backup_service_cfg.pop("type")
+            backup_service = ServiceFactory.get_archive(
+                backup_type, **backup_service_cfg
+            )
+            dest_path = task.get_archive_path(suffix="/raw")
+            backup_service.store(Path(source_path), dest_path)
+            LOG.info(f"Backing up source: {source_path} -> {dest_path}")
+
+        except Exception:
+            # Don't fail extraction if backup fails
+            LOG.exception("Source backup failed. Continuing...")
+
+    def resolve_resource_identify(self, extractor: "Extractor") -> str:
         """
         Delegate to service for source-specific identity.
 

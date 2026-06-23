@@ -11,7 +11,6 @@ workspace_dir/
 ├── active/        # In-flight jobs and their single-source-of-truth metadata.
 ├── data/          # Persistent/physical data vaults for staging data between stages.
 ├── signals/       # Zero-byte files acting as event notifications.
-├── HOLD/          # Tasks intentionally paused (e.g., waiting for external locks).
 └── FAILED/        # Tasks that have crashed and await manual intervention or automatic retries.
 ```
 
@@ -36,12 +35,18 @@ Tasks progress sequentially through an expected order of stages (e.g., `START` �
 
 During each stage execution:
 1. **Check-In (`job.check_in`):** The orchestrator atomically overwrites `manifest.json` setting `status: "RUNNING"` and the `current_stage`.
-2. **Data Storage:** Data processing produces physical files. These large files are strictly stored in the `data/` vault to keep the metadata directories lightweight.
-   **Data Folder Naming Convention:**
-   `data/{stage_name}/{job_id}_{unix_timestamp}/`
-   *Example:* `data/extract/my_job_1710990200/` or `data/transform/my_job_1710990250/`
-3. **Completion Marker:** As soon as a stage cleanly finishes, the system creates a symlink or subdirectory marker in the active folder named identically to the stage (e.g. `active/.../{run_id}/extract`) pointing to the physical data vault. The Engine checks for the existence of this localized marker when recovering from orchestrator crashes to guarantee a stage formally reached the finish line.
-4. **Signals:** The job drops zero-byte files inside `signals/{run_id}.sync` or `{run_id}.done` to loosely ping observers about the state change.
+2. **Parallelization & Heuristics:**
+   - **Databases:** Uses the **Cell-Budget heuristic** (~20M cells/worker) to determine concurrency without OOMing Ray workers.
+   - **Files:** Uses **Greedy Bin-Packing (LPT)** to balance byte-load and **Intra-file Slicing** if workers exceed file counts.
+3. **Data Storage:** Data processing produces physical files. These large files are strictly stored in the `data/` vault to keep the metadata directories lightweight (ADR 001).
+   **Data Folder Naming Convention (Deterministic):**
+   `data/{job_id}/{dataset_id}/{run_id}/{stage_name}/`
+   *Example:* `data/sales_ingest/orders/20240320-120000-abcd1234/extract/`
+4. **The Physical Handshake:**
+   As soon as a stage cleanly finishes, the system creates a **relative symlink** in the active folder named identically to the stage (e.g., `active/.../{run_id}/extract`) pointing to the physical data vault.
+   *Decision: Portability.* By using relative symlinks, the task folder remains portable across different mount points or containerized environments.
+5. **The Signal Handshake:**
+   The job drops zero-byte files inside `signals/{run_id}.sync` (heartbeat) or `{run_id}.done` (terminal) to notify the Orchestrator's `SignalScanner`.
 
 ```mermaid
 sequenceDiagram
@@ -60,11 +65,11 @@ sequenceDiagram
     O->>AR: Move config.json -> AJ: {job_id}_{run_id}_config.json
 
     loop For Every Step (Extract, Transform, Load...)
-        Note over O,AJ: Step Check-in
+        Note over O,AJ: Step Check-in (Atomic Status Update)
         O->>AJ: Update manifest.json (current_stage=NAME, status=RUNNING)
 
-        Note over O,D: Processing Stage Logic...
-        O->>D: Write payload to data/stage_dir/
+        Note over O,D: Processing Stage Logic (Parallel Ray Workers)
+        O->>D: Write payload to data/{job}/{ds}/{run}/{stage}/
 
         Note over O,AJ: Step Sign-off (Atomic Write)
         O->>AJ: Write directory marker (e.g., /extract)
@@ -76,7 +81,7 @@ sequenceDiagram
 
     Note over O,AJ: Phase 3: Finalization
     O->>AJ: Finalize manifest (status=COMPLETED)
-    O->>AJ: Relocate Folder (active/ -> COMPLETED/ or FAILED/)
+    O->>AJ: Relocate/Cleanup (active/ -> COMPLETED/ or FAILED/ or Deleted)
 ```
 
 ---
