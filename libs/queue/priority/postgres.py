@@ -1,5 +1,6 @@
 import json
 import logging
+from collections.abc import Generator
 from typing import Any
 
 import msgspec
@@ -160,6 +161,35 @@ class SQLQueue(PriorityQueue):
         except Exception as e:
             LOG.error(f"Failed to get queue size: {e}")
             return 0
+
+    def items(self) -> Generator[Any, None, None]:
+        """Scan and yield data from pending tasks in the SQL queue."""
+
+        select_sql = f"""
+        SELECT data FROM {self.table_name}
+        WHERE processing_start IS NULL
+        ORDER BY priority ASC, created_at ASC
+        """
+        try:
+            results = self.client.sql(select_sql)
+            for row in results:
+                # Explicit type branching clears up type ambiguities
+                if isinstance(row, (tuple | list)):
+                    raw_data = row[0]
+                elif isinstance(row, dict):
+                    raw_data = row["data"]
+                else:
+                    # Fallback for custom row objects (like SQLAlchemy or Psycopg Row)
+                    raw_data = getattr(row, "data", row)
+
+                if isinstance(raw_data, str):
+                    import json
+
+                    yield json.loads(raw_data)
+                else:
+                    yield raw_data
+        except Exception as e:
+            LOG.error(f"Failed to scan SQL queue items: {e}")
 
     def cleanup(self) -> None:
         """Clean up old completed tasks."""

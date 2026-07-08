@@ -17,12 +17,35 @@ class CSVHandler(FormatHandler):
 
     @property
     def splittable(self) -> bool:
+        """Check if CSV files are splittable.
+
+        Returns:
+            bool: True if CSV files are splittable, False otherwise.
+        """
         return True
 
     def discover(self, path: Path | str, pattern: str | None = None) -> set[str]:
+        """Discover CSV files.
+
+        Args:
+            path: The path to the CSV file.
+            pattern: The pattern to match.
+
+        Returns:
+            set[str]: Set of discovered CSV files.
+        """
         return self._glob_files(path, pattern, "**/*.[ct][sx][vt]")
 
     def to_df(self, path: Path | str, **kwargs: Any) -> pl.LazyFrame:
+        """Convert CSV files to Polars LazyFrame.
+
+        Args:
+            path: The path to the CSV file.
+            **kwargs: Additional keyword arguments.
+
+        Returns:
+            pl.LazyFrame: The LazyFrame containing the CSV data.
+        """
         files = self.discover(path)
         if not files:
             return pl.LazyFrame()
@@ -44,12 +67,27 @@ class CSVHandler(FormatHandler):
         return pl.concat(lfs) if lfs else pl.LazyFrame()
 
     def from_df(self, df: pl.LazyFrame | pl.DataFrame, path: Path | str) -> None:
+        """Write LazyFrame to CSV files.
+
+        Args:
+            df: The LazyFrame to write.
+            path: The path to write the files to.
+        """
         if isinstance(df, pl.LazyFrame):
             df.sink_csv(path)
         else:
             df.write_csv(path)
 
     def read_raw(self, path: Path | str, **kwargs: Any) -> io.BytesIO:
+        """Read raw data from CSV files.
+
+        Args:
+            path: The path to the CSV file.
+            **kwargs: Additional keyword arguments.
+
+        Returns:
+            io.BytesIO: The raw data.
+        """
         encoding = kwargs.get("encoding", "utf-8")
         files = self.discover(path)
         if not files:
@@ -74,5 +112,11 @@ class CSVHandler(FormatHandler):
         return io.BytesIO(combined)
 
     def write_raw(self, data: bytes, path: Path | str) -> None:
+        """Write raw data to path.
+
+        Args:
+            data: The raw data to write.
+            path: The path to write the data to.
+        """
         with self.fs.open(path, "wb") as f:
             cast("IO[bytes]", f).write(data)

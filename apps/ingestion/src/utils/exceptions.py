@@ -51,3 +51,31 @@ class RollbackRequired(Exception):
         self.target_stage = target_stage
         self.reason = reason
         super().__init__(self.reason)
+
+
+class OutOfDiskSpace(Exception):
+    """
+    Signals that the system is out of disk space and requires recovery actions.
+
+    This exception is raised when the available disk space drops below the
+    configured threshold. It triggers the orchestrator's self-healing
+    mechanism to clean up old tasks and free up space.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        disk_usage: float | None = None,
+        required_space: int | None = None,
+        available_space: int | None = None,
+        wait_seconds: int = 60,
+    ):
+        self.message = message
+        self.disk_usage = disk_usage
+        self.required_space = required_space
+        self.available_space = available_space
+        self.wait_seconds = wait_seconds
+        self.service_name = (
+            "DISK_PRESSURE"  # For compatibility with service outage handling
+        )
+        super().__init__(message)

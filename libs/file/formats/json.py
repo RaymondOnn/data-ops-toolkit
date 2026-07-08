@@ -18,12 +18,35 @@ class JSONHandler(FormatHandler):
 
     @property
     def splittable(self) -> bool:
+        """Check if JSON files are splittable.
+
+        Returns:
+            bool: True if JSON files are splittable, False otherwise.
+        """
         return False
 
     def discover(self, path: Path | str, pattern: str | None = None) -> set[str]:
+        """Discover JSON files.
+
+        Args:
+            path: The path to the JSON file.
+            pattern: The pattern to match.
+
+        Returns:
+            set[str]: Set of discovered JSON files.
+        """
         return self._glob_files(path, pattern, "**/*.json*")
 
     def to_df(self, path: Path | str, **kwargs: Any) -> pl.LazyFrame:
+        """Convert JSON files to Polars LazyFrame.
+
+        Args:
+            path: The path to the JSON file.
+            **kwargs: Additional keyword arguments.
+
+        Returns:
+            pl.LazyFrame: The LazyFrame containing the JSON data.
+        """
         files = self.discover(path)
         if not files:
             return pl.LazyFrame()
@@ -50,12 +73,27 @@ class JSONHandler(FormatHandler):
         return pl.concat(lfs) if lfs else pl.LazyFrame()
 
     def from_df(self, df: pl.LazyFrame | pl.DataFrame, path: Path | str) -> None:
+        """Write LazyFrame to JSON files.
+
+        Args:
+            df: The LazyFrame to write.
+            path: The path to write the files to.
+        """
         if isinstance(df, pl.LazyFrame):
             df.sink_ndjson(path)
         else:
             df.write_ndjson(path)
 
     def read_raw(self, path: Path | str, **kwargs: Any) -> io.BytesIO:
+        """Read raw data from path.
+
+        Args:
+            path: The path to the file.
+            **kwargs: Additional keyword arguments.
+
+        Returns:
+            io.BytesIO: The raw data.
+        """
         encoding = kwargs.get("encoding", "utf-8")
         files = self.discover(path)
         if not files:
@@ -79,11 +117,24 @@ class JSONHandler(FormatHandler):
         return io.BytesIO(combined)
 
     def write_raw(self, data: bytes, path: Path | str) -> None:
+        """Write raw data to path.
+
+        Args:
+            data: The raw data to write.
+            path: The path to write the data to.
+        """
         with self.fs.open(path, "wb") as f:
             f.write(data)
 
     def _is_ndjson(self, path: str) -> bool:
-        """Check if file is NDJSON format."""
+        """Check if file is NDJSON format.
+
+        Args:
+            path: The path to the file.
+
+        Returns:
+            bool: True if the file is NDJSON, False otherwise.
+        """
         if any(path.endswith(ext) for ext in [".ndjson", ".jsonl"]):
             return True
 

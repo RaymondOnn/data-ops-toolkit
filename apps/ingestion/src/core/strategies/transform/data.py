@@ -2,7 +2,7 @@
 
 # from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import polars as pl
 import ray
@@ -18,10 +18,26 @@ class DataTransformer(Transformer):
     """Execute transformations using Ray for distribution."""
 
     def transform(self, context: TransformContext) -> tuple[int, dict[str, str]]:
+        """Transform data using Ray for distribution.
+
+        Args:
+            context: The transformation context.
+
+        Returns:
+            tuple[int, dict[str, str]]: The number of rows and the schema.
+        """
         LOG.info(f"Loading data from {context.source}")
         ds = ray.data.read_parquet(str(context.source))
 
         def process_batch(batch: Any) -> Any:
+            """Process a batch of data.
+
+            Args:
+                batch: The batch of data.
+
+            Returns:
+                Any: The processed batch of data.
+            """
             # Step 1: Convert Arrow batch to Polars DataFrame
             df = pl.from_arrow(batch)
 
@@ -46,7 +62,7 @@ class DataTransformer(Transformer):
             collected = transformed.collect()
 
             # Return as Arrow
-            return cast("pl.DataFrame", collected).to_arrow()
+            return collected.to_arrow()
 
         ds.map_batches(process_batch, batch_format="pyarrow").write_parquet(
             str(context.target)

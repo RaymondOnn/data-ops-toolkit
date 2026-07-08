@@ -101,6 +101,7 @@ class TaskSession:
 
         self.task.workspace.remove_marker(".blocked")
         self.log.info(f"Stage {self.task_ref.stage.upper()} started")
+
         return self.task
 
     def __exit__(self, exc_type, exc_val, exc_tb):

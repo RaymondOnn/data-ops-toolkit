@@ -134,7 +134,7 @@ class TestServiceFactory:
         WHEN get_cache is called
         """
         workspace = MagicMock()
-        cfg = {"type": "diskcache", "filepath": "my_cache"}
+        cfg = {"type": "diskcache", "directory": "my_cache"}
 
         ServiceFactory.get_cache(workspace, cfg)
 

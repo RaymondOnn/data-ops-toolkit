@@ -1,35 +1,102 @@
-from pathlib import Path
-from typing import Any
+# libs/storage/cache/factory.py
+import logging
+from enum import StrEnum
 
-from .base import KeyValueCache
-from .diskcache import DiskCache
-from .redis import RedisCache
+from .base import Cache
+
+LOG = logging.getLogger(__name__)
 
 
-def get_cache(cache_cfg: dict[str, Any]) -> KeyValueCache:
-    """
-    Standalone factory to create a normalized CacheService.
-    Infrastructure-level: does not depend on Core or Services.
+class CacheType(StrEnum):
+    DISKCACHE = "diskcache"
+    REDIS = "redis"
+    MEMORY = "memory"
 
-    Args:
-        workspace_dir: The base directory for local state storage.
-        cache_cfg: Configuration dictionary containing at least 'type'.
-            For Redis: requires 'host', 'db', and optionally 'port'.
-            For Diskcache: optionally accepts 'filepath'.
 
-    Returns:
-        KeyValueCache: A concrete implementation of the cache interface.
-    """
+class CacheFactory:
+    """Simple factory for creating cache instances."""
 
-    print(f"cache_cfg: {cache_cfg}")
+    @staticmethod
+    def create(
+        cache_type: str,
+        namespace: str | None = None,
+        **kwargs,
+    ) -> Cache:
+        """Create a cache instance.
 
-    if cache_cfg.get("type") == "redis":
-        return RedisCache(
-            host=cache_cfg["host"],
-            port=cache_cfg.get("port", 6379),
-            db=cache_cfg["db"],
-        )
+        Args:
+            cache_type: The type of cache to create.
+            namespace: The namespace for the cache.
+            **kwargs: Additional arguments for the cache.
 
-    # Default to lean mode (Diskcache)
-    cache_filepath = cache_cfg.get("filepath", ".cache")
-    return DiskCache(cache_path=Path(cache_filepath).expanduser().resolve())
+        Returns:
+            Cache: A cache instance.
+
+        Raises:
+            ValueError: If the cache type is not supported or if required arguments are missing.
+
+        Examples:
+            # DiskCache (persistent, no eviction)
+            cache = CacheFactory.create(
+                CacheType.DISKCACHE,
+                namespace="ingestion",
+                directory=Path("/path/to/cache"),
+                evict=False
+            )
+
+            # DiskCache (with eviction and TTL)
+            cache = CacheFactory.create(
+                CacheType.DISKCACHE,
+                namespace="cache",
+                directory=Path("/path/to/cache"),
+                evict=True,
+                size_limit=2**30
+            )
+
+            # Redis
+            cache = CacheFactory.create(
+                CacheType.REDIS,
+                namespace="ingestion",
+                redis_url="redis://localhost:6379/0"
+            )
+
+            # Memory (for testing)
+            cache = CacheFactory.create(
+                CacheType.MEMORY,
+                namespace="test"
+            )
+        """
+
+        if cache_type == CacheType.DISKCACHE:
+            from .diskcache import DiskCache
+
+            directory = kwargs.get("directory")
+            if not directory:
+                raise ValueError("directory is required for DiskCache")
+
+            cache: Cache = DiskCache(
+                directory=directory,
+                namespace=namespace,
+                size_limit=kwargs.get("size_limit", 2**30),
+                timeout=kwargs.get("timeout", 5),
+            )
+
+        elif cache_type == CacheType.REDIS:
+            from .redis import RedisCache
+
+            cache = RedisCache(
+                redis_url=kwargs.get("redis_url", "redis://localhost:6379/0"),
+                namespace=namespace,
+                **{k: v for k, v in kwargs.items() if k not in ["redis_url"]},
+            )
+
+        elif cache_type == CacheType.MEMORY:
+            from .memory import MemoryCache
+
+            cache = MemoryCache(namespace=namespace)
+
+        else:
+            raise ValueError(f"Unsupported cache type: {cache_type}")
+
+        LOG.info(f"Created {cache_type} cache | namespace={namespace}")
+        return cache

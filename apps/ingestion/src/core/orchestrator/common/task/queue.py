@@ -1,11 +1,12 @@
 import time
+from collections.abc import Generator
 from typing import Any
 
 import msgspec
 from apps.ingestion.src.core.models.stages.enums import Stage
 from apps.ingestion.src.core.models.task import ExecutionStatus
 from apps.ingestion.src.core.orchestrator.enums import TaskMetadata
-from libs.queue.priority.factory import QueueFactory, QueueType
+from apps.ingestion.src.services.factory import ServiceFactory
 from loguru import logger
 
 LOG = logger
@@ -38,11 +39,13 @@ class TaskQueue:
         workspace, ensuring that different pipelines remain physically
         isolated and can be cleaned up independently.
         """
-        queue_type = queue_config["type"]
-        self.instance = QueueFactory.create(
-            queue_type=QueueType(queue_type),
-            **queue_config,
-        )
+        self.backend = ServiceFactory.get_task_queue(queue_config)
+
+    def is_empty(self) -> bool:
+        """Check if the queue has any pending tasks."""
+        if self.backend.size() > 0:
+            return True
+        return False
 
     def _decode_task_metadata(self, data: Any) -> TaskMetadata | None:
         """Decode TaskMetadata from dict, bytes, or string."""
@@ -71,7 +74,7 @@ class TaskQueue:
         meta.last_hb = time.time()
 
         priority = self.calculate_priority(stage, status)
-        self.instance.push(
+        self.backend.push(
             data=msgspec.json.encode(meta),
             priority=priority,
             group=meta.job_id,
@@ -80,11 +83,11 @@ class TaskQueue:
 
     def pop(self, visibility_timeout: int = 300):
         """Pops the highest priority task from the queue."""
-        return self.instance.pop(visibility_timeout=visibility_timeout)
+        return self.backend.pop(visibility_timeout=visibility_timeout)
 
     def ack(self, msg_id: str):
         """Acknowledges successful completion of a task message."""
-        self.instance.ack(msg_id)
+        self.backend.ack(msg_id)
 
     @staticmethod
     def calculate_priority(stage_name: str, status: ExecutionStatus) -> int:
@@ -94,3 +97,20 @@ class TaskQueue:
         # Invert: our high priority (e.g. 105) should be closer to 0 (FlashQ's highest)
         # FlashQ priority 0 is highest, 255 is lowest.
         return max(0, min(255, 255 - (base + bonus)))
+
+    def items(self) -> Generator[TaskMetadata, None, None]:
+        """Iterates over the backend items and yields strictly decoded TaskMetadata instances."""
+        for raw_data in self.backend.items():
+            try:
+                if isinstance(raw_data, dict):
+                    yield msgspec.convert(raw_data, type=TaskMetadata)
+                else:
+                    # In case data comes back as a raw JSON string or byte block
+                    payload = (
+                        raw_data.encode() if isinstance(raw_data, str) else raw_data
+                    )
+                    yield msgspec.json.decode(payload, type=TaskMetadata)
+            except Exception:
+                # Gracefully swallow individual corrupt item parsing exceptions
+                # so a single invalid payload doesn't brick your manager health loop
+                continue

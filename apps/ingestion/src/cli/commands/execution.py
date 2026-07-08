@@ -38,10 +38,6 @@ def _log_startup_msg(
         from_stage: The starting stage label, if restricted.
         to_stage: The ending stage label, if restricted.
 
-    Decision: Visual Confirmation.
-    Providing immediate visual feedback of the target dataset and date
-    partition helps users catch configuration errors before heavy
-    computational resources are provisioned.
     """
     msg = f"🚀 Initializing {dataset} for {partition_date.date()}"
     if from_stage or to_stage:

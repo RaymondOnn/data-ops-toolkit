@@ -25,8 +25,8 @@ class TestAuthFactory:
         THEN the same instance should be returned for subsequent calls
         WHEN get_provider is invoked multiple times
         """
-        p1 = AuthFactory.get_provider("dev", type="local_file")
-        p2 = AuthFactory.get_provider("dev", type="local_file")
+        p1 = AuthFactory.get_provider(type="local_file")
+        p2 = AuthFactory.get_provider(type="local_file")
 
         assert p1 is p2
         mock_local_cls.assert_called_once()
@@ -38,7 +38,7 @@ class TestAuthFactory:
         THEN return a LocalSecretProvider pointing to the default path
         WHEN get_provider is called
         """
-        provider = AuthFactory.get_provider("dev")
+        provider = AuthFactory.get_provider()
 
         assert isinstance(provider, MagicMock)
         mock_local_cls.assert_called_once()
@@ -53,7 +53,7 @@ class TestAuthFactory:
         THEN force the use of AWS Secret Manager regardless of config type
         WHEN get_provider is invoked
         """
-        _ = AuthFactory.get_provider("prod", type="local_file")
+        _ = AuthFactory.get_provider(ype="local_file")
 
         mock_aws_cls.assert_called_once()
         assert AuthFactory._provider == mock_aws_cls.return_value
@@ -68,7 +68,7 @@ class TestAuthFactory:
         """
         mock_getenv.return_value = "my-secret-master-key"
 
-        AuthFactory.get_provider("dev", type="secure_file")
+        AuthFactory.get_provider(type="secure_file")
 
         mock_enc_cls.assert_called_once()
         _, kwargs = mock_enc_cls.call_args
@@ -84,7 +84,7 @@ class TestAuthFactory:
             patch("os.getenv", return_value=None),
             pytest.raises(ValueError, match="requires a master_key"),
         ):
-            AuthFactory.get_provider("dev", type="secure_file")
+            AuthFactory.get_provider(type="secure_file")
 
     def test_get_provider_unsupported_type(self):
         """
@@ -93,7 +93,7 @@ class TestAuthFactory:
         WHEN get_provider is called
         """
         with pytest.raises(ValueError, match="Unsupported provider type"):
-            AuthFactory.get_provider("dev", type="invalid_type")
+            AuthFactory.get_provider(type="invalid_type")
 
     @patch("libs.auth.factory.AWSSecretProvider")
     def test_get_provider_with_custom_config(self, mock_aws_cls):
@@ -108,7 +108,7 @@ class TestAuthFactory:
             "service": {"endpoint_url": "http://localstack"},
         }
 
-        AuthFactory.get_provider("dev", **custom_cfg)
+        AuthFactory.get_provider(**custom_cfg)
 
         mock_aws_cls.assert_called_once()
         _, kwargs = mock_aws_cls.call_args

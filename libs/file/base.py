@@ -32,15 +32,34 @@ class FileSystemClient(BaseIOClient, ABC):
     @property
     @abstractmethod
     def fs(self) -> fsspec.AbstractFileSystem:
-        """Get underlying fsspec filesystem."""
+        """Get underlying fsspec filesystem.
+
+        Returns:
+            fsspec.AbstractFileSystem: The underlying fsspec filesystem.
+        """
         raise NotImplementedError
 
     def open(self, path: str, mode: str = "rb") -> Any:
-        """Open a file."""
+        """Open a file.
+
+        Args:
+            path: The path to open.
+            mode: The mode to open the file in.
+
+        Returns:
+            Any: The file object.
+        """
         return self.fs.open(self.resolve(path), mode=mode)
 
     def resolve(self, path: str | Path) -> str:
-        """Resolve path to absolute/fully-qualified URL."""
+        """Resolve path to absolute/fully-qualified URL.
+
+        Args:
+            path: The path to resolve.
+
+        Returns:
+            str: The resolved path.
+        """
         path_str = str(path)
 
         # Cloud protocol already present
@@ -59,15 +78,36 @@ class FileSystemClient(BaseIOClient, ABC):
         return str((UPath(self.url) / path_str).resolve(strict=False))
 
     def exists(self, path: str | Path) -> bool:
-        """Check if path exists."""
+        """Check if path exists.
+
+        Args:
+            path: The path to check.
+
+        Returns:
+            bool: True if the path exists, False otherwise.
+        """
         return self.fs.exists(self.resolve(str(path)))
 
     def ls(self, path: str = "", detail: bool = False) -> list[Any]:
-        """List directory contents."""
+        """List directory contents.
+
+        Args:
+            path: The path to list.
+            detail: Whether to return detailed information.
+
+        Returns:
+            list[Any]: List of directory contents.
+        """
         return self.fs.ls(self.resolve(path), detail=detail)
 
     def cp(self, src: str, dst: str, recursive: bool = True, **kwargs) -> None:
-        """Transfer between any two paths (cross-filesystem aware)."""
+        """Transfer between any two paths (cross-filesystem aware).
+
+        Args:
+            src: The source path.
+            dst: The destination path.
+            recursive: Whether to transfer recursively.
+        """
         src_has_protocol = "://" in src
         dst_has_protocol = "://" in dst
 
@@ -94,7 +134,13 @@ class FileSystemClient(BaseIOClient, ABC):
                 shutil.copy2(src, dst)
 
     def _transfer_via_local(self, src: str, dst: str, recursive: bool) -> None:
-        """Transfer remote to remote via local temporary storage."""
+        """Transfer remote to remote via local temporary storage.
+
+        Args:
+            src: The source path.
+            dst: The destination path.
+            recursive: Whether to transfer recursively.
+        """
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -102,17 +148,36 @@ class FileSystemClient(BaseIOClient, ABC):
             self.fs.put(tmpdir, dst, recursive=recursive)
 
     def mv(self, src: str, dst: str, recursive: bool = True, **kwargs) -> None:
-        """Move files/directories."""
+        """Move files/directories.
+
+        Args:
+            src: The source path.
+            dst: The destination path.
+            recursive: Whether to move recursively.
+        """
         return self.fs.mv(
             self.resolve(src), self.resolve(dst), recursive=recursive, **kwargs
         )
 
     def rm(self, path: str, recursive: bool = False) -> None:
-        """Delete files/directories."""
+        """Delete files/directories.
+
+        Args:
+            path: The path to delete.
+            recursive: Whether to delete recursively.
+        """
         return self.fs.rm(self.resolve(path), recursive=recursive)
 
     def walk(self, path: str, pattern: str | None = "*") -> Generator[str, None, None]:
-        """Recursively walk and yield matching files."""
+        """Recursively walk and yield matching files.
+
+        Args:
+            path: The path to walk.
+            pattern: The pattern to match.
+
+        Returns:
+            Generator[str, None, None]: Generator of matching files.
+        """
         pattern = pattern or "*"
         resolved = self.resolve(path)
 
@@ -126,7 +191,7 @@ class FileSystemClient(BaseIOClient, ABC):
 
         for p in self.fs.find(resolved):
             path_str = p[0] if isinstance(p, list) else p
-            full = str(self.fs.unstrip_protocol(path_str))
+            full = self.fs.unstrip_protocol(path_str)
             if pattern == "*" or Path(full).match(pattern):
                 yield full
 

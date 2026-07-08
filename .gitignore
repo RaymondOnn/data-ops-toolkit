@@ -4,6 +4,7 @@ tmp/
 .mypy_cache
 .ruff_cache
 .vscode
+.idea
 .workspace
 logs/
 sim_data/

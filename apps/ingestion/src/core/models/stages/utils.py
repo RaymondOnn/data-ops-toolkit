@@ -34,7 +34,6 @@ def get_stage_class(stage_name: str) -> "ExecutionStage":
     attribute matches the given name.
     If no match is found, raises a ValueError.
     """
-    # Decision: Just-In-Time Discovery.
     # We perform a one-time discovery of all stage modules if the registry is empty.
     # This ensures that decorators are executed and classes are registered before use.
     if not _STAGE_CLASSES:

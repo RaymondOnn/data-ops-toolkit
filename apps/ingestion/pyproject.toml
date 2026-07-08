@@ -11,6 +11,7 @@ dependencies = [
     "database", # Depends on libs/database
     "storage", # Depends on libs/storage
     "queue", # Depends on libs/queue
+    "network", # Depends on libs/network
     "ray[default]>=2.39.0",
     "polars",
     "pandas", # Required by Ray Data
@@ -35,3 +36,4 @@ resilience = { workspace = true }
 utils = { workspace = true }
 storage = { workspace = true }
 queue = { workspace = true }
+network = { workspace = true }

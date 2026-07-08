@@ -9,11 +9,15 @@ from typing import Any
 def find_keys_by_pattern(
     data: Any, pattern: str, ignore_case: bool = False
 ) -> Iterator[tuple[str, Any]]:
-    """
-    Recursively find keys matching regex pattern in nested dict/list.
+    """Recursively find keys matching regex pattern in nested dict/list.
 
-    Yields:
-        (dot_notation_path, value) for each matching key.
+    Args:
+        data: The dictionary or list to search.
+        pattern: The regex pattern to match.
+        ignore_case: Whether to ignore case.
+
+    Returns:
+        Iterator[tuple[str, Any]]: An iterator of (dot_notation_path, value) tuples.
     """
     flags = re.IGNORECASE if ignore_case else 0
     regex = re.compile(pattern, flags=flags)
@@ -36,7 +40,17 @@ def find_keys_by_pattern(
 def set_nested_key(
     data: dict, path: str, new_key: str | None = None, new_value: Any = None
 ) -> dict[str, Any]:
-    """Replace a key at dot-notation path with a new key/value."""
+    """Replace a key at dot-notation path with a new key/value.
+
+    Args:
+        data: The dictionary to modify.
+        path: The dot-notation path to the key to replace.
+        new_key: The new key to use.
+        new_value: The new value to use.
+
+    Returns:
+        dict[str, Any]: The modified dictionary.
+    """
     parts = path.split(".")
     target = deepcopy(data)
     current = target  # Keep a reference to navigate
@@ -56,7 +70,15 @@ def set_nested_key(
 
 
 def deep_merge(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
-    """Deep merge two dictionaries (non-destructive)."""
+    """Deep merge two dictionaries (non-destructive).
+
+    Args:
+        base: The base dictionary.
+        updates: The updates to apply to the base dictionary.
+
+    Returns:
+        dict[str, Any]: The merged dictionary.
+    """
     result = base.copy()
     for key, value in updates.items():
         if key in result and isinstance(result[key], dict) and isinstance(value, dict):

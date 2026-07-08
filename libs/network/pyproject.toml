@@ -1,0 +1,14 @@
+[project]
+name = "network"
+version = "0.1.0"
+description = "Network Diagnostics"
+dependencies = [
+    "niquests",
+    "httptap",
+
+]
+requires-python = ">=3.11"
+
+[tool.setuptools]
+packages = ["network"]
+package-dir = { "network" = "." }

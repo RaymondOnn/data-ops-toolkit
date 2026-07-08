@@ -25,7 +25,7 @@ def test_orchestrator_backpressure_holding(runtime):
         task_key = next(k for k in all_keys if run_id in k)
 
         assert ":WAITING:" in task_key
-        assert run_id not in runtime.orchestrator.tasks._active_tasks.values()
+        assert run_id not in runtime.orchestrator.tasks.active_tasks.values()
 
 
 def test_zero_row_extraction_graceful_exit(runtime, tmp_path):

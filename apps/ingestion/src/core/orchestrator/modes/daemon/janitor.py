@@ -81,7 +81,7 @@ class DaemonJanitor:
         LOG.warning(f"Task TTL exceeded for {run_id}: {reason}")
         task.update_manifest({"status": ExecutionStatus.EXPIRED.value})
         task.send_signal(TaskSignal.EXPIRED)
-        self.janitor._cleanup_task(task)
+        self.janitor.cleanup_task(task)
 
     def _evict_untriggered_run(self, record: TaskRecord, run_id: str) -> None:
         """Evict a run that was never triggered (no workspace)."""
@@ -91,4 +91,4 @@ class DaemonJanitor:
             partition_date=str(record.PARTITION_DATE or ""),
             run_id=run_id,
         )
-        self.janitor._remove_orphaned_config(identity.task_key, run_id)
+        self.janitor.remove_orphaned_config(identity.task_key, run_id)

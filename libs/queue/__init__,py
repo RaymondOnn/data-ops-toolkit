@@ -1,3 +1,4 @@
-from libs.queue.priority.factory import QueueFactory
+from .priority.base import PriorityQueue
+from .priority.factory import QueueFactory, QueueType
 
-__all__ = ["QueueFactory"]
+__all__ = ["PriorityQueue", "QueueFactory", "QueueType"]

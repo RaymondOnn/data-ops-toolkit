@@ -112,7 +112,7 @@ class DaemonRuntime:
             self._poll_and_trigger, "interval", seconds=DB_POLL_INTERVAL
         )
         self._scheduler.add_job(
-            self._recovery_sweep, "interval", seconds=RECOVERY_INTERVAL
+            self.recovery_sweep, "interval", seconds=RECOVERY_INTERVAL
         )
 
         # Start
@@ -155,7 +155,7 @@ class DaemonRuntime:
             self._scheduler.shutdown(wait=False)
 
         if ray.is_initialized():
-            active = len(self.tasks._active_tasks)
+            active = len(self.tasks.active_tasks)
             if active > 0:
                 LOG.warning(f"Shutting down with {active} orphaned tasks")
             ray.shutdown()
@@ -255,18 +255,18 @@ class DaemonRuntime:
             if self.exec_ctx.stop_at_ts:
                 if time.time() - last_drain_log > 10:
                     LOG.info(
-                        f"Draining: {len(self.tasks._active_tasks)} tasks remaining"
+                        f"Draining: {len(self.tasks.active_tasks)} tasks remaining"
                     )
                     last_drain_log = time.time()
 
                 if (
-                    not self.tasks._active_tasks
+                    not self.tasks.active_tasks
                     or time.time() >= self.exec_ctx.stop_at_ts
                 ):
                     break
 
             try:
-                active_refs = list(self.tasks._active_tasks.keys())
+                active_refs = list(self.tasks.active_tasks.keys())
                 if not active_refs:
                     self.signals.wait(timeout=60.0)
                 else:
@@ -306,12 +306,12 @@ class DaemonRuntime:
         if needs_wake:
             self.signals.notify()
 
-    def _recovery_sweep(self) -> None:
+    def recovery_sweep(self) -> None:
         """Periodic recovery and zombie detection."""
         try:
             if not self.orchestrator.state.store.records:
                 return
-            self.orchestrator.state.sink._flush_to_disk(force=True)
+            self.orchestrator.state.sink.flush_to_disk(force=True)
             self.tasks.recover_zombie_tasks()
         except Exception:
             LOG.exception("Recovery sweep failed")

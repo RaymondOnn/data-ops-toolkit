@@ -145,7 +145,7 @@ class DaemonState:
             )
 
         # Pass metadata to override status and add remarks
-        self.hub.source._parse_update(
+        self.hub.source.parse_update(
             manifest=manifest,
             context=ctx,
             deep_sync=False,

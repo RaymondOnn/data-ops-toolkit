@@ -53,6 +53,7 @@ class ExecutionContext(msgspec.Struct, kw_only=True):
     disable_self_healing: bool = False
     stop_at_ts: float | None = None
     drain_timeout_secs: int = 600
+    max_retries: int = 3
 
     # =========================================================================
     # Path Properties

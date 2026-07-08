@@ -111,4 +111,12 @@ class NoOpMaintenance(MaintenancePolicy):
         for ref in ready_refs:
             task_key = active_refs.pop(ref, None)
             compute.reclaim_resources(ref)
-            LOG.debug(f"Cleaned up finished task: {task_key}")
+
+            # Check if the Ray task failed
+            try:
+                ray.get(ref)
+            except Exception as e:
+                LOG.error(f"Ray worker for {task_key} failed with exception: {e}")
+
+            if task_key:
+                LOG.debug(f"Cleaned up finished task: {task_key}")

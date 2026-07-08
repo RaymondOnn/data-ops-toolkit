@@ -6,6 +6,7 @@ from typing import Any, Literal, Self
 import msgspec
 from apps.ingestion.src.core.models.stages.enums import Stage
 from apps.ingestion.src.extras.flags import FeatureFlags
+from apps.ingestion.src.extras.hooks.enums import StageHooks
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME
 from loguru import logger
 
@@ -312,6 +313,7 @@ class TaskContext(msgspec.Struct, kw_only=True):
     transform: TransformConfig | None = None
     load: LoadConfig | None = None
     archive: ArchiveConfig | None = None
+    hooks: dict[Stage, StageHooks] = msgspec.field(default_factory=dict)
 
     # Identity
     job_id: str

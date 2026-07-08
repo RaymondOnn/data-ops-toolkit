@@ -30,18 +30,17 @@ class AuthFactory:
     _instance: SecretProvider | None = None
 
     @classmethod
-    def get_provider(cls, env: str, **config) -> SecretProvider:
+    def get_provider(cls, **config) -> SecretProvider:
         """Get or create a secret provider singleton."""
         if cls._instance:
             return cls._instance
 
-        env = env or os.getenv("APP_ENV", "dev").lower()
         provider_type = config.get("type", "local_file").strip().lower()
 
-        # Force AWS in production
-        if env == "prod":
-            LOG.info("Production environment - forcing AWS Secrets Manager")
-            provider_type = "aws_sm"
+        # # Force AWS in production
+        # if env == "prod":
+        #     LOG.info("Production environment - forcing AWS Secrets Manager")
+        #     provider_type = "aws_sm"
 
         LOG.info(f"Creating secret provider: {provider_type}")
 

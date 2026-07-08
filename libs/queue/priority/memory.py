@@ -1,6 +1,7 @@
 import heapq
 import time
 import uuid
+from collections.abc import Generator
 from typing import Any
 
 from .base import PriorityQueue, TaskMessage
@@ -61,6 +62,13 @@ class MemoryPriorityQueue(PriorityQueue):
     def size(self) -> int:
         """Return queue size."""
         return len(self._queue) + len(self._processing)
+
+    def items(self) -> Generator[Any, None, None]:
+        """Iterate over all items in the memory queue without mutating the heap."""
+        # The heap elements are tuples: (priority, timestamp, counter, msg_id, data, metadata)
+        # Element index [4] is 'data'
+        for item in list(self._queue):
+            yield item[4]
 
     def cleanup(self) -> None:
         """Clean up completed tasks."""

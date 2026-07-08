@@ -1,31 +1,9 @@
 import time
 from typing import Any
 
-import msgspec
 import polars as pl
+from apps.ingestion.src.core.contexts.task import ColumnMapping
 from libs.database import TypeResolver
-
-
-# TODO: Masking: Hash, Redact, Last_4
-class ColumnMapping(msgspec.Struct):
-    """Represents a single column mapping and transformation rule.
-
-    Attributes:
-        target_col: The canonical name of the column in the destination.
-        target_type: The target data type identifier (e.g., 'int64', 'string').
-        source_col: The original name in the source system.
-        masking: The PII protection strategy ('hash', 'fixed', 'none').
-    """
-
-    target_col: str
-    target_type: str
-    source_col: str | None = None
-    masking: str = "none"
-
-    def __post_init__(self):
-        """Normalize source_col representation."""
-        if self.source_col in ("None", "null", ""):
-            self.source_col = None
 
 
 def apply_schema_contract(df: pl.DataFrame, context: Any) -> pl.DataFrame:

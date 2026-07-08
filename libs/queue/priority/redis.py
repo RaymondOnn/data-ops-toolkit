@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Generator
 from typing import Any
 
 from .base import PriorityQueue, TaskMessage
@@ -71,7 +72,7 @@ class RedisPriorityQueue(PriorityQueue):
             return None
 
         # Narrow the type to satisfy the checker and ensure runtime compatibility with json.loads
-        if not isinstance(result, (str, bytes, bytearray)):
+        if not isinstance(result, str | bytes | bytearray):
             return None
 
         payload = json.loads(result)
@@ -89,6 +90,30 @@ class RedisPriorityQueue(PriorityQueue):
         if isinstance(result, int):
             return result
         return 0
+
+    def items(self) -> Generator[Any, None, None]:
+        """Scan and yield data from all items in the Redis sorted set."""
+        import json
+
+        try:
+            # Fetch all raw elements from the sorted set
+            items = self.redis.zrange(self.queue_key, 0, -1)
+
+            # Explicit guard to satisfy type checkers that 'items' is a list, not an Awaitable
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, (bytes | bytearray)):
+                        payload_str = item.decode("utf-8")
+                    elif isinstance(item, str):
+                        payload_str = item
+                    else:
+                        # Fallback/Cast to ensure standard type stringification
+                        payload_str = str(item)
+
+                    payload = json.loads(payload_str)
+                    yield payload["data"]
+        except Exception as e:
+            LOG.error(f"Failed to scan Redis queue items: {e}")
 
     def cleanup(self) -> None:
         """Clean up expired processing items."""

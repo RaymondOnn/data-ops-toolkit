@@ -17,8 +17,15 @@ _MASKED_STRINGS: set[str] = set()
 
 
 def _mask_sensitive(record: "Record") -> None:
-    """Mask registered sensitive strings in log messages."""
-    msg = str(record["message"])
+    """Mask registered sensitive strings in log messages.
+
+    Args:
+        record: Log record to mask.
+
+    Returns:
+        None
+    """
+    msg = record["message"]
     for secret in _MASKED_STRINGS:
         if secret and secret in msg:
             msg = msg.replace(secret, "[MASKED]")
@@ -26,12 +33,27 @@ def _mask_sensitive(record: "Record") -> None:
 
 
 def console_formatter(highlight_keys: set[str]) -> Any:
-    """Create console formatter with highlighted keys and SQL truncation."""
+    """Create console formatter with highlighted keys and SQL truncation.
+
+    Args:
+        highlight_keys: Keys to highlight in the console output.
+
+    Returns:
+        Any: Formatter for console output.
+    """
 
     def formatter(record: "Record") -> str:
+        """Format a log record for console output.
+
+        Args:
+            record: Log record to format.
+
+        Returns:
+            str: Formatted log message.
+        """
         # Escape problematic characters
         name = str(record["name"]).replace("<", "\\<").replace(">", "\\>")
-        func = str(record["function"]).replace("<", "\\<").replace(">", "\\>")
+        func = record["function"].replace("<", "\\<").replace(">", "\\>")
 
         # Build prefix with highlighted keys
         prefixes = []
@@ -73,9 +95,21 @@ def console_formatter(highlight_keys: set[str]) -> Any:
 
 
 class LogInterceptor(logging.Handler):
-    """Redirect standard logging to Loguru."""
+    """Redirect standard logging to Loguru.
+
+    Attributes:
+        _logger: Loguru logger instance.
+    """
 
     def emit(self, record: logging.LogRecord) -> None:
+        """Emit a log record.
+
+        Args:
+            record: Log record to emit.
+
+        Returns:
+            None
+        """
         level: str | int
         try:
             level = logger.level(record.levelname).name
@@ -109,7 +143,19 @@ def setup_logging(
     highlight_keys: set[str] | None = None,
     silence_packages: list[str] | None = None,
 ) -> None:
-    """Initialize logging with console and JSON file sinks."""
+    """Initialize logging with console and JSON file sinks.
+
+    Args:
+        log_dir: Directory to store log files.
+        verbose_level: Verbosity level (0-5).
+        filename: Name of the log file.
+        enqueue: Whether to use enqueue for log rotation.
+        highlight_keys: Keys to highlight in the console output.
+        silence_packages: Packages to silence in the console output.
+
+    Returns:
+        None
+    """
 
     # Verbosity Mapping Logic
     # 0: App=WARNING, Silenced=WARNING
@@ -178,7 +224,7 @@ def setup_logging(
 def mask_secrets(secrets: str | list[str]) -> None:
     """Register sensitive strings to be masked in logs."""
     items = [secrets] if isinstance(secrets, str) else secrets
-    _MASKED_STRINGS.update(str(s) for s in items if s)
+    _MASKED_STRINGS.update(s for s in items if s)
 
 
 def is_masked(secret: str) -> bool:

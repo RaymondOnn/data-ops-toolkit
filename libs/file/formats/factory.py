@@ -29,7 +29,16 @@ class FormatFactory:
         fs: fsspec.AbstractFileSystem | None = None,
         options: dict[str, Any] | None = None,
     ) -> FormatHandler:
-        """Get handler for file extension."""
+        """Get handler for file extension.
+
+        Args:
+            ext: The file extension.
+            fs: The file system.
+            options: The options.
+
+        Returns:
+            FormatHandler: The handler for the file extension.
+        """
         handler_cls = FormatFactory._HANDLERS.get(ext)
         if not handler_cls:
             raise ValueError(f"Unsupported extension: {ext}")

@@ -284,24 +284,24 @@ class TaskContextBuilder:
         val = self.defaults_settings.get(path)
         return interpolate_env_vars(val) if val is not None else default
 
-    def _resolve_service_ref(self, service_ref: str) -> dict:
-        """Resolves service configuration by reference or inline definition.
+    # def _resolve_service_ref(self, service_ref: str) -> dict:
+    #     """Resolves service configuration by reference or inline definition.
 
-        We attempt to find a 'service_ref' string. If present, we look up the
-        full definition in services.yaml
+    #     We attempt to find a 'service_ref' string. If present, we look up the
+    #     full definition in services.yaml
 
-        Args:
-            service_ref: The service reference.
+    #     Args:
+    #         service_ref: The service reference.
 
-        Returns:
-            dict: The resolved service parameters.
-        """
+    #     Returns:
+    #         dict: The resolved service parameters.
+    #     """
 
-        # Look for definition in job local services or global services.yaml
-        svc = self.service_configs.get(service_ref.upper())
-        if not svc:
-            LOG.warning(f"Service not found: {service_ref}")
-        return svc if isinstance(svc, dict) else svc.to_dict()
+    #     # Look for definition in job local services or global services.yaml
+    #     svc = self.service_configs.get(service_ref.upper())
+    #     if not svc:
+    #         LOG.warning(f"Service not found: {service_ref}")
+    #     return svc if isinstance(svc, dict) else svc.to_dict()
 
     def _resolve_service_refs(self, settings: Dynaconf):
         """Resolves service references in a service spec.

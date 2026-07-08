@@ -24,8 +24,8 @@ class StateHub:
     in-memory cache (StateStore), the disk-persistent stream (StateStream),
     and the physical manifest files (StateSource).
 
-    Decision: Centralized Coordination.
-    By wrapping the three pillars of state management into a single Hub, we
+    Notes:
+    - By wrapping the three pillars of state management into a single Hub, we
     simplify the Orchestrator's API. The rest of the system only needs to
     know about the Hub, which ensures that an update to the cache is
     correctly mirrored to the log stream and the database.
@@ -54,12 +54,6 @@ class StateHub:
 
         Args:
             task_ref: Routing and identity handle for the task.
-
-        Decision: Dual Emission.
-        We emit to both the Store and the Stream immediately. This
-        ensures that the 'Tick' has an in-memory view for dispatching,
-        while the database gets an audit record of the task's
-        initial creation.
         """
         run_id = task_ref.identity.run_id
         LOG.debug("Adding task to state tracking", run_id=run_id)
@@ -100,7 +94,12 @@ class StateHub:
         """
         self.store.remove(run_id)
 
-    def sync_manifest(self, folder_path: Path | str, deep_sync: bool = False) -> None:
+    def sync_manifest(
+        self,
+        folder_path: Path | str,
+        deep_sync: bool = False,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         """Synchronizes a physical manifest file back into the state engine.
 
         The manifest file is used as canonical log for the task.
@@ -110,6 +109,8 @@ class StateHub:
             folder_path: Path to the task's workspace folder.
             deep_sync: If True, includes the full manifest JSON in the update.
         """
+        metadata = metadata or {}
+
         if isinstance(folder_path, str) and not Path(folder_path).exists():
             resolved = find_path(self.exec_ctx.workspace_dir, folder_path)
             if not resolved:
@@ -119,7 +120,7 @@ class StateHub:
                 return
             folder_path = resolved
 
-        self.source.sync_folder(Path(folder_path), deep_sync)
+        self.source.sync_folder(Path(folder_path), deep_sync, metadata)
 
     def find_task_path(self, identifier: str) -> Path | None:
         """Resolves the physical workspace path for a given task ID.

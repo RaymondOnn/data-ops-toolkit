@@ -37,11 +37,11 @@ class QueueFactory:
             case QueueType.FLASHQ:
                 return FlashQQueue.from_dict(kwargs)
             case QueueType.DISKCACHE:
-                filepath = kwargs.get("filepath")
-                if not filepath:
-                    raise ValueError("filepath required for DiskCache")
+                directory = kwargs.get("directory")
+                if not directory:
+                    raise ValueError("directory required for DiskCache")
 
-                return DiskcacheQueue(Path(filepath))
+                return DiskcacheQueue(Path(directory))
             case QueueType.REDIS:
                 redis_url = kwargs.get("redis_url", "redis://localhost:6379/0")
                 return RedisPriorityQueue(redis_url)

@@ -61,7 +61,7 @@ class DenyDuplicateAdmission(AdmissionPolicy):
             return False
 
         with lock:
-            cache[task_ref.build()] = metadata
+            cache.set(key=task_ref.build(), value=metadata)
 
         return True
 
@@ -128,6 +128,13 @@ class ProactiveMaintenance(MaintenancePolicy):
         for ref in ready_refs:
             task_key = active_refs.pop(ref, None)
             compute.reclaim_resources(ref)
+
+            # Check if the Ray task failed
+            try:
+                ray.get(ref)
+            except Exception as e:
+                LOG.error(f"Ray worker for {task_key} failed with exception: {e}")
+
             if task_key:
                 LOG.debug(f"Cleaned up finished task: {task_key}")
 
@@ -305,4 +312,4 @@ class ProactiveMaintenance(MaintenancePolicy):
         # 5. Signal engine to re-evaluate
         task.send_signal(TaskSignal.SYNC)
 
-        return (metadata, resume_stage)
+        return metadata, resume_stage

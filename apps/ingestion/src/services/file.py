@@ -105,17 +105,17 @@ class BaseStorage(Service):
     def count_units(self, target: str, filter_condition: str | None = None) -> int:
         """Count the number of units (files/objects) at the target location.
 
-        Decision: Metadata Discovery.
-        We perform a shallow scan of the filesystem to determine the workload.
-        This is a prerequisite for the 'Worker Density' heuristic used in
-        parallelization to avoid over-parallelizing small datasets.
-
         Args:
             target: The base path to scan.
             filter_condition: An optional glob pattern to filter files.
 
         Returns:
             int: Total file count.
+
+        Notes:
+        - We perform a shallow scan of the filesystem to determine the workload.
+        - This is a prerequisite for the 'Worker Density' heuristic used in
+          parallelization to avoid over-parallelizing small datasets.
         """
         try:
             # Simple file count without format detection
@@ -158,12 +158,6 @@ class StorageSource(BaseStorage, Source):
         **kwargs,
     ) -> list[dict]:
         """Calculates optimal file distribution across Ray workers.
-
-        Decision: Workload Balancing (ADR 007).
-        Instead of simple modulo distribution, we use size-aware bin-packing
-        to balance the byte-load across workers. We also enforce a 'Density
-        Floor' to ensure that the cost of spawning a Ray worker is justified
-        by the volume of data it processes.
 
         Args:
             target: Base path or archive to scan.
@@ -214,26 +208,22 @@ class StorageSource(BaseStorage, Source):
             # Metadata-driven scaling
             total_bytes = sum(self.fs.size(f) for f in files)
 
-            # Heuristic Constants
-
-            # Case 1: Coalesce small files (Setup cost > Processing cost)
+            # Coalesce small files (Setup cost > Processing cost)
             if total_bytes < MIN_BYTES_PER_WORKER:
                 LOG.info(f"Coalescing small files ({total_bytes/1024:.1f}KB)")
                 return [{"files": files}]
 
-            # Case 2: If num_workers not set,
-            # Determine actual worker count based on density floor
             if not num_workers:
                 num_workers = int(total_bytes // MIN_BYTES_PER_WORKER)
 
             num_workers = max(1, num_workers)
 
-            # Case 3: A few large files vs many workers
+            # A few large files vs many workers
             if len(files) < num_workers and handler.splittable:
                 LOG.debug(f"Intra-file slicing with {num_workers} workers")
                 return self._slice_files(files, num_workers, handler)
 
-            # Case 4: Greedy File-level sharding (The Default)
+            # Default: Greedy File-level sharding
             active = min(num_workers, len(files))
             LOG.debug(f"File-level greedy sharding with {active} workers")
             return self._balance_workload(files, active)
@@ -248,9 +238,10 @@ class StorageSource(BaseStorage, Source):
         """Distributes files across workers to balance the total byte-load.
 
         Uses Longest Processing Time (LPT) scheduling:
-        Sort files by size descending, then assign each to the least
-        loaded worker. This minimizes tail latency compared to simple
-        round-robin distribution.
+          - Sort files by size descending, then assign each to the least
+            loaded worker.
+          - Minimizes tail latency compared to simple round-robin
+        distribution.
 
         Args:
             files: List of resolved file paths.
@@ -290,10 +281,17 @@ class StorageSource(BaseStorage, Source):
     def _slice_files(self, files: list[str], workers: int, handler) -> list[dict]:
         """Slices large splittable files into row-based work units.
 
-        Decision: Row-Budget Slicing.
         We treat all files as a single contiguous pool of rows and divide
-        them equally across workers, ensuring even distribution for
-        splittable formats like Parquet.
+        them equally across workers, ensuring even distribution for splittable
+        formats like Parquet.
+
+        Args:
+            files: List of resolved file paths.
+            workers: Number of buckets to create.
+            handler: File format handler.
+
+        Returns:
+            list[dict]: Sliced work units.
         """
         metadata = []
         total = 0

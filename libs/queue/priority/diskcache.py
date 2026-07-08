@@ -1,6 +1,7 @@
 import logging
 import time
 import uuid
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -30,21 +31,20 @@ class DiskcacheQueue(PriorityQueue):
 
     def __init__(
         self,
-        filepath: Path,
+        directory: Path,
         timeout: int = 5,
     ):
         """Initialize the priority queue.
 
         Args:
-            workspace_dir: Directory for queue data
-            namespace: Namespace for all keys (prevents collisions with other queues)
+            directory: Directory for queue data
             timeout: Lock timeout in seconds
         """
-        self.filepath = filepath.expanduser().resolve()
-        self.filepath.parent.mkdir(parents=True, exist_ok=True)
+        self.directory = directory.expanduser().resolve()
+        self.directory.mkdir(parents=True, exist_ok=True)
 
         # Single Index for all data
-        self.cache = Index(str(self.filepath), timeout=timeout)
+        self.cache = Index(str(self.directory), timeout=timeout)
 
         # In-memory cache for performance (optional)
         self._in_flight: set[str] = set()
@@ -100,7 +100,7 @@ class DiskcacheQueue(PriorityQueue):
         priority = int(parts[-3])
         timestamp = float(parts[-2])
         uid = parts[-1]
-        return (priority, timestamp, uid)
+        return priority, timestamp, uid
 
     def _get_first_queue_key(self) -> str | None:
         """Get the first queue key (highest priority).
@@ -317,15 +317,12 @@ class DiskcacheQueue(PriorityQueue):
 
         return TaskMessage(id_=key, data=value["data"], metadata=value["metadata"])
 
-    # def get_stats(self) -> dict[str, Any]:
-    #     """Get queue statistics."""
-    #     queue_keys = self._get_queue_keys()
-    #     processing_keys = self._get_processing_keys()
-
-    #     return {
-    #         "queue_size": len(queue_keys),
-    #         "processing_count": len(processing_keys),
-    #         "in_flight_memory": len(self._in_flight),
-    #         "cache_dir": str(self.cache_dir),
-    #         "namespace": self.namespace,
-    #     }
+    def items(self) -> Generator[Any, None, None]:
+        """Iterate over all items in the queue, yielding decoded task data."""
+        keys = self._get_queue_keys()
+        for key in keys:
+            value = self.cache.get(key)
+            if value and "data" in value:
+                # Return the inner data dictionary/payload directly
+                # so the wrapper can decode it into TaskMetadata
+                yield value["data"]

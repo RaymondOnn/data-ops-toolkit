@@ -1,125 +1,67 @@
-# src/core/services/base.py
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
+from collections.abc import Iterator
 from typing import Any
 
 
-class KeyValueCache(ABC):
-    """Normalized interface for local and remote key-value stores."""
-
-    def __init__(self, name: str, **config: Any):
-        """
-        Initializes the KeyValueCache.
-
-        Args:
-            name: Logical name for the cache instance (e.g., 'tasks').
-            **config: Backend-specific configuration parameters.
-        """
-        self.name = name
-        self.config = config
+class Cache(ABC):
+    """Simple KV cache interface."""
 
     @abstractmethod
     def get(self, key: str, default: Any = None) -> Any:
-        """
-        Retrieves a value from the cache.
-
-        Args:
-            key: Unique identifier for the cached item.
-            default: Value to return if the key does not exist.
-
-        Returns:
-            Any: The cached value or the default.
-        """
-        ...
+        """Get a value from cache."""
+        pass
 
     @abstractmethod
-    def set(self, key: str, value: Any, expire: int | None = None) -> None:
-        """
-        Stores a value in the cache.
+    def set(self, key: str, value: Any, ttl: int | None = None) -> None:
+        """Set a value in cache with optional TTL."""
+        pass
 
-        Args:
-            key: Unique identifier for the item.
-            value: Data to persist in the cache.
-            expire: Optional Time-To-Live in seconds.
-        """
-        ...
+    @abstractmethod
+    def delete(self, key: str) -> bool:
+        """Delete a key. Returns True if existed."""
+        pass
 
     @abstractmethod
     def pop(self, key: str, default: Any = None) -> Any:
-        """
-        Retrieves and removes an item from the cache.
-
-        Args:
-            key: Unique identifier for the item.
-            default: Value to return if the key is not found.
-
-        Returns:
-            Any: The removed value or the default.
-        """
-        ...
+        """Get and delete atomically."""
+        pass
 
     @abstractmethod
-    def delete(self, key: str) -> None:
-        """
-        Removes an item from the cache idempotently.
-
-        Args:
-            key: Unique identifier for the item to remove.
-        """
-        ...
+    def add(self, key: str, value: Any, ttl: int | None = None) -> bool:
+        """Add only if key doesn't exist."""
+        pass
 
     @abstractmethod
-    def iterkeys(self, pattern: str = "*") -> Iterable[str]:
-        """
-        Returns an iterator over keys matching a glob-style pattern.
-
-        Args:
-            pattern: Glob-style string to filter keys.
-
-        Yields:
-            str: The next matching key.
-        """
-        ...
-
-    @contextmanager
-    @abstractmethod
-    def transact(self) -> Iterator[None]:
-        """
-        Provides an atomic transaction context for multiple cache operations.
-
-        Implementations should ensure operations within this context are atomic.
-
-        Yields:
-            None: Context manager for the transaction.
-        """
-        yield
+    def replace(self, key: str, value: Any, ttl: int | None = None) -> bool:
+        """Replace only if key exists."""
+        pass
 
     @abstractmethod
-    def __getitem__(self, key: str) -> Any:
-        """Dict-like access for retrieval."""
-        ...
+    def exists(self, key: str) -> bool:
+        """Check if key exists."""
+        pass
 
     @abstractmethod
-    def __setitem__(self, key: str, value: Any) -> None:
-        """Dict-like access for storage."""
-        ...
+    def iterkeys(self, pattern: str | None = None) -> Iterator[str]:
+        """Iterate over keys matching pattern."""
+        pass
 
     @abstractmethod
-    def __contains__(self, key: str) -> bool:
-        """Dict-like 'in' operator support."""
-        ...
+    def clear(self) -> None:
+        """Clear all keys."""
+        pass
 
     @abstractmethod
-    def __len__(self) -> int:
-        """Returns the total number of keys in the cache."""
-        ...
+    def size(self) -> int:
+        """Number of items."""
+        pass
 
-    def is_empty(self) -> bool:
-        """
-        Returns True if the cache contains no keys.
+    @abstractmethod
+    def close(self) -> None:
+        """Close connections."""
+        pass
 
-        Returns:
-            bool: True if length is zero.
-        """
-        return len(self) == 0
+    @abstractmethod
+    def stats(self) -> dict[str, Any]:
+        """Get statistics."""
+        pass

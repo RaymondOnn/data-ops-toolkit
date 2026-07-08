@@ -39,7 +39,7 @@ def test_stage_priority_ordering(runtime):
         runtime.orchestrator.tasks.dispatch()
 
     # 3. Verification
-    active_tasks = runtime.orchestrator.tasks._active_tasks.values()
+    active_tasks = runtime.orchestrator.tasks.active_tasks.values()
 
     # The ARCHIVE task should be the one that was DISPATCHED
     assert any("run_arc" in key and ":DISPATCHED:" in key for key in active_tasks)

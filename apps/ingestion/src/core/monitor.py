@@ -9,8 +9,8 @@ from libs.resilience.circuit_breaker import (
     CircuitBreaker,
     CircuitOpen,
 )
-from libs.storage.cache.base import KeyValueCache
-from libs.storage.cache.factory import get_cache
+from libs.storage.cache.base import Cache
+from libs.storage.cache.factory import CacheFactory
 from loguru import logger
 
 LOG = logger
@@ -20,14 +20,35 @@ REGISTRY_CACHE_NAMESPACE = "svc"
 class ServiceMonitor:
     """Global registry for tracking the health and status of external services.
 
-    Decision: Shared State Mesh.
-    We use a Key-Value cache (typically DiskCache) to maintain a consistent
+    Using a global shared state for service monitoring
+    is crucial for ensuring resilience in a distributed system like Ray.
+    If each worker independently managed its own circuit breaker state
+    without synchronization, a service failure experienced by one worker
+    would not be known to others. This could lead to a cascade of
+    failed requests to the same unavailable service, wasting resources
+    and prolonging system instability.
+
+    The ServiceMonitor acts as a central authority for service health.
+    When one worker detects a failure and opens a circuit breaker,
+    it updates the shared state. Other workers can query this state
+    before attempting to connect, allowing them to fail fast and
+    avoid unnecessary work.
+
+    Furthermore, the ServiceMonitor supports dynamic recovery by
+    allowing the circuit breaker state to be reset. This enables
+    the system to automatically adapt to transient network issues or
+    service restarts without manual intervention.
+
+    Notes:
+    - We use a Key-Value cache (typically DiskCache) to maintain a consistent
     view of service health across all distributed Ray workers. This allows
     a failure detected by one worker to "trip" the circuit breaker for all
     others, preventing unnecessary connection attempts to unreachable hosts.
+    - Signal directory is used to propagate service health status to other
+    processes.
     """
 
-    __cache: ClassVar[KeyValueCache | None] = None
+    __cache: ClassVar[Cache | None] = None
     _signal_dir: ClassVar[Path | None] = None
 
     @classmethod
@@ -35,10 +56,18 @@ class ServiceMonitor:
         """Initialize the health registry."""
         if cls.__cache is None:
             cls._signal_dir = Path(signal_dir)
-            cls.__cache = get_cache(cache_config)
+            cls.__cache = CacheFactory.create(
+                cache_type=cache_config["type"],
+                **{
+                    "directory": cache_config["directory"],
+                    "namespace": REGISTRY_CACHE_NAMESPACE,
+                    "size_limit": cache_config.get("size_limit", 2**30),
+                    "timeout": cache_config.get("timeout", 5),
+                },
+            )
 
     @classmethod
-    def _get_cache(cls) -> KeyValueCache:
+    def _get_cache(cls) -> Cache:
         if cls.__cache is None:
             raise RuntimeError("ServiceMonitor not configured")
         return cls.__cache
@@ -55,7 +84,7 @@ class ServiceMonitor:
     @classmethod
     def set_state(cls, name: str, state: str) -> None:
         """Set circuit breaker state and update signal file."""
-        cls._get_cache().set(cls._key("state", name), state, expire=3600)
+        cls._get_cache().set(cls._key("state", name), state)
 
         if cls._signal_dir:
             signal = cls._signal_dir / f"{name.lower()}.outage"
@@ -83,41 +112,44 @@ class ServiceMonitor:
     def record_failure(cls, name: str, debounce_seconds: int = 5) -> int:
         """Record a failure and return new count."""
         cache = cls._get_cache()
-        with cache.transact():
-            last_reported = float(cache.get(cls._key("last_reported", name), 0))
-            failures = int(cache.get(cls._key("failures", name), 0))
 
-            # Debounce multiple failures in quick succession
-            if time.time() - last_reported < debounce_seconds:
-                return failures
+        last_reported_key = cls._key("last_reported", name)
+        failures_key = cls._key("failures", name)
+        last_failure_key = cls._key("last_failure", name)
+        state_key = cls._key("state", name)
 
-            new_count = failures + 1
-            cache.set(cls._key("failures", name), new_count, expire=3600)
-            cache.set(cls._key("last_reported", name), time.time(), expire=3600)
-            cache.set(cls._key("last_failure", name), time.time(), expire=3600)
+        last_reported = float(cache.get(last_reported_key, 0))
+        failures = int(cache.get(failures_key, 0))
 
-            # Trip circuit if threshold reached
-            if new_count >= 3 and cls.get_state(name) != BreakerState.OPEN:
-                LOG.warning(
-                    f"Circuit breaker tripped for {name} (failures={new_count})"
-                )
-                cache.set(cls._key("state", name), BreakerState.OPEN, expire=3600)
+        # Debounce multiple failures in quick succession
+        if time.time() - last_reported < debounce_seconds:
+            return failures
 
-            return new_count
+        new_count = failures + 1
+        cache.set(failures_key, new_count)
+        cache.set(last_reported_key, time.time())
+        cache.set(last_failure_key, time.time())
+
+        # Trip circuit if threshold reached
+        if new_count >= 3 and cls.get_state(name) != BreakerState.OPEN:
+            LOG.warning(f"Circuit breaker tripped for {name} (failures={new_count})")
+            cache.set(state_key, BreakerState.OPEN, ttl=3600)
+
+        return new_count
 
     @classmethod
     def reset(cls, name: str) -> None:
         """Reset service health (close circuit)."""
         cache = cls._get_cache()
-        with cache.transact():
-            was_open = cache.get(cls._key("state", name)) == BreakerState.OPEN
-            if was_open:
-                LOG.info(f"Circuit breaker reset for {name}")
 
-            for key in ["failures", "last_failure", "last_reported"]:
-                cache.delete(cls._key(key, name))
+        was_open = cache.get(cls._key("state", name)) == BreakerState.OPEN
+        if was_open:
+            LOG.info(f"Circuit breaker reset for {name}")
 
-            cls.set_state(name, BreakerState.CLOSED)
+        for suffix in ["failures", "last_failure", "last_reported"]:
+            cache.delete(cls._key(suffix, name))
+
+        cls.set_state(name, BreakerState.CLOSED)
 
     @classmethod
     def probe(cls, name: str, probe_fn: Callable[[], bool]) -> bool:
@@ -140,13 +172,12 @@ def monitor(breaker: CircuitBreaker) -> Callable:
         def wrapper(self, *args, **kwargs):
             service = self.name
 
-            # Sync local breaker with global state
             breaker.state = BreakerState(ServiceMonitor.get_state(service))
             breaker.failures = ServiceMonitor.get_failures(service)
             breaker.last_failure = ServiceMonitor.get_last_failure(service)
 
             try:
-                breaker._check_before_call()
+                breaker.check_before_call()
             except CircuitOpen:
                 if breaker.state == BreakerState.HALF_OPEN:
                     ServiceMonitor.set_state(service, BreakerState.HALF_OPEN)
@@ -154,12 +185,12 @@ def monitor(breaker: CircuitBreaker) -> Callable:
 
             try:
                 result = func(self, *args, **kwargs)
-                breaker._succeed()
+                breaker.succeed()
                 ServiceMonitor.reset(service)
                 return result
 
             except breaker.tracked_exceptions as e:
-                breaker._fail(e)
+                breaker.fail(e)
                 ServiceMonitor.record_failure(service)
                 ServiceMonitor.set_state(service, breaker.state)
                 raise

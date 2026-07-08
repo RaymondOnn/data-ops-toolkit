@@ -96,7 +96,7 @@ class StageBitmask(IntFlag):
     NONE = 0
 
     @classmethod
-    def _generate(cls) -> None:
+    def generate(cls) -> None:
         """Generate bitmask members from Stage enum."""
         for stage in Stage:
             setattr(cls, stage.name, stage.bitmask)
@@ -108,4 +108,4 @@ class StageBitmask(IntFlag):
 
 
 # Generate StageBitmask members
-StageBitmask._generate()
+StageBitmask.generate()

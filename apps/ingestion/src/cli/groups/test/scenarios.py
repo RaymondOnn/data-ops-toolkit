@@ -23,10 +23,10 @@ from apps.ingestion.src.core.models.task import (
 from apps.ingestion.src.core.orchestrator.enums import TaskRecord
 from apps.ingestion.src.core.orchestrator.factory import assemble_runtime
 from apps.ingestion.src.core.orchestrator.modes.daemon import DaemonRuntime
+from apps.ingestion.src.core.system import DISK_THRESHOLD_BLOCKED
 from apps.ingestion.src.utils.constants import (
     APP_CONFIG_ROOT,
     CONFIG_FILENAME,
-    DISK_THRESHOLD_HALT,
     MANIFEST_FILENAME,
 )
 from libs.utils.dates import current_timestamp
@@ -237,7 +237,7 @@ class SimulationRunner:
             self.orchestrator.process_signals()
             self.orchestrator.process_queue()
 
-            for ref, key in self.orchestrator.scheduler._active_tasks.items():
+            for ref, key in self.orchestrator.scheduler.active_tasks.items():
                 if target in key:
                     found = ref
                     break
@@ -349,7 +349,7 @@ class SimulationRunner:
 
         if isinstance(runtime, DaemonRuntime):
             typer.secho("✅ Replacement orchestrator acquired lock", fg="green")
-            runtime._recovery_sweep()
+            runtime.recovery_sweep()
 
         return True, None
 
@@ -381,7 +381,7 @@ class SimulationRunner:
         Verifies that DISK_THRESHOLD_HALT prevents any new work from
         starting when storage is near saturation."""
         usage = get_disk_usage(self.orchestrator.exec_ctx.workspace_dir)
-        target = DISK_THRESHOLD_HALT + 2
+        target = DISK_THRESHOLD_BLOCKED + 2
         needed = int((usage.total * target / 100) - usage.used)
 
         dummy = self.orchestrator.exec_ctx.workspace_dir / ".disk_pressure_sim"

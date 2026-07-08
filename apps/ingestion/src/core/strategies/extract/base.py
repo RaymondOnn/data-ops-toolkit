@@ -28,14 +28,7 @@ class ExtractContext(msgspec.Struct, frozen=True):
 
 
 class Extractor(ABC, Generic[T_Source]):
-    """Abstract base class for all data extraction strategies.
-
-    Decision: Generic Service Binding.
-    By making the Extractor generic over T_Source, we ensure that specialized
-    implementations (like DatabaseExtractor) are type-safely bound to their
-    required service types (like DatabaseSource), preventing Liskov
-    Substitution Principle violations during method overrides.
-    """
+    """Abstract base class for all data extraction strategies."""
 
     @abstractmethod
     def extract(

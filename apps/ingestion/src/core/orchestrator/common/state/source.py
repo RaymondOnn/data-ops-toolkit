@@ -9,7 +9,6 @@ from apps.ingestion.src.core.models.stages.enums import ALL_STAGES
 from apps.ingestion.src.core.models.task import ExecutionStatus, TaskManifest
 from apps.ingestion.src.core.orchestrator.enums import TaskUpdate, to_ch_datetime
 from apps.ingestion.src.utils.constants import (
-    CACHE_TASK_NAMESPACE,
     CONFIG_FILENAME,
     MANIFEST_FILENAME,
 )
@@ -34,7 +33,12 @@ class StateSource:
         self.exec_ctx = exec_ctx
         LOG.debug("StateSource initialized")
 
-    def sync_folder(self, folder_path: Path, deep_sync: bool = False) -> None:
+    def sync_folder(
+        self,
+        folder_path: Path,
+        deep_sync: bool = False,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         """Synchronizes a physical task folder with the orchestrator state.
 
         This reads the manifest and config files from disk and notifies
@@ -53,6 +57,7 @@ class StateSource:
         """
         manifest_file = folder_path / MANIFEST_FILENAME
         config_file = folder_path / CONFIG_FILENAME
+        metadata = metadata or {}
 
         if not manifest_file.exists():
             LOG.warning("No manifest found for sync", path=str(folder_path))
@@ -69,7 +74,7 @@ class StateSource:
             )
 
             context = self._load_context(manifest, config_file)
-            self._parse_update(manifest, context, deep_sync)
+            self.parse_update(manifest, context, deep_sync, metadata)
             LOG.debug("Successfully synced manifest", run_id=manifest.run_id)
 
         except msgspec.DecodeError as e:
@@ -100,7 +105,7 @@ class StateSource:
                 )
         return None
 
-    def _parse_update(
+    def parse_update(
         self,
         manifest: TaskManifest,
         context: TaskContext | None,
@@ -191,33 +196,42 @@ class StateSource:
     def _build_remarks(
         self, manifest: TaskManifest, status: str, metadata: dict | None
     ) -> str | None:
-        """Build remarks with special handling for RETRY and BLOCKED statuses."""
-        remarks = (metadata or {}).get("remarks")
-        if remarks:
-            return remarks
+        """Build remarks with special handling for RETRY and BLOCKED statuses.
 
+        Args:
+            manifest: The task manifest.
+            status: The current status as a string.
+            metadata: Optional metadata containing remarks, blocked_by, etc.
+
+        Returns:
+            str | None: Formatted remarks string.
+        """
+        remarks = None
+        # Priority 1: Explicit remarks override everything
+        explicit_remarks = (metadata or {}).get("remarks")
+        if explicit_remarks:
+            remarks = explicit_remarks
+
+        # Priority 2: Status-specific handling
         if status == ExecutionStatus.RETRY.value:
             ts = to_ch_datetime(current_timestamp())
-            return f"Transient error, retrying (attempt {manifest.retry_count}) at {ts}"
+            remarks = (
+                f"Transient error, retrying (attempt {manifest.retry_count}) at {ts}"
+            )
 
         if status == ExecutionStatus.BLOCKED.value:
-            # Try to get blocking service name
+            blocked_by = (metadata or {}).get("blocked_by")
+            if blocked_by:
+                remarks = f"Task blocked by '{blocked_by}'"
             if manifest.error and manifest.error.message:
-                return manifest.error.message
+                remarks = manifest.error.message
+            if not remarks:
+                remarks = "Task blocked by unknown service"
 
-            from libs.storage.cache.factory import get_cache
+        if status == ExecutionStatus.FAILED.value and manifest.error:
+            remarks = manifest.error.message
 
-            cache = get_cache(self.exec_ctx.cache_config)
-            pattern = f"{CACHE_TASK_NAMESPACE}:*:*:*:*:*:{manifest.run_id}"
-
-            for key in list(cache.iterkeys(pattern=pattern)):
-                task_meta = cache.get(key)
-                if task_meta and getattr(task_meta, "blocked_by", None):
-                    return f"Task blocked by service '{task_meta.blocked_by}'"
-
-            return "Task blocked by unknown service"
-
-        return None
+        return remarks
 
     @staticmethod
     def _format_bitmask(bitmask: int, status: str) -> str:

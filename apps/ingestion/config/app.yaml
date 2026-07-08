@@ -16,19 +16,21 @@ default:
 
   cache:
     type: diskcache
-    filepath: "@format {this.workspace_dir}/.cache/task_cache"
+    directory: "@format {this.workspace_dir}/.cache/task_cache"
 
   task_queue:
     type: diskcache
-    filepath: "@format {this.workspace_dir}/.cache/task_queue"
+    directory: "@format {this.workspace_dir}/.cache/task_queue"
 
   meta_db:
     service_ref: clickhouse
 
   timeouts:
-    schedule_to_start: 60
-    start_to_close: 900
-    multiplier: 3.0
+    total: 45m  # Override the job-level budget
+    stage: # Per-stage timeouts
+      extract: 20m      # Longer for this specific source
+      transform: 15m    # Custom for this task
+      load: 25m
 
 local:
   secret_provider:
@@ -41,7 +43,7 @@ local:
 
   cache:
     type: diskcache
-    filepath: "@format {this.workspace_dir}/.cache/task_cache"
+    directory: "@format {this.workspace_dir}/.cache/task_cache"
 
   timeouts:
     multiplier: 4.0

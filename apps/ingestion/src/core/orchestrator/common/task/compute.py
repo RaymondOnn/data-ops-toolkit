@@ -209,11 +209,18 @@ class Compute:
         """Check if enough resources are available to spawn a worker."""
         # Check system health first
         vitals = get_system_vitals()
+
+        # Log when we're close to saturation
+        if vitals.cpu_pct > 80 or vitals.mem_pct > 80:
+            LOG.debug(
+                f"Resource pressure: CPU: {vitals.cpu_pct}%, MEM: {vitals.mem_pct}%"
+            )
+
         if (
             vitals.cpu_pct > CRITICAL_CPU_THRESHOLD
             or vitals.mem_pct > CRITICAL_MEM_THRESHOLD
         ):
-            LOG.warning(
+            LOG.debug(
                 f"System overloaded - CPU: {vitals.cpu_pct}%, MEM: {vitals.mem_pct}%"
             )
             return False

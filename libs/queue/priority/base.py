@@ -64,6 +64,13 @@ class PriorityQueue(ABC):
         """Gracefully shutdown the queue."""
         pass
 
+    @abstractmethod
+    def items(self) -> Any:
+        """Scan and return an iterator or generator over all tasks in the queue
+        without removing them or altering their visibility.
+        """
+        pass
+
     def __repr__(self) -> str:
         param_str = ", ".join([f"{k}={v!r}" for k, v in self.__dict__.items()])
         return f"{self.__class__.__name__}({param_str})"

@@ -5,20 +5,23 @@ from typing import TYPE_CHECKING
 
 import msgspec
 from apps.ingestion.src.core.contexts import ExecutionContext
+from apps.ingestion.src.core.models.stages.base import DISK_FREE_STAGES
 from apps.ingestion.src.core.models.stages.enums import Stage
 from apps.ingestion.src.core.models.task import ExecutionStatus
 from apps.ingestion.src.core.monitor import ServiceMonitor
 from apps.ingestion.src.core.orchestrator.common.state import StateHub
+from apps.ingestion.src.core.orchestrator.common.timeout import TimeoutMonitor
 from apps.ingestion.src.core.orchestrator.contracts.policies import (
     AdmissionPolicy,
     MaintenancePolicy,
 )
 from apps.ingestion.src.core.orchestrator.enums import TaskMetadata, TaskRef
+from apps.ingestion.src.core.system import SystemMonitor
 from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE
 from apps.ingestion.src.utils.dates import end_of_day_timestamp
 from filelock import FileLock
-from libs.storage.cache.factory import get_cache
+from libs.storage.cache import CacheFactory
 from libs.utils.dates import seconds_diff
 from loguru import logger
 
@@ -39,20 +42,13 @@ class TaskManager:
     The TaskManager combines logical admission control (AdmissionPolicy),
     hardware resource management (Compute), and external health (Registry)
     to ensure tasks are only dispatched when the environment is ready.
-
-    Decision: Zero-Touch Recovery.
-    Blocked tasks are held in the 'active/' workspace to allow for seamless
-    recovery once infrastructure outages are resolved.
-
-    Decision: Active Probing Cooldown.
-    Probes are expensive. We enforce a temporal cooldown on active service
-    health checks to prevent hammering external APIs during prolonged outages.
     """
 
     def __init__(
         self,
         exec_ctx: ExecutionContext,
         state_store: StateHub,
+        timeout_monitor: TimeoutMonitor,
         admission_policy: AdmissionPolicy,
         maintenance_policy: MaintenancePolicy,
     ):
@@ -70,6 +66,7 @@ class TaskManager:
         """
         self.exec_ctx = exec_ctx
         self.state_store = state_store
+        self.timeout = timeout_monitor
         self.admission_policy = admission_policy
         self.maintenance_policy = maintenance_policy
 
@@ -79,26 +76,26 @@ class TaskManager:
 
         # 2. Initialize the Global Registry (Diskcache)
         # This ensures the shared cache path exists for all Ray workers
+        cache_config = self.exec_ctx.cache_config
         ServiceMonitor.setup(
             signal_dir=self.exec_ctx.signal_path,
-            cache_config=self.exec_ctx.cache_config,
+            cache_config=cache_config,
         )
         self.registry = ServiceMonitor()
-
-        # CRITICAL: Create cache directory in the parent process BEFORE
-        # spinning up Ray workers to prevent SQLite race conditions for diskcache.
-        if self.exec_ctx.cache_config.get("type") == "diskcache":
-            cache_filepath = self.exec_ctx.cache_config.get("filepath", ".cache")
-            (self.exec_ctx.workspace_dir / cache_filepath).mkdir(
-                parents=True, exist_ok=True
-            )
-
-        self.cache = get_cache(self.exec_ctx.cache_config)
+        self.cache = CacheFactory.create(
+            cache_type=cache_config["type"],
+            **{
+                "directory": cache_config["directory"],
+                "namespace": CACHE_TASK_NAMESPACE,
+                "size_limit": cache_config.get("size_limit", 2**30),
+                "timeout": cache_config.get("timeout", 5),
+            },
+        )
         self.queue = TaskQueue(self.exec_ctx.task_queue_config)
+        self.system = SystemMonitor(self.exec_ctx.workspace_dir)
 
         self._loop_counter = 0
         self.lock = FileLock(self.exec_ctx.lock_file)
-        self.is_degraded = False
         self._compute: Compute | None = None
 
         # Track state to prevent log spamming on every tick
@@ -106,6 +103,9 @@ class TaskManager:
 
         # Decision: Probing Cooldown.
         self._last_probe_ts: float = 0
+
+        # Track disk recovery attempts
+        self._disk_recovery_attempts: int = 0
 
         try:
             self.exec_ctx.verify_serializable()
@@ -141,6 +141,10 @@ class TaskManager:
 
         Returns:
             dict: A mapping of Ray ObjectRefs to internal Task cache keys.
+
+        Notes:
+        - Blocked tasks are held in the 'active/' workspace to allow for seamless
+        recovery once infrastructure outages are resolved.
         """
         return self._active_tasks
 
@@ -148,13 +152,10 @@ class TaskManager:
     def compute(self) -> Compute:
         """Lazy-loaded compute resource coordinator.
 
-        Decision: Lazy Loading.
-        We only initialize the Compute/Ray manager when the first task
-        is ready for dispatch to save memory on lightweight CLI runs.
-
         Returns:
             Compute: The resource manager for Ray worker lifecycle.
         """
+        # Lazy loaded to save memory on lightweight CLI runs
         if self._compute is None:
             self._compute = Compute(self.exec_ctx)
         return self._compute
@@ -171,18 +172,27 @@ class TaskManager:
         """
         if task_ref.status != ExecutionStatus.WAITING:
             task_ref = task_ref.with_updates(status=ExecutionStatus.WAITING)
+
+        # Load task context
         is_snapshot = "snapshot" in task_ref.identity.job_id.lower()
+
+        # Create timeout state
+        timeout_state = self.timeout.create_timeout_state(task_ref=task_ref)
+
         meta = TaskMetadata.from_ref(
             task_ref,
             config_file_path,
             expires_at=end_of_day_timestamp() if is_snapshot else None,
         )
+        meta.scheduled_at = time.time()
+        meta.timeout_state = timeout_state
+
         if self.admission_policy.admit(self.cache, self.lock, task_ref, meta):
             LOG.info(
                 "Queued Task", run_id=task_ref.identity.run_id, stage=task_ref.stage
             )
 
-            # Push to FlashQ with priority and group (concurrency control per job)
+            # Push to queue with priority and group (concurrency control per job)
             self.queue.push(meta, task_ref.stage, task_ref.status)
 
             return task_ref
@@ -195,21 +205,24 @@ class TaskManager:
         - Higher priority on stages that reduce disk usage to ensure the
         system clears its local disk backlog before ingesting more data.
         """
-        # Delegate resource cleanup to maintenance policy
-        self.maintenance_policy.cleanup_tasks(self._active_tasks, self.compute)
-
-        if self.exec_ctx.stop_at_ts is not None:
+        # Phase 1: Pre-dispatch checks and cleanup
+        if not self._prepare_for_dispatch():
             return
-
-        # Active Recovery: Attempt to clear circuit breakers
-        self.probe_blocked_services()
-        self.compute.refresh_resources()
 
         now_ts = time.time()
         dispatch_count = 0
+        resource_exhausted_count = 0
+        max_dispatch_attempts = 10  # Prevent infinite loop
 
         # Pop and process messages from FlashQ
         while True:
+            if resource_exhausted_count >= max_dispatch_attempts:
+                LOG.warning(
+                    f"Resource exhaustion: {resource_exhausted_count} tasks in queue "
+                    f"but no resources available. Waiting for next cycle."
+                )
+                break
+
             msg = self.queue.pop(visibility_timeout=300)
             if not msg:
                 break
@@ -219,16 +232,70 @@ class TaskManager:
                 continue
 
             if not self._is_task_ready(task_meta, now_ts):
+                LOG.info(
+                    "Task is not ready for dispatch",
+                    run_id=task_meta.run_id,
+                    stage=task_meta.current_stage,
+                )
                 continue
 
-            if self._dispatch_task(task_meta, msg):
+            if self._dispatch_task(task_meta=task_meta, msg=msg):
                 dispatch_count += 1
+                resource_exhausted_count = 0  # Reset counter on success
             else:
-                # System saturated, stop popping
-                break
+                # Resource exhaustion - re-queue and continue
+                resource_exhausted_count += 1
+
+                # Push back to queue
+                task_meta.status = ExecutionStatus.WAITING
+                self.queue.push(task_meta, task_meta.current_stage, task_meta.status)
+
+                # Log warning periodically, not every time
+                if (
+                    (
+                        resource_exhausted_count == 1
+                        or resource_exhausted_count % 10 == 0
+                    )
+                    and not self.queue.is_empty()
+                    and self.compute._saturated_resources
+                ):
+                    LOG.warning(
+                        f"Resources saturated: {self.compute._saturated_resources}. "
+                        f"{self.queue.backend.size()} tasks waiting in queue."
+                    )
+
+            # Continue processing other tasks - maybe some are less resource intensive
+            continue
 
         if dispatch_count > 0:
             LOG.debug(f"Tick Summary: Dispatched {dispatch_count} tasks.")
+        elif resource_exhausted_count > 0:
+            LOG.debug(
+                f"Tick Summary: {resource_exhausted_count} tasks delayed due to resource exhaustion"
+            )
+
+    def _prepare_for_dispatch(self) -> bool:
+        """Prepare the system for dispatch. Returns False if dispatch should be skipped."""
+        # Cleanup completed tasks
+        self.maintenance_policy.cleanup_tasks(self.active_tasks, self.compute)
+
+        # Check if we're in drain mode
+        if self.exec_ctx.stop_at_ts is not None:
+            return False
+
+        # Refresh resource state
+        self.probe_blocked_services()
+        self.compute.refresh_resources()
+        self.system.check()
+
+        # Handle disk pressure
+        if self.system.is_disk_blocked():
+            self._handle_disk_pressure()
+            # If disk is blocked, we can still try to dispatch disk-free tasks
+        else:
+            self._disk_recovery_attempts = 0
+
+        return True
 
     def _decode_message(self, msg) -> TaskMetadata | None:
         """Decode message data into TaskMetadata."""
@@ -249,6 +316,33 @@ class TaskManager:
 
     def _is_task_ready(self, task_meta: TaskMetadata, now_ts: float) -> bool:
         """Check if task is ready for dispatch."""
+        # Check disk pressure
+        if self.system.is_disk_blocked():
+            # Only allow disk-light tasks
+            if task_meta.current_stage not in DISK_FREE_STAGES:
+                LOG.debug(
+                    "Blocked disk-intensive task due to disk pressure",
+                    run_id=task_meta.run_id,
+                )
+            return False
+
+        # SCHEDULE_TO_START warning (not failure)
+        elapsed = now_ts - task_meta.scheduled_at
+        threshold = self.timeout.get_schedule_warning_threshold(task_meta.current_stage)
+
+        if elapsed > threshold:
+            # task_key = TaskMetadata.to_ref(task_meta).build()
+            # if task_key not in self._schedule_warning_logged:
+            LOG.warning(
+                "Task exceeded SCHEDULE_TO_START threshold",
+                run_id=task_meta.run_id,
+                stage=task_meta.current_stage,
+                waited_seconds=elapsed,
+                threshold_seconds=threshold,
+            )
+            # self._schedule_warning_logged.add(task_key)
+
+        # Check for RETRY status
         if task_meta.status != ExecutionStatus.RETRY:
             return True
 
@@ -267,12 +361,23 @@ class TaskManager:
 
     def _dispatch_task(self, task_meta: TaskMetadata, msg) -> bool:
         """Dispatch a single task to a worker."""
+
         task_ref = TaskMetadata.to_ref(task_meta)
 
-        # Update status for dispatch
+        # Build old key to pop from cache
+        old_key = task_ref.build(status=ExecutionStatus(task_meta.status))
+
+        # Update status for dispatch (IN MEMORY)
         task_meta.status = ExecutionStatus.DISPATCHED.value
         task_meta.last_hb = time.time()
         new_key = task_ref.build(status=ExecutionStatus.DISPATCHED)
+
+        # Update the registry / cache with the UPDATED metadata
+        with self.lock:
+            # Pop old entry
+            self.cache.pop(old_key, None)
+            # Store the UPDATED metadata with new key
+            self.cache.set(new_key, task_meta)  # Use task_meta, not cached_meta
 
         # Spawn worker
         ref = self.compute.spawn_worker(
@@ -282,39 +387,93 @@ class TaskManager:
         )
 
         if not ref:
-            return False  # System saturated
+            # Rollback: revert cache update
+            with self.lock:
+                self.cache.pop(new_key, None)
+                task_meta.status = ExecutionStatus.WAITING.value
+                task_meta.last_hb = time.time()
+                old_restore_key = task_ref.build(status=ExecutionStatus.WAITING)
+                self.cache.set(old_restore_key, task_meta)
+            return False
 
-        self._active_tasks[ref] = new_key
+        self.active_tasks[ref] = new_key
         LOG.success("Dispatching task", run_id=task_ref.identity.run_id)
         return True
+
+    def _handle_disk_pressure(self) -> None:
+        """Handle disk pressure by attempting recovery."""
+
+        def _has_disk_free_tasks(self) -> bool:
+            """Check if there are any tasks in the queue that don't require disk space."""
+            return any(
+                task_meta.current_stage in DISK_FREE_STAGES
+                for task_meta in self.queue.items()
+            )
+
+        max_attempts = 10
+
+        # Disk is still blocked - attempt recovery
+        if self._disk_recovery_attempts >= max_attempts:
+            raise RuntimeError(
+                f"Failed to free up disk space after {max_attempts} attempts. "
+                f"Manual intervention required. Disk usage: {self.system.get_disk_usage:.1f}%"
+            )
+
+        # Check if we have disk-free tasks that can help
+        if self._has_disk_free_tasks():
+            # Disk-free tasks exist - they'll be dispatched normally
+            self._disk_recovery_attempts = (
+                0  # Reset counter since we have recovery tasks
+            )
+            return
+
+        self._disk_recovery_attempts += 1
+        if self._disk_recovery_attempts % 5 == 0:
+            LOG.warning(
+                f"Disk full ({self.system.get_disk_usage:.1f}%) "
+                f"with no recovery tasks available. Attempt {self._disk_recovery_attempts}."
+            )
 
     def recover_zombie_tasks(self) -> None:
         """Reclaims tasks in RUNNING state without active Ray workers.
 
-        Decision: Implicit Recovery.
-        By running this in the maintenance loop, the orchestrator
+        Notes:
+        - By running this in the maintenance loop, the orchestrator
         self-heals from worker SIGKILLs without requiring manual
         intervention.
         """
         recovered = self.maintenance_policy.run(
-            self.cache, self.lock, self._active_tasks, self.compute, self.exec_ctx
+            self.cache, self.lock, self.active_tasks, self.compute, self.exec_ctx
         )
         if recovered:
             for meta, stage in recovered:
                 self.queue.push(meta, stage)
                 LOG.info(f"Re-queued recovered zombie task: {meta.run_id}")
 
+    def _has_disk_free_tasks(self) -> bool:
+        """Identifies unique blocked services and performs health probes.
+
+        Notes:
+        - Instead of waiting for a 5-minute TTL to expire, we actively probe
+        services that are currently blocking the queue using a lightweight
+        connection check.
+        - We enforce a PROBE_COOLDOWN_SECS to prevent excessive network traffic
+        during long-duration infrastructure outages.
+        """
+        return any(
+            task_meta.current_stage in DISK_FREE_STAGES
+            for task_meta in self.queue.items()
+        )
+
     def probe_blocked_services(self) -> None:
         """Identifies unique blocked services and performs health probes.
 
-        Decision: Active Recovery.
-        Instead of waiting for a 5-minute TTL to expire, we actively probe
+        Notes:
+        - Instead of waiting for a 5-minute TTL to expire, we actively probe
         services that are currently blocking the queue using a lightweight
         connection check.
-
-        Decision: Throttled Probing.
-        We enforce a PROBE_COOLDOWN_SECS to prevent excessive network traffic
-        during long-duration infrastructure outages.
+        - We enforce a PROBE_COOLDOWN_SECS to prevent hammering external APIs
+        during prolonged outages.
         """
         now = time.time()
         if now - self._last_probe_ts < PROBE_COOLDOWN_SECS:

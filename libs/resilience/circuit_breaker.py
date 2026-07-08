@@ -21,7 +21,13 @@ class BreakerState(StrEnum):
 
 
 class CircuitBreaker:
-    """Prevents repeated calls to failing services."""
+    """Prevents repeated calls to failing services.
+
+    Args:
+        failure_threshold: The number of failures before the circuit opens.
+        timeout_secs: The time in seconds to wait before closing the circuit.
+        tracked_exceptions: The exceptions to track.
+    """
 
     def __init__(
         self,
@@ -42,20 +48,21 @@ class CircuitBreaker:
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            self._check_before_call()
+            self.check_before_call()
 
             try:
                 result = func(*args, **kwargs)
-                self._succeed()
+                self.succeed()
                 return result
-            except Exception as e:
-                if isinstance(e, self.tracked_exceptions):
-                    self._fail(e)
+            except self.tracked_exceptions:
+                self.fail()
+                raise
+            except Exception:
                 raise
 
         return wrapper
 
-    def _check_before_call(self) -> None:
+    def check_before_call(self) -> None:
         """Raise exception if circuit is open."""
         if self.state != BreakerState.OPEN:
             return
@@ -67,12 +74,12 @@ class CircuitBreaker:
             remaining = int(self.timeout - elapsed)
             raise CircuitOpen(f"Circuit open, retry in {remaining}s")
 
-    def _succeed(self) -> None:
+    def succeed(self) -> None:
         """Reset circuit on success."""
         self.state = BreakerState.CLOSED
         self.failures = 0
 
-    def _fail(self, exception: Exception) -> None:
+    def fail(self) -> None:
         """Record failure and possibly open circuit."""
         self.failures += 1
 

@@ -1,17 +1,20 @@
 from collections.abc import Callable
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from apps.ingestion.src.utils.exceptions import TryAgainLater
 from libs.auth.factory import AuthFactory, SecretProvider
 from libs.auth.secret import Secret
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitOpen
-from libs.storage.cache.base import KeyValueCache
 from libs.utils.dict import find_keys_by_pattern, set_nested_key
 from libs.utils.exceptions import AuthFailure, HostUnreachable
 from loguru import logger
 
 from .base import Archive, Sink, Source
+
+if TYPE_CHECKING:
+    from libs.queue.priority.base import PriorityQueue
+    from libs.storage.cache import Cache
 
 LOG = logger
 
@@ -46,15 +49,32 @@ class ServiceFactory:
         return wrapper
 
     @classmethod
-    def get_provider(cls, env: str, config: dict[str, Any]) -> None:
+    def get_provider(cls, config: dict[str, Any]) -> None:
         """
         Initializes the secret provider used for resolving credentials.
 
         Args:
-            env: The deployment environment (dev/prod).
             config: Configuration for the AuthFactory.
         """
-        cls._provider = AuthFactory.get_provider(env=env, **config)
+        cls._provider = AuthFactory.get_provider(**config)
+
+    @classmethod
+    def get_task_queue(cls, config: dict[str, Any]) -> "PriorityQueue":
+        from libs.queue.priority.factory import QueueFactory, QueueType
+
+        queue_type = config["type"]
+        return QueueFactory.create(
+            queue_type=QueueType(queue_type),
+            **config,
+        )
+
+    @classmethod
+    def get_cache(cls, config: dict[str, Any]) -> "Cache":
+        from libs.storage.cache.factory import CacheFactory
+
+        cache_type = config["type"]
+
+        return CacheFactory.create(cache_type, **config)
 
     @classmethod
     def _make_hashable(cls, value: Any) -> Any:
@@ -156,18 +176,3 @@ class ServiceFactory:
     ) -> Archive:
         """Get an Archive service."""
         return cls.get(service_type, flags=flags, **config)
-
-    @classmethod
-    def get_cache(cls, config: dict) -> KeyValueCache:
-        """Get cache implementation."""
-        from libs.storage.cache import DiskCache, RedisCache
-
-        if config.get("type") == "redis":
-            return RedisCache(
-                host=config.get("host", "localhost"),
-                port=config.get("port", 6379),
-                db=config.get("db", 0),
-            )
-
-        cache_path = (config.get("filepath", ".cache")).resolve()
-        return DiskCache(cache_path=cache_path, shards=8, timeout=0.01)

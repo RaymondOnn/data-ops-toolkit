@@ -18,9 +18,27 @@ class XMLHandler(FormatHandler):
     """Handler for XML files."""
 
     def discover(self, path: Path | str, pattern: str | None = None) -> set[str]:
+        """Discover XML files.
+
+        Args:
+            path: The path to the XML file.
+            pattern: The pattern to match.
+
+        Returns:
+            set[str]: Set of discovered XML files.
+        """
         return self._glob_files(path, pattern, "**/*.xml")
 
     def to_df(self, path: Path | str, **kwargs: Any) -> pl.LazyFrame:
+        """Convert XML files to Polars LazyFrame.
+
+        Args:
+            path: The path to the XML file.
+            **kwargs: Additional keyword arguments.
+
+        Returns:
+            pl.LazyFrame: The LazyFrame containing the XML data.
+        """
         files = self.discover(path)
         if not files:
             return pl.LazyFrame()
@@ -37,6 +55,15 @@ class XMLHandler(FormatHandler):
         raise NotImplementedError("XML write not supported")
 
     def read_raw(self, path: Path | str, **kwargs: Any) -> io.BytesIO:
+        """Read raw XML data from path.
+
+        Args:
+            path: The path to the XML file.
+            **kwargs: Additional keyword arguments.
+
+        Returns:
+            io.BytesIO: The raw XML data.
+        """
         encoding = kwargs.get("encoding", "utf-8")
         files = self.discover(path)
         if not files:

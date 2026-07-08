@@ -53,7 +53,6 @@ class DatabaseService(Service):
                 credentials which may be `Secret` objects.
 
         Notes:
-            Decision: Configuration Preservation.
             We store the raw config to allow Ray workers to recreate the database
             client locally. This ensures that socket handles are not serialized
             and shared across network boundaries, which is unsupported by
@@ -151,7 +150,6 @@ class DatabaseSource(DatabaseService, Source):
     ) -> set[str]:
         """Calculates optimal parallel partitions based on a Cell-Budget heuristic.
 
-        Decision: Cell-Budget Partitioning (ADR 007).
         Instead of splitting by row count alone, we calculate the total volume
         of 'cells' (rows x columns). We target ~20M cells per worker, which
         keeps memory usage within the 2GB Ray worker limit while maximizing
@@ -212,11 +210,6 @@ class DatabaseSource(DatabaseService, Source):
     @monitor(breaker)
     def pull(self, unit: str) -> pl.DataFrame:
         """Extracts data for a specific work unit.
-
-        Decision: Eager Materialization.
-        Ray workers materialize the full slice to Arrow before passing it
-        back to the orchestrator. The parallelization heuristic ensures
-        this slice fits in memory.
 
         Args:
             unit: The SQL query to execute.

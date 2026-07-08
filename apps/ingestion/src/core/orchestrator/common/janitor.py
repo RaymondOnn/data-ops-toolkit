@@ -123,7 +123,7 @@ class Janitor:
             LOG.exception(f"Recovery failed for {folder_path}")
 
     # ========== Cleanup Operations ==========
-    def _cleanup_task(self, task: "Task") -> None:
+    def cleanup_task(self, task: "Task") -> None:
         """Apply all cleanup policies to a completed task."""
         # Vault cleanup - but preserve in certain modes
         preserve = any(
@@ -150,7 +150,7 @@ class Janitor:
         if task.workspace.path.exists():
             shutil.rmtree(task.workspace.path, ignore_errors=True)
 
-        self._remove_orphaned_config(task.id, task.run_id)
+        self.remove_orphaned_config(task.id, task.run_id)
 
     def _cleanup_external_sources(self, task: "Task") -> None:
         """Clean up external source files/directories after successful ingestion."""
@@ -203,7 +203,7 @@ class Janitor:
         else:
             LOG.warning(f"Unknown cleanup mode '{mode}', skipping")
 
-    def _remove_orphaned_config(self, task_id: str, run_id: str) -> None:
+    def remove_orphaned_config(self, task_id: str, run_id: str) -> None:
         """Remove orphaned config file."""
         prefix = f"{task_id}:{run_id}"
         config = self.exec_ctx.active_path / f"{prefix}_{CONFIG_FILENAME}"
@@ -287,7 +287,7 @@ class Janitor:
                     {"status": ExecutionStatus.EXPIRED, "remarks": reason}
                 )
 
-            self._cleanup_task(task)
+            self.cleanup_task(task)
             return True
         except Exception:
             LOG.exception("Failed to purge {folder}")

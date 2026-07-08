@@ -1,7 +1,7 @@
 from abc import abstractmethod
 from collections.abc import Generator
 from pathlib import Path
-from typing import Any, Generic, TypeVar, cast
+from typing import Any, Generic, TypeVar
 
 import msgspec
 import polars as pl
@@ -23,7 +23,6 @@ T_Source = TypeVar("T_Source", bound=Source)
 class DataExtractor(Extractor[T_Source], Generic[T_Source]):
     """Ray-based distributed extractor with streaming Parquet output.
 
-    Decision: Parquet Streaming.
     Instead of loading the entire dataset into memory, this extractor
     streams results to Parquet files on disk. This allows it to handle
     datasets much larger than available RAM on a single node.
@@ -104,7 +103,6 @@ class DataExtractor(Extractor[T_Source], Generic[T_Source]):
 
             result = svc.pull(unit)
             df = result.collect() if isinstance(result, pl.LazyFrame) else result
-            df = cast("pl.DataFrame", df)
 
             worker_log.info(f"Extracted {df.height:_} rows")
             processed = apply_schema_contract(df, ctx)

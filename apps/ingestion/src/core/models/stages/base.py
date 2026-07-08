@@ -3,14 +3,14 @@
 import traceback
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 
 import msgspec
 from apps.ingestion.src.core.models.stages.enums import NO_MORE_STAGES, Stage
 from apps.ingestion.src.core.models.task.manifest import ErrorInfo, StagePayload
 from apps.ingestion.src.core.models.task.status import ExecutionStatus
-from apps.ingestion.src.utils.constants import DISK_THRESHOLD_HALT
-from libs.utils.system import get_disk_usage
+from apps.ingestion.src.core.system import SystemMonitor
+from apps.ingestion.src.utils.exceptions import OutOfDiskSpace
 from loguru import logger
 
 LOG = logger
@@ -30,6 +30,23 @@ class ExecutionStage(ABC):
             self.name: str = stage.value
             self.bitmask = stage.bitmask
             self._config = None
+
+    @classmethod
+    def get_disk_free_stages(cls) -> list[type[Self]]:
+        """Get all subclasses that don't require disk space."""
+
+        def collect_subclasses(klass: type[Self]) -> list[type[Self]]:
+            result: list[type[Self]] = []
+            for subclass in klass.__subclasses__():
+                # Type check: ensure subclass is a subclass of ExecutionStage
+                if issubclass(subclass, ExecutionStage):
+                    result.append(subclass)
+                    result.extend(collect_subclasses(subclass))
+            return result
+
+        return [
+            stage for stage in collect_subclasses(cls) if not stage.requires_disk_space
+        ]
 
     def _bind_config(self, task: "Task") -> None:
         """Bind stage config from task context."""
@@ -60,10 +77,16 @@ class ExecutionStage(ABC):
 
     def _check_disk_space(self, task: "Task") -> None:
         """Verify sufficient disk space before execution."""
-        usage = get_disk_usage(task.exec_ctx.workspace_dir)
-        if usage.percent > DISK_THRESHOLD_HALT:
-            LOG.critical(f"Disk at {usage.percent:.1f}% - halting {self.name}")
-            raise OSError(f"Disk critical: {usage.percent:.1f}%")
+        SystemMonitor(task.exec_ctx.workspace_dir)
+
+        if SystemMonitor.is_disk_blocked():
+            health = SystemMonitor.get_last_report()
+            if not health:
+                raise ValueError("No system health report found!")
+            raise OutOfDiskSpace(
+                message=f"Disk at {health.disk_usage_pct:.1f}% - aborting stage {self.name}",
+                disk_usage=health.disk_usage_pct,
+            )
 
     def pre_flight(self, task: "Task") -> None:
         """
@@ -77,6 +100,14 @@ class ExecutionStage(ABC):
         if self.requires_disk_space:
             self._check_disk_space(task)
         self._bind_config(task)
+
+    # @abstractmethod
+    # def execute(self, task: "Task") -> str:
+    #     """Execute stage logic. Returns next stage name."""
+    #     # HookRunner.run_hooks(task, self.name, "pre")
+    #     next_stage = self._execute(task)
+    #     # HookRunner.run_hooks(task, self.name, "post")
+    #     return next_stage
 
     @abstractmethod
     def execute(self, task: "Task") -> str:
@@ -134,3 +165,6 @@ class ExecutionStage(ABC):
                 "bitmask": task.manifest.bitmask | self.bitmask,
             }
         )
+
+
+DISK_FREE_STAGES = set(ExecutionStage.get_disk_free_stages())

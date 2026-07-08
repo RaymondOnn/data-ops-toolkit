@@ -1,5 +1,5 @@
 from . import logic
-from .base import TransformContext, TransformLogic
+from .base import TransformContext, Transformer, TransformLogic
 from .data import DataTransformer
 from .factory import TransformFactory
 

@@ -31,9 +31,9 @@ def test_zombie_resurrection_on_worker_death(runtime, tmp_path):
     found_ref = None
     for _ in range(10):
         runtime.orchestrator._drive_engine()
-        if runtime.orchestrator.tasks._active_tasks:
+        if runtime.orchestrator.tasks.active_tasks:
             # Capture the Ray ObjectRef
-            found_ref = next(iter(runtime.orchestrator.tasks._active_tasks.keys()))
+            found_ref = next(iter(runtime.orchestrator.tasks.active_tasks.keys()))
             break
         time.sleep(0.1)
 
@@ -45,7 +45,7 @@ def test_zombie_resurrection_on_worker_death(runtime, tmp_path):
 
     # Remove from the local registry to simulate Ray losing track of the ref
     # but the Hot Cache still thinks it's running.
-    runtime.orchestrator.tasks._active_tasks.pop(found_ref)
+    runtime.orchestrator.tasks.active_tasks.pop(found_ref)
 
     # 4. Maintenance: Trigger the zombie detection logic
     # This is what the background daemon runs every 5 minutes
@@ -71,7 +71,7 @@ def test_zombie_resurrection_on_worker_death(runtime, tmp_path):
 
     # 6. Final Drive: Ensure it can be picked up again
     runtime.orchestrator._drive_engine()
-    new_active_tasks = runtime.orchestrator.tasks._active_tasks
+    new_active_tasks = runtime.orchestrator.tasks.active_tasks
     assert len(new_active_tasks) == 1, "Task failed to re-dispatch after resurrection"
 
     new_ref = next(iter(new_active_tasks.keys()))

@@ -82,9 +82,9 @@ class StateSink:
                     "Buffer threshold reached, flushing to disk",
                     buffer_size=buffer_size,
                 )
-                self._flush_to_disk()
+                self.flush_to_disk()
 
-    def _flush_to_disk(self, force: bool = False) -> None:
+    def flush_to_disk(self, force: bool = False) -> None:
         """Appends buffered records to the local JSONL stream file.
 
         Args:
@@ -118,7 +118,7 @@ class StateSink:
         fresh file while the database loader processes the previous batch
         in isolation.
         """
-        self._flush_to_disk(force=True)
+        self.flush_to_disk(force=True)
 
         if not self.stream_path.exists() or self.stream_path.stat().st_size == 0:
             LOG.debug("No data to rotate", path=str(self.stream_path))
@@ -145,7 +145,6 @@ class StateSink:
         held by short-lived CLI processes.
         """
         if self._db is None:
-            print(self.db_config)
             config = self.db_config.copy()
             service_type = config.pop("type")
             LOG.debug("Initializing database client", service_type=service_type)

@@ -11,7 +11,7 @@ from apps.ingestion.src.core.contexts.execution import ExecutionContext
 from apps.ingestion.src.services.database import DatabaseSink
 from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.utils.constants import APP_CONFIG_ROOT
-from libs.utils.network import NetworkDoctor
+from libs.network import NetworkDoctor
 from libs.utils.system import get_disk_usage
 from loguru import logger
 
@@ -275,7 +275,7 @@ class Doctor:
             provider_cfg = self.builder.app_settings.get(
                 "secret_provider", {}
             ).to_dict()
-            ServiceFactory.get_provider(self.exec_ctx.env, provider_cfg)
+            ServiceFactory.get_provider(provider_cfg)
         except Exception as e:
             LOG.debug(f"Secret provider init skipped: {e}")
 

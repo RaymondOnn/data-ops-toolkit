@@ -216,25 +216,6 @@ class Sink(Service, ABC):
         """
         pass
 
-    # @abstractmethod
-    # def minus(
-    #     self,
-    #     reference: str,
-    #     other: str,
-    #     exclude_columns: set[str] | None = None,
-    # ) -> int:
-    #     """
-    #     Performs a MINUS or EXCEPT operation to check for differences.
-
-    #     Args:
-    #         left: The first dataset identifier.
-    #         right: The second dataset identifier.
-    #         exclude_columns: Columns to ignore during comparison.
-    #     Returns:
-    #         bool: True if there are differences, False if datasets are identical.
-    #     """
-    #     pass
-
     @abstractmethod
     def delete(self, target: str) -> None:
         """

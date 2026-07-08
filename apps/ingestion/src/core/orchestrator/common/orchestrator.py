@@ -10,16 +10,15 @@ from apps.ingestion.src.core.contexts import TaskContextBuilder
 from apps.ingestion.src.core.models.task import ExecutionStatus, Task, TaskSignal
 from apps.ingestion.src.core.models.task.enums import TaskIdentity
 from apps.ingestion.src.core.orchestrator.enums import TaskRef
+from apps.ingestion.src.core.system import SystemMonitor
 from apps.ingestion.src.services.factory import ServiceFactory
 from apps.ingestion.src.utils.common import short_hash
 from apps.ingestion.src.utils.constants import (
     CACHE_TASK_NAMESPACE,
     CONFIG_FILENAME,
-    DISK_THRESHOLD_HALT,
     STRIP_TZ_FOR_DB,
 )
 from libs.utils.dates import current_timestamp
-from libs.utils.system import get_disk_usage, get_system_vitals
 from loguru import logger
 
 from .janitor import Janitor
@@ -54,7 +53,7 @@ class Orchestrator:
         self.janitor = janitor
         self.signals = scanner
 
-        self._check_system_health()
+        SystemMonitor(self.exec_ctx.workspace_dir)
         self._init_services()
         self._register_signal_handlers()
         LOG.info("Orchestrator initialized")
@@ -66,23 +65,10 @@ class Orchestrator:
             (self.exec_ctx.workspace_dir / dir_name).mkdir(parents=True, exist_ok=True)
 
         try:
-            ServiceFactory.get_provider(
-                self.exec_ctx.env, self.exec_ctx.provider_config
-            )
+            ServiceFactory.get_provider(self.exec_ctx.provider_config)
         except Exception:
             LOG.exception("Service initialization failed")
             raise
-
-    def _check_system_health(self) -> None:
-        """Monitor system health and apply backpressure."""
-        vitals = get_system_vitals()
-        disk = get_disk_usage(self.exec_ctx.workspace_dir)
-
-        if disk.percent > DISK_THRESHOLD_HALT:
-            LOG.critical("Disk full. Stopping orchestrator.")
-            sys.exit(1)
-
-        self.tasks.is_degraded = vitals.mem_pct > 85
 
     def preflight_check(self) -> None:
         """Verify critical infrastructure before starting."""
@@ -141,20 +127,32 @@ class Orchestrator:
                     task = Task.from_path(event.folder_path, self.exec_ctx)
 
             if success:
-                self.janitor._cleanup_task(task)
+                self.janitor.cleanup_task(task)
             elif task and task.manifest.status != ExecutionStatus.BLOCKED:
                 self.janitor.quarantine(event.folder_path, "FAILED")
 
     def _on_task_sync(self, event: SignalEvent) -> None:
+        """Handle SYNC signals - both progress and blocked tasks."""
         if event.folder_path:
-            self.state.sync_manifest(event.folder_path, deep_sync=False)
+            # Check if task is blocked - pass metadata if needed
+            task = None
+            metadata = None
+            with suppress(Exception):
+                task = Task.from_path(event.folder_path, self.exec_ctx)
+                if task and task.manifest.status == ExecutionStatus.BLOCKED:
+                    blocked_by = getattr(task.manifest, "blocked_by", None)
+                    if blocked_by:
+                        metadata = {"blocked_by": blocked_by}
+
+            self.state.sync_manifest(
+                event.folder_path, deep_sync=False, metadata=metadata
+            )
         else:
             self.state.update_task(event.identity.run_id, {})
 
     def submit_tasks(self) -> None:
         """Run one dispatch cycle of the scheduler."""
-        if not self.tasks.cache.is_empty():
-            self.tasks.dispatch()
+        self.tasks.dispatch()
 
     def start_job(
         self,
@@ -230,7 +228,7 @@ class Orchestrator:
         self.state.sync_manifest(task.workspace.path)
 
         if status == ExecutionStatus.EXPIRED:
-            self.janitor._cleanup_task(task)
+            self.janitor.cleanup_task(task)
 
     def summarize_failures(self, run_ids: set[str]) -> None:
         """Print failure summary for failed runs."""

@@ -9,9 +9,9 @@ def filter_files(
     """
     Filters a list of files based on a glob pattern or supported extensions.
 
-    Decision: Contract-Aware Filtering.
-    If no pattern is provided, we only pick up files that our FormatFactory
-    actually knows how to handle, preventing 'Unknown Format' errors.
+    Notes:
+    - If no pattern is provided, we only pick up files that our FormatFactory
+      actually knows how to handle, preventing 'Unknown Format' errors.
     """
     if pattern:
         matches = fnmatch.filter(all_files, f"*{pattern}*")

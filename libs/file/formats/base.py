@@ -4,7 +4,7 @@ import io
 import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Self, cast
+from typing import Any, Self
 
 import fsspec
 import polars as pl
@@ -31,13 +31,16 @@ class FormatHandler(ABC):
     def count_rows(self, path: Path | str) -> int:
         """Count rows using format-specific optimization."""
         result = self.to_df(path).select(pl.len()).collect()
-        return int(cast("pl.DataFrame", result).item())
+        return int(result.item())
 
     def _glob_files(
         self, path: Path | str, pattern: str | None, default_glob: str
     ) -> set[str]:
         """Discover files matching pattern or default glob."""
-        base = self.fs._strip_protocol(str(path)).rstrip("/")
+        base_raw = self.fs._strip_protocol(str(path))
+        if isinstance(base_raw, list | tuple):
+            base_raw = base_raw[0] if base_raw else ""
+        base = str(base_raw).rstrip("/")
         leaf = pattern.lstrip("/") if pattern else ""
         search = f"{base}/{leaf}" if base and leaf else base or leaf or ""
 

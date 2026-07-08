@@ -57,6 +57,19 @@ class DataLoader(Loader):
         file_ext: str = "parquet",
         audit: dict[str, Any] | None = None,
     ) -> tuple[str, int]:
+        """
+        Stage data from source directory to temporary location.
+
+        Args:
+            sink: The sink to stage data to.
+            source_dir: The source directory.
+            context: The load context.
+            file_ext: The file extension.
+            audit: The audit data.
+
+        Returns:
+            tuple[str, int]: The staging ID and the number of files.
+        """
         LOG.info(
             f"Staging to {context.target} for "
             f"{context.partition_by}={context.partition_value}"
@@ -81,6 +94,14 @@ class DataLoader(Loader):
         staging_id: str,
         context: LoadContext,
     ) -> None:
+        """
+        Promote staged data to production.
+
+        Args:
+            sink: The sink to promote data to.
+            staging_id: The staging ID.
+            context: The load context.
+        """
         LOG.info(f"Promoting {staging_id} -> {context.target}")
 
         sink.promote(
@@ -103,7 +124,19 @@ class FileLoader(Loader):
         file_ext: str = "parquet",
         audit: dict[str, Any] | None = None,
     ) -> tuple[str, int]:
-        """Stage files to temporary location."""
+        """
+        Stage files to temporary location.
+
+        Args:
+            sink: The sink to stage data to.
+            source_dir: The source directory.
+            context: The load context.
+            file_ext: The file extension.
+            audit: The audit data.
+
+        Returns:
+            tuple[str, int]: The staging ID and the number of files.
+        """
         LOG.info(f"Staging files to {context.target}")
 
         # For file sinks, stage returns (staging_path, file_count)
@@ -126,7 +159,14 @@ class FileLoader(Loader):
         staging_id: str,
         context: LoadContext,
     ) -> None:
-        """Move staged files to final destination."""
+        """
+        Move staged files to final destination.
+
+        Args:
+            sink: The sink to promote data to.
+            staging_id: The staging ID.
+            context: The load context.
+        """
         LOG.info(f"Promoting {staging_id} -> {context.target}")
 
         # For file sinks, promote moves/copies files to final location
@@ -150,6 +190,14 @@ class LoaderFactory:
 
     @classmethod
     def get_loader(cls, sink_type: str) -> Loader:
-        """Get loader for the specified sink type."""
+        """
+        Get loader for the specified sink type.
+
+        Args:
+            sink_type: The type of the sink.
+
+        Returns:
+            Loader: The loader for the specified sink type.
+        """
         loader_cls = cls._LOADERS.get(sink_type, DataLoader)
         return loader_cls()

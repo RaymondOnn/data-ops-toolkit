@@ -836,7 +836,7 @@ def find_affected_datasets(
         """Extracts the unique transformation signature from a context."""
         transform_type = ctx.transform.type.casefold()
         transform_name = (ctx.transform.params.get("name") or "").casefold()
-        return (transform_type, transform_name)
+        return transform_type, transform_name
 
     try:
         builder = TaskContextBuilder(env=env)

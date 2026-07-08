@@ -27,10 +27,6 @@ default:
     format: "%Y-%m-%d"
     wrap_quotes: false
 
-  timeouts:
-    schedule_to_start: 60
-    start_to_close: 900
-    multiplier: 3.0
 
   # Global Feature Flag Defaults
   feature_flags:

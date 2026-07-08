@@ -14,30 +14,59 @@ LOG = logging.getLogger(__name__)
 class FileMixin:
     """Mixin providing high-volume file I/O and explicit archive virtualization.
 
-    Decision: Protocol Agnostic.
-    By leveraging fsspec, this mixin allows the same ingestion logic to
-    operate seamlessly across S3, Azure Blob, and Local filesystems.
-
-    Decision: Explicit Discovery.
-    We moved away from '::' string delimiters. The mixin now accepts explicit
-    archive_path parameters, providing a cleaner API for structured
-    configurations.
+    Notes:
+    - By leveraging fsspec, this mixin allows the same ingestion logic to
+      operate seamlessly across S3, Azure Blob, and Local filesystems.
+    - The mixin accepts explicit archive_path parameters instead of '::'
+      string delimiters, providing a cleaner API for structured configurations.
     """
 
     fs: fsspec.AbstractFileSystem
     opts: dict
 
     def resolve(self, path: str) -> str:
+        """Resolve path.
+
+        Args:
+            path: The path to resolve.
+
+        Returns:
+            str: The resolved path.
+        """
         raise NotImplementedError
 
     def is_archive(self, path: str) -> bool:
+        """Check if path is an archive.
+
+        Args:
+            path: The path to check.
+
+        Returns:
+            bool: True if the path is an archive, False otherwise.
+        """
         raise NotImplementedError
 
     def extract_archive(self, path: str) -> str:
+        """Extract archive.
+
+        Args:
+            path: The path to the archive.
+
+        Returns:
+            str: The path to the extracted archive.
+        """
         raise NotImplementedError
 
     def is_readable(self, fs: fsspec.AbstractFileSystem, path: str) -> bool:
-        """Check if file exists and is non-empty."""
+        """Check if file exists and is non-empty.
+
+        Args:
+            fs: The filesystem.
+            path: The path to the file.
+
+        Returns:
+            bool: True if the file exists and is non-empty, False otherwise.
+        """
         if not fs.exists(path):
             LOG.error(f"Missing file: {path}")
             return False
@@ -59,7 +88,18 @@ class FileMixin:
         repair: bool = False,
         **kwargs,
     ) -> pl.LazyFrame:
-        """Read files into Polars LazyFrame."""
+        """Read files into Polars LazyFrame.
+
+        Args:
+            source: The source path or list of paths.
+            file_pattern: The pattern to match.
+            archive: The archive path.
+            repair: Whether to repair the files.
+            **kwargs: Additional keyword arguments.
+
+        Returns:
+            pl.LazyFrame: The LazyFrame containing the files.
+        """
 
         temp_dir = None
 
@@ -115,7 +155,15 @@ class FileMixin:
     def _detect_encoding(
         self, fs: fsspec.AbstractFileSystem, path: str
     ) -> tuple[io.IOBase, str]:
-        """Detect file encoding using charset-normalizer."""
+        """Detect file encoding using charset-normalizer.
+
+        Args:
+            fs: The filesystem.
+            path: The path to the file.
+
+        Returns:
+            tuple[io.IOBase, str]: The file object and the encoding.
+        """
         from charset_normalizer import from_bytes
 
         with fs.open(path, "rb") as stream:

@@ -5,10 +5,7 @@ description = "Shared I/O and Database clients"
 dependencies = [
     "loguru",
     "pendulum",
-    "httpx",
-    "pypac",
     "psutil>=5.8.0",
-    "httptap",
     "faker",
 ]
 requires-python = ">=3.11"

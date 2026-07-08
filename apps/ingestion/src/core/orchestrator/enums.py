@@ -7,6 +7,7 @@ from typing import Any, Self
 import msgspec
 from apps.ingestion.src.core.models.task.enums import TaskRef
 from apps.ingestion.src.core.models.task.status import ExecutionStatus
+from apps.ingestion.src.core.orchestrator.common.timeout import TimeoutState
 from apps.ingestion.src.utils.constants import (
     CACHE_TASK_NAMESPACE,
     STRIP_TZ_FOR_DB,
@@ -64,6 +65,8 @@ class TaskMetadata(msgspec.Struct):
     rewind_history: dict[str, str] = msgspec.field(default_factory=dict)
     expires_at: float | None = None
     blocked_by: str | None = None
+    timeout_state: TimeoutState | None = None
+    scheduled_at: float = msgspec.field(default_factory=time.time)
 
     @classmethod
     def from_ref(

@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "uv",
     "ruff",
-    "ty",
+    "pyright",
     "pre-commit",
     "pytest>=9.0.2",
     "rust-just",
@@ -29,6 +29,7 @@ resilience = { workspace = true }
 cloud = { workspace = true }
 storage = { workspace = true }
 queue = { workspace = true }
+network = { workspace = true }
 
 
 [tool.uv.workspace]

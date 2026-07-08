@@ -1,7 +1,14 @@
 from apps.ingestion.src.core.contexts import ExecutionContext, TaskContextBuilder
 from apps.ingestion.src.services.factory import ServiceFactory
 
-from .common import Janitor, Orchestrator, SignalScanner, StateHub, TaskManager
+from .common import (
+    Janitor,
+    Orchestrator,
+    SignalScanner,
+    StateHub,
+    TaskManager,
+    TimeoutMonitor,
+)
 from .modes import DaemonRuntime, TriggerRuntime
 
 
@@ -14,11 +21,12 @@ def assemble_runtime(
     """
     exec_ctx.provider_config = builder.app_settings.get("secret_provider").to_dict()
 
-    ServiceFactory.get_provider(exec_ctx.env, exec_ctx.provider_config)
+    ServiceFactory.get_provider(exec_ctx.provider_config)
     db_config = builder.app_settings.get("meta_db.service", {}).to_dict()
 
     # 1. Build common baseline infrastructure
     signal_processor = SignalScanner(exec_ctx=exec_ctx)
+    timeout_monitor = TimeoutMonitor(db_config=db_config)
     base_state_store = StateHub(exec_ctx=exec_ctx, db_config=db_config)
 
     if exec_ctx.always_on:
@@ -38,6 +46,7 @@ def assemble_runtime(
         task_manager = TaskManager(
             exec_ctx,
             state_store=base_state_store,
+            timeout_monitor=timeout_monitor,
             admission_policy=DenyDuplicateAdmission(),
             maintenance_policy=ProactiveMaintenance(),
         )
@@ -80,6 +89,7 @@ def assemble_runtime(
     task_manager = TaskManager(
         exec_ctx,
         state_store=base_state_store,
+        timeout_monitor=timeout_monitor,
         admission_policy=OverwriteAdmission(),
         maintenance_policy=NoOpMaintenance(),
         # policy=EvictDuplicatePolicy()

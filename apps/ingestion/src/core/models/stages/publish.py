@@ -41,7 +41,6 @@ class PublishStage(ExecutionStage):
                 artifact identifier is missing.
 
         Notes:
-            Decision: Strict Staging Dependency.
             We explicitly check for the `staging_artifact` here to prevent
             the loader from attempting a promotion on a non-existent or
             corrupted staging state. If missing, we rewind to WRITE to
@@ -70,10 +69,9 @@ class PublishStage(ExecutionStage):
             Exception: Propagates any underlying database or promotion errors.
 
         Notes:
-            Decision: Atomic Promotion.
-            We use the `loader.promote` method to ensure that the data swap
-            is handled according to the specific sink's best practices
-            (e.g., partition exchange, atomic renames, or transactional deletes).
+            - We use the `loader.promote` method to ensure that the data swap
+              is handled according to the specific sink's best practices
+              (e.g., partition exchange, atomic renames, or transactional deletes).
         """
         start_ts = current_timestamp(naive=True).isoformat(sep=" ")
         if self.write is None:

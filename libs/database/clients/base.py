@@ -23,11 +23,19 @@ class DBClient(ABC):
         Args:
             **config: Driver-specific configuration parameters.
 
-        Decision: Process-Level Isolation.
-        We initialize a threading Lock here because clients are often shared
+        Notes:
+        - We initialize a threading Lock here because clients are often shared
         singletons within a process. This prevents race conditions during
         lazy connection initialization, especially in multi-threaded
         environments or when used alongside Ray.
+
+        - We avoid initializing the pool in __init__ to prevent network
+        round-trips during object instantiation. This ensures that creating
+        a Client object is cheap and safe to perform on the Orchestrator.
+
+        - We default to a LockPool (Size 1) to protect legacy drivers that
+        are not thread-safe, ensuring system stability out-of-the-box.
+
         """
         self.config = config
         # Base lock to prevent concurrent access to process-level singletons
@@ -42,8 +50,8 @@ class DBClient(ABC):
         Returns:
             ConnectionPool: The active connection pool instance.
 
-        Decision: Lazy Binding.
-        We avoid initializing the pool in __init__ to prevent network
+        Notes:
+        - We avoid initializing the pool in __init__ to prevent network
         round-trips during object instantiation. This ensures that creating
         a Client object is cheap and safe to perform on the Orchestrator.
         """
@@ -58,8 +66,8 @@ class DBClient(ABC):
         Returns:
             ConnectionPool: A fallback LockPool for lean execution.
 
-        Decision: Safe Defaults.
-        We default to a LockPool (Size 1) to protect legacy drivers that
+        Notes:
+        - We default to a LockPool (Size 1) to protect legacy drivers that
         are not thread-safe, ensuring system stability out-of-the-box.
         """
         return LockPool(connector=self.connect)
@@ -82,8 +90,8 @@ class DBClient(ABC):
         Yields:
             Any: A database connection object.
 
-        Decision: Resource Guarding.
-        By using a context manager for leasing, we guarantee that connections
+        Notes:
+        - By using a context manager for leasing, we guarantee that connections
         are returned to the pool even if a query fails, preventing 'Connection
         Leak' outages in long-running ingestion jobs.
         """
@@ -161,8 +169,8 @@ class DBClient(ABC):
         Returns:
             pl.LazyFrame: The combined lazy representation of results.
 
-        Decision: Memory Safety.
-        We wrap the stream in a LazyFrame to allow Polars to perform
+        Notes:
+        - We wrap the stream in a LazyFrame to allow Polars to perform
         predicate pushdown and projection pushdown, which is vital for
         staying under the 2GB RAM ceiling when handling 50M rows.
         """

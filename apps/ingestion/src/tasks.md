@@ -1,20 +1,39 @@
-task context for regression testing
-Split Task into smaller components i.e TaskState
 incorporate data retention policies i.e. can keep data for 1 year
 [x] disable self-healing
-masking type
 error_handling / exception hook /.
-dry mode
+feature flags
+database mode: truncate / incremental (update_key) / snapshot / cdc
+ween off schema.csv. Use for validation app?
+  - rename columns
+  - primary key field
+  - remove masking feature. Better done downstream with role access
+  - select field
+  - columns fields
+client interfaces: bring them to the forefront
+saving to filesystem -> data lakes
+bash pipe input and output
+Core Type Mapping Engine
+
+
+
+<!-- masking type
+load from archive -->
+refine custom transform logic
+work on CD process. Can't proceed to K8S without this
+Why constantly evict expired run?
+
+
+dry run mode
+regression testing
+servicemonitor
+
+
 
 ### Planned Enhancements & Reliability
 
 - [ ] **Status Integrity**: Add automated validation in `TaskMetadata` ensuring the status in the key matches the serialized object state.
-- [ ] **Worker Lifecycle**: Implement a mechanism to gracefully terminate Ray workers when a task is cancelled.
-- [x] **Archive Verification**: Add explicit logging to `ArchiveStage.execute` to verify successful invocation within Ray workers.
 - [ ] **Queue Monitoring**: Implement 'queue age' tracking to issue `WARNING` logs for tasks stuck in `PENDING` for > 30 minutes.
 - [ ] **Priority Eviction**: Design priority-based eviction to reclaim resources (e.g., stopping an IO worker for a high-priority TRANSFORM task).
-- [ ] **Composite Policies**: Implement a `CompositePolicy` to support complex AND/OR logic for job execution rules.
-- [x] **Executor Automation**: Use a context manager in the `Executor` to automate `task.check_in` and success/failure signaling.
 - [ ] **PEX Integrity**: Implement `app doctor pex` to verify MD5 checksums against the S3 master code.
 - [ ] **Recovery Simulation**: Implement a 'dry-run' for the recovery command to preview resume stages without moving data.
 
@@ -56,19 +75,6 @@ Bash
 ln -sfn /opt/deploy/ingestion/$RELEASE_ID/app.pex /opt/deploy/current_app.pex
 Why: This turns your deployment into a "Blue-Green" style switch at the directory level, ensuring the "Current" pointer only ever points to something that can actually boot up.
 
-1. Cleanup Strategy: S3 vs. Server
-You have a cleanup job on the server (keeping last 5 releases), but does your S3 bucket also get cleaned up?
-
-The Improvement: Add a Lifecycle Policy to your LocalStack S3 bucket or a step in your cd.yaml to delete old versions in S3.
-
-Why: In a real cloud environment, storing every PEX version forever gets expensive. Matching the retention (5 versions) between S3 and the Server keeps your "Simulated Cloud" synchronized.
-
-1. PEX Layering Strategy (The "Cache" Check)
-In cd.yaml, you are building deps.pex on every single push. Since deps.pex contains your heavy libraries (Polars, etc.), it takes a long time to build and move.
-
-The Improvement: Only build and upload deps.pex if pyproject.toml or requirements.txt has changed.
-
-Why: In a real CI/CD pipeline, this can shave 5–10 minutes off every build. You can use a hashFiles('/pyproject.toml') check in GitHub Actions to see if you can skip the dependency build and just pull the "last known good" deps.pex from S3.
 
 1. Multi-Container Deployment (Parallelism)
 Your current script handles one app server. If you have both a DEV and a PROD container running:
@@ -84,12 +90,12 @@ port: ${{ github.event.inputs.environment == 'prod' && 2223 || 2222 }}
 Why: This allows the same workflow to target different containers based on your input, proving you can manage multi-stage environments from a single pipeline.
 
 1. Core Orchestrator Features & State Management
-Task State Refinement: Split the Task object into smaller, more granular components (e.g., TaskState) for better management and clarity.
 Data Retention Policies: Incorporate explicit data retention policies (e.g., for archived data, intermediate data) to manage storage lifecycle.
 Self-Healing Control: Implement mechanisms to selectively disable or configure self-healing behaviors.
 Masking Types: Add functionality for data masking (e.g., PII masking).
 Enhanced Error Handling: Implement more robust error handling and exception hooks across the pipeline.
 Dry Run Mode: Fully integrate and refine the dry run capabilities across all stages.
+
 2. Resilience & Limit Testing (Chaos Engineering)
 The test CLI app is currently commented out in apps/ingestion/**main**.py, so the first step is to enable it. Once enabled, the following roadmap items are pending:
 
@@ -146,18 +152,18 @@ These tests ensure individual classes behave correctly without requiring Ray or 
 
 Context Builder: Verify hierarchical lookup (Dataset > Job > App) and ${VAR} expansion.
 Format Handlers: Test ParquetHandler, CSVHandler, and JSONHandler with small edge-case files (BOMs, trailing commas, empty files).
-Admission Policies: Test StrictAdmission by mocking a cache and ensuring it blocks duplicate runs.
+Admission Policies: Test DenyDuplicateAdmission by mocking a cache and ensuring it blocks duplicate runs.
 Path Formulas: Verify TaskWorkspace.get_data_path returns the exact deterministic hierarchy you designed.
 Tier 2: Stateful Integration Testing (The "Workbench")
 These tests verify that the TaskWorkspace and Task objects manage the filesystem correctly.
 
 Lifecycle Markers: Provision a task, "check-in" to EXTRACT, and verify manifest.json reflects the change.
-Surgical Cleanup: Execute create_stage_marker and clear_stage_data, then verify the symlinks are relative and portable.
+Surgical Cleanup: Execute create_symlink and reset_data_dir, then verify the symlinks are relative and portable.
 Relocation: Mock a failure, call relocate("FAILED"), and verify the folder moves from active/ to FAILED/ while keeping its internal structure.
 Tier 3: Workflow Orchestration Testing (The "Scenario" Suite)
 This is where your ScenarioType in test.py comes into play. Instead of just manual CLI commands, these should be structured as automated tests.
 
-Happy Path: A mock source to a mock sink. Verify the bitmask is ALL_DONE.
+Happy Path: A mock source to a mock sink. Verify the bitmask is all.
 Recovery Workflow:
 Trigger a job.
 Simulate a failure at TRANSFORM (manually delete the folder or corrupt the manifest).
@@ -172,6 +178,7 @@ Backpressure: Spoil the CPU usage and verify Compute._can_fit returns False, hol
 
 **Boundary**: `CLI` ➔ `Daemon`
 **Goal**: Verify signal files are correctly prioritized and parsed.
+
 - **Test Case**: Ad-hoc run injection.
 - **Test Case**: Priority command processing (STOP vs RESUME).
 
@@ -179,6 +186,7 @@ Backpressure: Spoil the CPU usage and verify Compute._can_fit returns False, hol
 
 **Boundary**: `TaskManager` ➔ `Compute` ➔ `Ray`
 **Goal**: Ensure 2GB RAM limits and stage priorities are enforced.
+
 - **Test Case**: Backpressure (holding tasks in WAITING).
 - **Test Case**: Priority Dispatch (ARCHIVE tasks leapfrog EXTRACT tasks).
 
@@ -186,6 +194,7 @@ Backpressure: Spoil the CPU usage and verify Compute._can_fit returns False, hol
 
 **Boundary**: `Ray Worker` ➔ `TaskWorkspace` ➔ `Filesystem`
 **Goal**: Verify deterministic pathing and symlink portability.
+
 - **Test Case**: Hierarchical data vault creation (`data/job/ds/date/run`).
 - **Test Case**: Relative symlink verification (portable across Pods).
 
@@ -193,6 +202,7 @@ Backpressure: Spoil the CPU usage and verify Compute._can_fit returns False, hol
 
 **Boundary**: `TaskWorkspace` ➔ `SignalProcessor` ➔ `Orchestrator`
 **Goal**: Ensure the "Tick" triggers only when work is physically complete.
+
 - **Test Case**: Zero-byte signal detection (.done, .fail).
 - **Test Case**: Signal coalescing (handling multiple completions in one tick).
 
@@ -200,13 +210,13 @@ Backpressure: Spoil the CPU usage and verify Compute._can_fit returns False, hol
 
 **Boundary**: `Janitor` ➔ `StateStore` ➔ `Filesystem`
 **Goal**: Ensure surgical recovery doesn't leave "ghost" markers.
+
 - **Test Case**: Rewind integrity (purging markers forward of the resume point).
 - **Test Case**: TTL Expiry (Recursive folder cleanup in data vault).
-
-
 
 **Boundary**: `CLI` ➔ `Daemon`
 **Goal**: Verify signal files are correctly prioritized and parsed.
+
 - **Test Case**: Ad-hoc run injection.
 - **Test Case**: Priority command processing (STOP vs RESUME).
 - **Test Case**: Backpressure (holding tasks in WAITING).
@@ -237,3 +247,32 @@ Backpressure: Spoil the CPU usage and verify Compute._can_fit returns False, hol
 
 **Boundary**: `Janitor` ➔ `StateStore` ➔ `Filesystem`
 **Goal**: Ensure surgical recovery doesn't leave "ghost" markers.
+
+Here's what we need to do:
+
+1. Add google style docstrings to each method / function
+
+- For short simple functions, a one line docstring is fine
+- For complex functions, provide the full docstring (including args, returns, examples).
+- Especially for architectural decisions, includes notes on the decisions made.
+
+2. Create unit tests for each module.
+- Please avoid writing brittle tests.
+- Only for unit test docstrings, use the GIVEN-THEN-WHEN pattern.
+- Keep to the char per line limit.
+
+3. Could you help to improve / simplify / reduce this code? Feel free to rename the functions if deem appropriate. I think the names can be better
+For Context:
+
+- Here's the regression testing process:
+  - We need two tables, hence the need for the clone table, one for each run.
+  - Baseline run loads into clone table
+  - Candidate run loads into the other table
+  - Then we compare datasets from the two table and generate a datacompy style report
+  - Then we drop the table for the candidate run so that for subsequent testing, we only need to do the candidate run and we can compare the dataset.
+  - NOTE: I want a datacompy style report but not use datacompy for the comparision!!
+- Let's pass the test date via run().
+- The environments are isloated so baseline_env and candidate_env will always be the same.
+- For cleanup, we will need the option to drop both cloned tables, just the candidate table or just the baseline table.
+
+1. Would you recommend a final cleanup method that we can trigger separately once we are done with regression testing? Or perhaps a generic drop table cli command that drops any specified table?
