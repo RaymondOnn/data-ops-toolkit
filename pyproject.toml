@@ -7,6 +7,7 @@ dependencies = [
     "uv",
     "ruff",
     "pyright",
+    "pyrefly",
     "pre-commit",
     "pip-audit",
     "pytest>=9.0.3",
@@ -15,10 +16,13 @@ dependencies = [
     "ingestion",
 ]
 
+# ****** UV (Universal Versioning) *****
+
 [tool.uv]
 # Self-healing: Force the workspace to stable Polars versions to avoid yanked 1.39.2
 override-dependencies = ["polars>=1.21.0"]
 exclude-newer = "7 days" # counter supply chain attacks
+
 
 [tool.uv.sources] # local workspace packages
 ingestion = { workspace = true }
@@ -33,12 +37,50 @@ storage = { workspace = true }
 queue = { workspace = true }
 network = { workspace = true }
 
-
 [tool.uv.workspace]
 # Define the workspace members
 members = ["apps/*", "libs/*"]
 exclude = ["**/__pycache__", "**/.pytest_cache", "**/node_modules"]
 
+
+# ***** PYREFLY *****
+
+[tool.pyrefly]
+# Exclude test directories and files ending in _test.py / test_*.py
+project-includes = [
+    "apps",
+    "libs",
+]
+project-excludes = [
+    "**/tests/**",
+    "**/test_*.py",
+    "**/*_test.py"
+]
+ignore = [
+    "**/tests/*",
+    "**/test_*.py",
+    "**/*_test.py"
+]
+search-path = [
+    "apps/ingestion",
+    "libs/file",
+    "libs",
+    ".",
+]
+python-version = "3.11.0"
+infer-with-first-use = false
+
+[tool.pyrefly.errors]
+missing-import = "error"
+untyped-import = "ignore"
+
+[[tool.pyrefly.sub-config]]
+matches = "apps/ingestion/src"
+
+[[tool.pyrefly.sub-config]]
+matches = "libs"
+
+# ***** PYRIGHT (Ty) *****
 
 [tool.pyright] # Using Ty (Pyright)
 include = ["apps", "libs"]
@@ -62,6 +104,8 @@ executionEnvironments = [
   { root = "apps/ingestion/src" }, # Maps 'src.core' -> 'apps/ingestion/src/core'
   { root = "libs" }                # Maps 'file.client' -> 'libs/file/client'
 ]
+
+# ***** RUFF *****
 
 [tool.ruff]
 line-length = 88
@@ -139,8 +183,10 @@ ignore = [
 # https://github.com/google/styleguide/blob/gh-pages/pyguide.md#38-comments-and-docstrings
 convention = "google"
 
-[tool.pytest.ini_options]
 
+# ***** PYTEST ****
+
+[tool.pytest.ini_options]
 minversion = "7.0"                              # Minimum pytest version
 pythonpath = ["apps/ingestion/src", "libs"]     # Add current directory to Python path
 addoptions = [

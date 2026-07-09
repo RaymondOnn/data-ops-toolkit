@@ -53,10 +53,10 @@ jobs:
         if: always() && steps.pip_audit.outcome == 'failure'
         run: echo "::warning title=pip-audit Failed::Vulnerabilities were found in your dependencies."
 
-      - name: Run Ty (Type Check)
+      - name: Run Type Check)
         # ty reads the [tool.pyright] section in pyproject.toml automatically.
         # Do not pass "." as an argument.
-        run: uv run ty
+        run: uv run pyrefly check
         continue-on-error: true
 
       # 4. Inject a yellow warning if type check failed
