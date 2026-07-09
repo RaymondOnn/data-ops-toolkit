@@ -21,7 +21,6 @@ inputs:
 runs:
   using: "composite"
   steps:
-    steps:
     - name: Resolve Python version
       id: python-version
       shell: bash
