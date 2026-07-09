@@ -8,8 +8,10 @@ dependencies = [
     "ruff",
     "pyright",
     "pre-commit",
-    "pytest>=9.0.2",
+    "pip-audit",
+    "pytest>=9.0.3",
     "rust-just",
+    "cryptography>=46.0.7",
     "ingestion",
 ]
 

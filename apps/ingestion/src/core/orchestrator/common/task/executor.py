@@ -111,9 +111,9 @@ class Executor:
             },
         )
         self.queue = TaskQueue(self.exec_ctx.task_queue_config)
-        self.is_busy = False
-        self.handlers = OutcomeHandlers(self)
         self.timeout = TimeoutMonitor()
+        self.handlers = OutcomeHandlers(self)
+        self.is_busy = False
 
         ServiceMonitor.setup(
             signal_dir=self.exec_ctx.signal_path,

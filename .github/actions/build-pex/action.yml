@@ -18,6 +18,7 @@ runs:
       uses: ./.github/actions/setup-uv
       with:
         python-version: ${{ inputs.python-version }}
+        uv-version-file: "cicd/uv.version"
 
     - name: Install PEX Builder
       shell: bash

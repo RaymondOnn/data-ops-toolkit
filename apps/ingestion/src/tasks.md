@@ -4,30 +4,27 @@ error_handling / exception hook /.
 feature flags
 database mode: truncate / incremental (update_key) / snapshot / cdc
 ween off schema.csv. Use for validation app?
-  - rename columns
-  - primary key field
-  - remove masking feature. Better done downstream with role access
-  - select field
-  - columns fields
+
+- rename columns
+- primary key field
+- remove masking feature. Better done downstream with role access
+- select field
+- columns fields
 client interfaces: bring them to the forefront
 saving to filesystem -> data lakes
 bash pipe input and output
 Core Type Mapping Engine
-
-
 
 <!-- masking type
 load from archive -->
 refine custom transform logic
 work on CD process. Can't proceed to K8S without this
 Why constantly evict expired run?
-
+check updates
 
 dry run mode
 regression testing
 servicemonitor
-
-
 
 ### Planned Enhancements & Reliability
 
@@ -74,7 +71,6 @@ Bash
 
 ln -sfn /opt/deploy/ingestion/$RELEASE_ID/app.pex /opt/deploy/current_app.pex
 Why: This turns your deployment into a "Blue-Green" style switch at the directory level, ensuring the "Current" pointer only ever points to something that can actually boot up.
-
 
 1. Multi-Container Deployment (Parallelism)
 Your current script handles one app server. If you have both a DEV and a PROD container running:
@@ -256,12 +252,13 @@ Here's what we need to do:
 - For complex functions, provide the full docstring (including args, returns, examples).
 - Especially for architectural decisions, includes notes on the decisions made.
 
-2. Create unit tests for each module.
+1. Create unit tests for each module.
+
 - Please avoid writing brittle tests.
 - Only for unit test docstrings, use the GIVEN-THEN-WHEN pattern.
 - Keep to the char per line limit.
 
-3. Could you help to improve / simplify / reduce this code? Feel free to rename the functions if deem appropriate. I think the names can be better
+1. Could you help to improve / simplify / reduce this code? Feel free to rename the functions if deem appropriate. I think the names can be better
 For Context:
 
 - Here's the regression testing process:

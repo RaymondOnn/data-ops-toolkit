@@ -27,6 +27,7 @@ jobs:
         uses: ./.github/actions/setup-uv
         with:
           python-version-file: "cicd/python.version"
+          uv-version-file: "cicd/uv.version"
 
 
       # - name: Verify PEX Reproducibility

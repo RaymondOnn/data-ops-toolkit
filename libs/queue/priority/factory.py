@@ -5,7 +5,6 @@ from typing import ClassVar
 
 from .base import PriorityQueue
 from .diskcache import DiskcacheQueue
-from .flashq import FlashQQueue
 from .postgres import SQLQueue
 from .redis import RedisPriorityQueue
 
@@ -13,7 +12,6 @@ LOG = logging.getLogger(__name__)
 
 
 class QueueType(StrEnum):
-    FLASHQ = "flashq"
     DISKCACHE = "diskcache"
     REDIS = "redis"
     POSTGRES = "postgres"
@@ -34,8 +32,6 @@ class QueueFactory:
         """Create a priority queue instance."""
 
         match queue_type:
-            case QueueType.FLASHQ:
-                return FlashQQueue.from_dict(kwargs)
             case QueueType.DISKCACHE:
                 directory = kwargs.get("directory")
                 if not directory:
@@ -59,7 +55,7 @@ class QueueFactory:
 
     @classmethod
     def get_or_create(
-        cls, name: str, queue_type: QueueType = QueueType.FLASHQ, **kwargs
+        cls, name: str, queue_type: QueueType = QueueType.DISKCACHE, **kwargs
     ) -> PriorityQueue:
         """Get or create a singleton queue instance."""
         if name not in cls._queues:
