@@ -2,7 +2,7 @@ import logging
 from collections.abc import Generator
 from typing import Any
 
-from .base import PriorityQueue, TaskMessage
+from .base import Message, PriorityQueue
 
 LOG = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ class RedisPriorityQueue(PriorityQueue):
         # Sorted set with priority as score (lower = higher priority)
         self.redis.zadd(self.queue_key, {json.dumps(payload): priority})
 
-    def pop(self, visibility_timeout: int = 300) -> TaskMessage | None:
+    def pop(self, visibility_timeout: int = 300) -> Message | None:
         """Pop highest priority using atomic Lua script."""
         import json
 
@@ -76,7 +76,7 @@ class RedisPriorityQueue(PriorityQueue):
             return None
 
         payload = json.loads(result)
-        return TaskMessage(
+        return Message(
             id_=payload["id"], data=payload["data"], metadata=payload["metadata"]
         )
 

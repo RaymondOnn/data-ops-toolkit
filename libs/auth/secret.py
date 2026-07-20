@@ -6,7 +6,6 @@ import threading
 import time
 from typing import Any
 
-from .log import mask_in_logs
 from .provider import SecretProvider
 
 LOG = logging.getLogger(__name__)
@@ -26,8 +25,13 @@ class Secret:
             if not self._provider:
                 raise ValueError(f"No provider for secret: {self.secret_id}")
             self._value = self._provider.get(self.secret_id)
-            if self._value:
-                mask_in_logs(self._value)
+            # if self._value:
+            #     mask_in_logs(self._value)
+            # else:
+            if not self._value:
+                raise ValueError(
+                    f"Corresponding value not found for secret_id: {self.secret_id}"
+                )
 
         if url_encode:
             import urllib.parse

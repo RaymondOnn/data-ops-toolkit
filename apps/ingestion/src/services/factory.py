@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from apps.ingestion.src.utils.exceptions import TryAgainLater
@@ -6,7 +7,6 @@ from libs.auth.factory import AuthFactory, SecretProvider
 from libs.auth.secret import Secret
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitOpen
-from libs.utils.dict import find_keys_by_pattern, set_nested_key
 from libs.utils.exceptions import AuthFailure, HostUnreachable
 from loguru import logger
 
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from libs.storage.cache import Cache
 
 LOG = logger
+SECRET_PROTOCOL = "secret://"
 
 
 class ServiceNotFound(Exception):
@@ -60,21 +61,15 @@ class ServiceFactory:
 
     @classmethod
     def get_task_queue(cls, config: dict[str, Any]) -> "PriorityQueue":
-        from libs.queue.priority.factory import QueueFactory, QueueType
+        from libs.queue.priority.factory import QueueFactory
 
-        queue_type = config["type"]
-        return QueueFactory.create(
-            queue_type=QueueType(queue_type),
-            **config,
-        )
+        return QueueFactory.create(**config)
 
     @classmethod
     def get_cache(cls, config: dict[str, Any]) -> "Cache":
         from libs.storage.cache.factory import CacheFactory
 
-        cache_type = config["type"]
-
-        return CacheFactory.create(cache_type, **config)
+        return CacheFactory.create(**config)
 
     @classmethod
     def _make_hashable(cls, value: Any) -> Any:
@@ -86,18 +81,20 @@ class ServiceFactory:
         return value
 
     @classmethod
-    def get(cls, service_type: str, flags: Any | None = None, **config) -> Any:
+    def get(cls, flags: Any | None = None, **config) -> Any:
         """Get or create a service instance with feature flag support."""
-        effective_type = service_type
+        service_key = config.get("key")
+        if not service_key:
+            raise ValueError(f"Service key is required: {service_key}")
 
         # FEATURE TOGGLE: Benchmark mode swaps service for experimental one
         if (flags and getattr(flags, "benchmark_mode", False)) and (
             experimental := getattr(flags, "experimental_sink_type", None)
         ):
-            effective_type = experimental
-            LOG.info(f"🚀 BENCHMARK MODE: Swapping {service_type} -> {effective_type}")
+            new_service_key = experimental
+            LOG.info(f"🚀 BENCHMARK MODE: Swapping {service_key} -> {new_service_key}")
 
-        key = effective_type.casefold()
+        key = service_key.casefold()
         if key not in cls._registry:
             raise ServiceNotFound(f"No service registered for: {key}")
 
@@ -114,25 +111,24 @@ class ServiceFactory:
     def _create(cls, key: str, config: dict) -> Any:
         """Create new service instance with secret resolution."""
 
-        # Automatically resolve secret identifiers into Secret objects
-        has_secrets_keys = False
-        config_copy = {}
-        for path, value in find_keys_by_pattern(
-            config, pattern="secret|password", ignore_case=True
-        ):
-            has_secrets_keys = True
-            # If we have a provider and the value is a string, wrap it
-            if isinstance(value, str):
+        config_copy = deepcopy(config)
+
+        # Iterate over the flat config key-value pairs directly
+        for k, value in config.items():
+            # Case 1: Value is a string explicitly requesting secret resolution
+            if isinstance(value, str) and value.startswith(SECRET_PROTOCOL):
                 if not cls._provider:
                     raise ValueError(f"SecretProvider required to resolve: {value}")
-                secret_obj = Secret(secret_id=value, provider=cls._provider)
-                config_copy = set_nested_key(config, path, "password", secret_obj)
-            # Ensure existing Secret instances are mapped to the 'password' key
-            elif isinstance(value, Secret):
-                config_copy = set_nested_key(config, path, "password", value)
 
-        if not has_secrets_keys:
-            LOG.warning(f"No secret keys found in config: {config}")
+                secret_id = value.replace(SECRET_PROTOCOL, "", 1)
+                secret_obj = Secret(secret_id=secret_id, provider=cls._provider)
+
+                # Assign using the definitive key name directly
+                config_copy[k] = secret_obj
+
+            # Case 2: Pass through already constructed Secret instances safely
+            elif isinstance(value, Secret):
+                config_copy[k] = value
 
         try:
             return cls._registry[key](name=key, **config_copy)
@@ -159,20 +155,16 @@ class ServiceFactory:
         return target_cls is not None and issubclass(target_cls, StorageSource)
 
     @classmethod
-    def get_source(
-        cls, service_type: str, flags: Any | None = None, **config
-    ) -> Source:
+    def get_source(cls, flags: Any | None = None, **config) -> Source:
         """Get a Source service."""
-        return cls.get(service_type, flags=flags, **config)
+        return cls.get(flags=flags, **config)
 
     @classmethod
-    def get_sink(cls, service_type: str, flags: Any | None = None, **config) -> Sink:
+    def get_sink(cls, flags: Any | None = None, **config) -> Sink:
         """Get a Sink service."""
-        return cls.get(service_type, flags=flags, **config)
+        return cls.get(flags=flags, **config)
 
     @classmethod
-    def get_archive(
-        cls, service_type: str, flags: Any | None = None, **config
-    ) -> Archive:
+    def get_archive(cls, flags: Any | None = None, **config) -> Archive:
         """Get an Archive service."""
-        return cls.get(service_type, flags=flags, **config)
+        return cls.get(flags=flags, **config)

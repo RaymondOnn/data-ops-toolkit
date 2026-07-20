@@ -1,7 +1,5 @@
 from apps.ingestion.src.core.contexts import ExecutionContext, TaskContextBuilder
-from apps.ingestion.src.services.factory import ServiceFactory
-
-from .common import (
+from apps.ingestion.src.core.orchestrator.common import (
     Janitor,
     Orchestrator,
     SignalScanner,
@@ -9,6 +7,8 @@ from .common import (
     TaskManager,
     TimeoutMonitor,
 )
+from apps.ingestion.src.services.factory import ServiceFactory
+
 from .modes import DaemonRuntime, TriggerRuntime
 
 
@@ -22,7 +22,7 @@ def assemble_runtime(
     exec_ctx.provider_config = builder.app_settings.get("secret_provider").to_dict()
 
     ServiceFactory.get_provider(exec_ctx.provider_config)
-    db_config = builder.app_settings.get("meta_db.service", {}).to_dict()
+    db_config = builder.app_settings.get("meta_db.connection", {}).to_dict()
 
     # 1. Build common baseline infrastructure
     signal_processor = SignalScanner(exec_ctx=exec_ctx)

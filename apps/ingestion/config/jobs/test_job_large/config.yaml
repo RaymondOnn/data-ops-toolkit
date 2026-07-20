@@ -12,7 +12,7 @@ default:
           offset:
             days: -1
       extract:
-        load_mode: "snapshot"
+        load_mode: "append"
         service_ref: "file"
         source_params:
           type: file

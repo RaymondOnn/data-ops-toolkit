@@ -163,6 +163,12 @@ class Orchestrator:
         run_id: str | None = None,
     ) -> set[str]:
         """Start a new job or task."""
+        LOG.trace(
+            "[DISPATCH] start job",
+            job_id=job_id,
+            dataset_id=dataset_id,
+            partition_date=partition_date,
+        )
         run_ids = set()
         contexts = self.builder.build(
             job_id=job_id,
@@ -173,41 +179,72 @@ class Orchestrator:
 
         for ctx in contexts:
             run_id = run_id or generate_run_id()
-            identity = TaskIdentity(
-                job_id=ctx.job_id,
-                dataset_id=ctx.dataset_id,
-                partition_date=ctx.partition_date,
-                run_id=run_id,
-            )
             task_ref = TaskRef(
                 namespace=CACHE_TASK_NAMESPACE,
                 status=ExecutionStatus.PROVISIONED,
                 stage=ctx.from_stage,
-                identity=identity,
+                identity=TaskIdentity(
+                    job_id=ctx.job_id,
+                    dataset_id=ctx.dataset_id,
+                    partition_date=ctx.partition_date,
+                    run_id=run_id,
+                ),
             )
 
-            LOG.info(f"Provisioning task: {run_id}")
+            LOG.info(
+                f"Provisioning task: {run_id}",
+                job_id=ctx.job_id,
+                dataset_id=ctx.dataset_id,
+                partition_date=ctx.partition_date,
+            )
 
             # Persist config
             config_path = (
                 self.exec_ctx.active_path
-                / f"{identity.task_key}:{run_id}_{CONFIG_FILENAME}"
+                / f"{task_ref.id_key}:{run_id}_{CONFIG_FILENAME}"
             )
             config_path.write_bytes(msgspec.json.encode(ctx))
 
             # Register and provision
-            self.state.add_task(task_ref)
+            self.state.update_task(
+                run_id=run_id,
+                updates={
+                    "JOB_ID": ctx.job_id,
+                    "DATASET_ID": ctx.dataset_id,
+                    "PARTITION_DATE": ctx.partition_date,
+                    "RUN_ID": run_id,
+                    "CURRENT_STAGE": ctx.from_stage,
+                    "JOB_STATUS": ExecutionStatus.PROVISIONED,
+                    "LAST_UPDATED_AT_TS_LC": current_timestamp().isoformat(sep=" "),
+                },
+            )
             task = Task(
                 task_ref=task_ref, worker_id="orchestrator", exec_ctx=self.exec_ctx
             )
             task.workspace.create(config_path)
+            LOG.trace(
+                "[DISPATCH] workspace created",
+                run_id=run_id,
+                path=str(task.workspace.path),
+            )
 
             # Queue for execution
             queued = self.tasks.enqueue(task_ref, str(config_path))
             if queued:
+                LOG.trace(
+                    "[DISPATCH] task queued", run_id=run_id, status=queued.status.value
+                )
                 self.state.update_task(
                     run_id,
-                    {"JOB_STATUS": queued.status.value, "CURRENT_STAGE": queued.stage},
+                    {
+                        "JOB_ID": ctx.job_id,
+                        "DATASET_ID": ctx.dataset_id,
+                        "PARTITION_DATE": ctx.partition_date,
+                        "RUN_ID": run_id,
+                        "JOB_STATUS": queued.status.value,
+                        "CURRENT_STAGE": queued.stage,
+                        "LAST_UPDATED_AT_TS_LC": current_timestamp().isoformat(sep=" "),
+                    },
                 )
 
             run_ids.add(run_id)

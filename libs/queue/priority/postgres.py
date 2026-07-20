@@ -6,7 +6,7 @@ from typing import Any
 import msgspec
 from libs.database.clients.postgres import PostgresClient
 
-from .base import PriorityQueue, TaskMessage
+from .base import Message, PriorityQueue
 
 LOG = logging.getLogger(__name__)
 
@@ -102,7 +102,7 @@ class SQLQueue(PriorityQueue):
         self.client.sql(insert_sql)
         LOG.debug(f"Pushed task with priority {priority}, group={group}")
 
-    def pop(self, visibility_timeout: int = 300) -> TaskMessage | None:
+    def pop(self, visibility_timeout: int = 300) -> Message | None:
         """Atomic pop using SKIP LOCKED via PostgresClient."""
         # Use PostgreSQL's SKIP LOCKED for atomic dequeue
         pop_sql = f"""
@@ -136,7 +136,7 @@ class SQLQueue(PriorityQueue):
             data = json.loads(row[1])
             metadata = json.loads(row[2]) if row[2] else {}
 
-            return TaskMessage(id_=task_id, data=data, metadata=metadata)
+            return Message(id_=task_id, data=data, metadata=metadata)
 
         except Exception as e:
             LOG.error(f"Failed to pop task: {e}")

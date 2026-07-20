@@ -9,6 +9,7 @@ from typing import Any
 import msgspec
 from apps.ingestion.src.core.contexts import ExecutionContext
 from apps.ingestion.src.core.models.stages.enums import Stage
+from apps.ingestion.src.core.models.task.enums import TaskIdentity
 from apps.ingestion.src.core.models.task.manifest import TaskManifest
 from apps.ingestion.src.core.models.task.status import ExecutionStatus
 from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
@@ -98,8 +99,6 @@ class TaskWorkspace:
 
         Lazy-loaded to avoid circular imports.
         """
-        from .enums import TaskIdentity
-
         return TaskIdentity(
             job_id=self.job_id,
             dataset_id=self.dataset_id,
@@ -241,7 +240,7 @@ class TaskWorkspace:
         # Delete orphaned config seed
         root_config = (
             self.exec_ctx.active_path
-            / f"{self._identity.identifier}:{self.run_id}_{CONFIG_FILENAME}"
+            / f"{self._identity.key}:{self.run_id}_{CONFIG_FILENAME}"
         )
         root_config.unlink(missing_ok=True)
 

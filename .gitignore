@@ -15,7 +15,8 @@ __pycache__
 *.egg-info/
 **/.secrets.json
 **/.env
-mock_data/test_large_job.zip
+mock_data/
+**/mock_data/**
 
 # Infrastructure temporary files
 **/infra/**/.tmp/

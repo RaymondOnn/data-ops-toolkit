@@ -1,7 +1,10 @@
 """Task manifest data structures for stage payloads."""
 
+from pathlib import Path
+
 import msgspec
 from apps.ingestion.src.core.models.task.status import ExecutionStatus
+from apps.ingestion.src.utils.constants import MANIFEST_FILENAME
 from libs.utils.dates import current_timestamp
 from msgspec import field
 
@@ -61,7 +64,7 @@ class WritePayload(StagePayload):
     staging_artifact: str
     sink_type: str
     write_count: int
-    partition_by: str
+    partition_on: str
     partition_value: str
     destination: str
 
@@ -127,3 +130,17 @@ class TaskManifest(msgspec.Struct, kw_only=True):
             getattr(self, stage)
             for stage in ["extract", "transform", "write", "publish", "archive"]
         )
+
+    @classmethod
+    def from_path(
+        cls, folder_path: Path | str | None = None, filepath: Path | str | None = None
+    ):
+        if filepath and (path := Path(filepath)).is_file():
+            manifest_file = path
+        elif folder_path and (path := Path(folder_path)).is_dir():
+            manifest_file = path / MANIFEST_FILENAME
+
+        if not manifest_file.exists():
+            raise FileNotFoundError(f"Failed to load manifest file: {path}")
+
+        return msgspec.json.decode(manifest_file.read_bytes(), type=TaskManifest)

@@ -19,11 +19,11 @@ LOG = logger
 # Stage defaults (fallback when no history)
 STAGE_DEFAULTS: dict[str, float] = {
     "extract": 900,
-    "extract_snapshot": 1800,
+    "extract_append": 1800,
     "validate": 300,
     "transform": 1200,
     "load": 1800,
-    "load_snapshot": 2700,
+    "load_append": 2700,
     "cleanup": 300,
     "index": 600,
 }
@@ -90,7 +90,7 @@ class TimeoutMonitor:
 
     Phase 3: DIFFERENT JOB, SAME DATASET
     -------------------------------------
-    1. Task with different job_id (e.g., snapshot) uses same dataset_id
+    1. Task with different job_id (e.g., append) uses same dataset_id
     2. ensure_dataset_timeouts(new_job_id, dataset_id) called
        └─> Cache check: new_job_id/dataset_id NOT in _timeout_cache
        └─> _pre_fetch_stage_timeouts(new_job_id, dataset_id)
@@ -149,7 +149,7 @@ class TimeoutMonitor:
         """
         Combined cache structure:
         _timeout_cache = {
-            "job_extract_snapshot": {                 # job_id level
+            "job_extract_append": {                 # job_id level
                 "dataset_456": {                      # dataset_id level
                     "extract": (900.0, 1234567890.0),      # (timeout, timestamp)
                     "transform": (1200.0, 1234567890.0),
@@ -160,7 +160,7 @@ class TimeoutMonitor:
                     "transform": (800.0, 1234567890.0),
                 }
             },
-            "job_snapshot": {                         # Different job_id
+            "job_append": {                         # Different job_id
                 "dataset_456": {                      # Same dataset, different job
                     "extract": (1800.0, 1234567890.0),     # Different timeout!
                     "transform": (2400.0, 1234567890.0),
@@ -174,7 +174,7 @@ class TimeoutMonitor:
         Track active task counts: "job_id:dataset_id" -> active_task_count
         This prevents premature cache release when multiple tasks run concurrently
         for the same job/dataset combination.
-        Example: {"job_extract_snapshot:dataset_456": 3}
+        Example: {"job_extract_append:dataset_456": 3}
         """
         self._active_task_counts: dict[str, int] = {}
 
@@ -186,9 +186,8 @@ class TimeoutMonitor:
         """Lazy-loaded database client."""
         if self._db is None:
             config = self.db_config.copy()
-            service_type = config.pop("type", "postgres")
-            LOG.debug("Initializing database client", service_type=service_type)
-            self._db = ServiceFactory.get(service_type=service_type, **config)
+            LOG.debug("Initializing database client", service_type=config.get("key"))
+            self._db = ServiceFactory.get(**config)
         return self._db
 
     # ========================================================================
@@ -304,7 +303,7 @@ class TimeoutMonitor:
 
         This is called only on cache miss or refresh.
 
-        NOTE: The job_id parameter is the pipeline name (e.g., "extract_snapshot")
+        NOTE: The job_id parameter is the pipeline name (e.g., "extract_append")
         and is used to filter historical data for that specific job type.
         """
         stages = list(ALL_STAGES)
@@ -331,7 +330,7 @@ class TimeoutMonitor:
                 ) t
                 GROUP BY JOB_ID
             """
-            # Note: job_id here is the pipeline name (e.g., "extract_snapshot")
+            # Note: job_id here is the pipeline name (e.g., "extract_append")
             # The first %s is the job_id from the task, second is dataset_id
             params = [job_id, dataset_id, *stages]
             results = self.db.fetch(query, params)

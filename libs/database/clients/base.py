@@ -177,26 +177,6 @@ class DBClient(ABC):
         return pl.concat(self.fetch_df(query), how="vertical").lazy()
 
     @abstractmethod
-    def partition_load(
-        self,
-        table_name: str,
-        num_workers: int = 10,
-        filter_condition: str | None = None,
-    ) -> set[str]:
-        """
-        Generates a set of partitioned queries for parallel loading.
-
-        Args:
-            table_name: Fully qualified name of the source table.
-            num_workers: Number of parallel loaders/workers.
-            filter_condition: Optional filter condition.
-
-        Returns:
-            set[str]: A set of query strings for distributed execution.
-        """
-        raise NotImplementedError("Subclasses must implement this method")
-
-    @abstractmethod
     def get_schema(self, fq_table: str) -> pl.DataFrame:
         """
         Retrieves the physical schema from the database system tables.

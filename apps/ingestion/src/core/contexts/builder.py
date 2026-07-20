@@ -3,20 +3,21 @@
 import os
 import re
 from collections import ChainMap
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import msgspec
 import pendulum
-from apps.ingestion.src.core.contexts.execution import ExecutionContext, ExecutionMode
-from apps.ingestion.src.core.contexts.task import (
-    ArchiveConfig,
-    ColumnMapping,
-    ExtractConfig,
-    LoadConfig,
-    TaskContext,
-    TransformConfig,
+from apps.ingestion.src.core.contexts.execution import (
+    ExecutionContext,
+    ExecutionMode,
+    RayMode,
 )
+from apps.ingestion.src.core.contexts.task import TaskContext
+from apps.ingestion.src.core.models.stages.enums import ALL_STAGES, Stage
+from apps.ingestion.src.extras.hooks import HookAction, StageHooks
+from apps.ingestion.src.services.factory import SECRET_PROTOCOL
 from apps.ingestion.src.utils.constants import (
     APP_CONFIG_ROOT,
     APP_CURRENT_ENV,
@@ -25,10 +26,9 @@ from apps.ingestion.src.utils.constants import (
 from dynaconf import Dynaconf, LazySettings
 from dynaconf.utils.boxing import DynaBox
 from libs.utils.dates import current_timestamp
-from libs.utils.dict import find_keys_by_pattern, set_nested_key
+from libs.utils.dict import find_keys_by_pattern, flatten_dict, set_nested_key
+from libs.utils.file import is_path_like
 from loguru import logger
-
-from .execution import RayMode
 
 LOG = logger
 DEFAULT_CONFIG_PATH = APP_CONFIG_ROOT / "defaults.yaml"
@@ -36,7 +36,8 @@ APP_CONFIG_PATH = APP_CONFIG_ROOT / "app.yaml"
 SERVICES_CONFIG_PATH = APP_CONFIG_ROOT / "services.yaml"
 JOB_CONFIG_DIR = APP_CONFIG_ROOT / "jobs"
 SERVICE_REF_OLD_KEY = "service_ref"
-SERVICE_REF_NEW_KEY = "service"
+SERVICE_REF_NEW_KEY = "connection"
+PATH_PREFIX_BLACKLIST = (SECRET_PROTOCOL, "http://", "https://", "s3://")
 
 
 def interpolate_env_vars(value: Any) -> Any:
@@ -182,13 +183,48 @@ class TaskContextBuilder:
         Returns:
             ExecutionContext: The initialized execution context.
         """
-        workspace = Path(self.app_settings.get("workspace_dir")).expanduser().resolve()
+        # 1. Gather all raw settings bound for the execution context into a raw dict
+        raw_exec_data = {
+            "workspace_dir": self.app_settings.get("workspace_dir"),
+            "code_pex_path": self.app_settings.get("code_pex_path"),
+            "deps_pex_path": self.app_settings.get("deps_pex_path"),
+            "cache_config": (
+                self.app_settings.get("cache", {}).to_dict()
+                if hasattr(self.app_settings.get("cache", {}), "to_dict")
+                else self.app_settings.get("cache", {})
+            ),
+            "task_queue_config": (
+                self.app_settings.get("task_queue", {}).to_dict()
+                if hasattr(self.app_settings.get("task_queue", {}), "to_dict")
+                else self.app_settings.get("task_queue", {})
+            ),
+            "provider_config": (
+                self.app_settings.get("secret_provider", {}).to_dict()
+                if hasattr(self.app_settings.get("secret_provider", {}), "to_dict")
+                else self.app_settings.get("secret_provider", {})
+            ),
+        }
+
+        # 2. Provide base temporal/context variables to handle any {YYYY} or paths
+        now = datetime.now()
+        context_variables = {
+            "workspace_dir": str(self.app_settings.get("workspace_dir", "")),
+            "YYYY": now.strftime("%Y"),
+            "MM": now.strftime("%m"),
+            "DD": now.strftime("%d"),
+        }
+
+        # 3. Safe mutation step on the pure primitives first
+        resolved_exec_data = self.resolve_strings(raw_exec_data, context_variables)
+
+        # 4. Handle directory generation using fully evaluated string values
+        workspace = Path(resolved_exec_data["workspace_dir"]).expanduser().resolve()
         workspace.mkdir(parents=True, exist_ok=True)
 
-        # Resolve PEX paths if configured
-        code_pex = self.app_settings.get("code_pex_path")
-        deps_pex = self.app_settings.get("deps_pex_path")
+        code_pex = resolved_exec_data["code_pex_path"]
+        deps_pex = resolved_exec_data["deps_pex_path"]
 
+        # 5. Instantiate your strongly typed dataclass/msgspec container safely
         return ExecutionContext(
             workspace_dir=workspace,
             timezone=self.app_settings.get("timezone"),
@@ -197,9 +233,9 @@ class TaskContextBuilder:
             env=self.env,
             code_pex_path=Path(code_pex) if code_pex else None,
             deps_pex_path=Path(deps_pex) if deps_pex else None,
-            cache_config=self.app_settings.get("cache", {}).to_dict(),
-            task_queue_config=self.app_settings.get("task_queue", {}).to_dict(),
-            provider_config=self.app_settings.get("secret_provider", {}).to_dict(),
+            cache_config=resolved_exec_data["cache_config"],
+            task_queue_config=resolved_exec_data["task_queue_config"],
+            provider_config=resolved_exec_data["provider_config"],
             disable_self_healing=self.app_settings.get("disable_self_healing", False),
             drain_timeout_secs=self.app_settings.get("drain_timeout_secs", 600),
         )
@@ -217,20 +253,38 @@ class TaskContextBuilder:
             load_dotenv=True,
         )
 
+        # 1. Isolate the early infrastructure blocks that require path resolution
+        infra_keys = ["secret_provider", "task_queue", "cache", "workspace_dir"]
+
+        # We only need static variables like workspace_dir or basic time units here
+        now = datetime.now()
+        base_variables = {
+            "workspace_dir": str(settings.get("workspace_dir", "")),
+            "YYYY": now.strftime("%Y"),
+            "MM": now.strftime("%m"),
+            "DD": now.strftime("%d"),
+        }
+
+        for key in infra_keys:
+            infra_data = settings.get(key)
+            # Ensure it is a non-empty dictionary/box block before attempting to convert
+            if infra_data and hasattr(infra_data, "items"):
+                # Convert the DynaBox to a clean primitive dict for resolve_strings
+                raw_dict = (
+                    infra_data.to_dict()
+                    if hasattr(infra_data, "to_dict")
+                    else dict(infra_data)
+                )
+
+                # Resolve paths and environment variables early
+                resolved_dict = self.resolve_strings(raw_dict, base_variables)
+
+                # Write the clean, resolved dictionary back into Dynaconf
+                settings.set(key, resolved_dict)
+
+        # 2. Proceed with service reference mapping
+        # print(f"LOADED SETTINGS: {settings.to_dict()}")
         return self._resolve_service_refs(settings)
-
-        # for key in list(settings.keys()):
-        #     value = settings.get(key)
-        #     if not isinstance(value, DynaBox):
-        #         continue
-
-        #     if "service_ref" not in value:
-        #         continue
-
-        #     resolved_value = self._resolve_service_ref(value.get("service_ref"))
-        #     settings.set(key, resolved_value)
-
-        # return settings
 
     def _resolve_partition_date(
         self,
@@ -312,7 +366,7 @@ class TaskContextBuilder:
         Returns:
             dict: The resolved service parameters.
         """
-
+        # print(f"{settings.to_dict()=}")
         for key in list(settings.keys()):
             value = settings.get(key)
             if not isinstance(value, DynaBox):
@@ -337,6 +391,7 @@ class TaskContextBuilder:
                 else:
                     resolved_ref = svc.to_dict() if isinstance(svc, DynaBox) else svc
 
+                # print(f"RESOLVED SERVICE REF: {service_ref} -> {resolved_ref} at {path}")
                 # Update the current_dict with this resolution
                 current_dict = set_nested_key(
                     data=current_dict,  # Pass the updated dict from previous iterations
@@ -350,47 +405,112 @@ class TaskContextBuilder:
             # After all refs are resolved, set the final dict once
             settings.set(key, current_dict)
             # print(settings.to_dict())
-
+        # print(f"RESOLVED: {settings.to_dict()=}")
         return settings
 
-    def _load_schema_file(self, job_id: str, schema_file: str) -> list[ColumnMapping]:
-        """Loads column mappings from a CSV schema file.
+    def parse_stagehooks(
+        self, hooks: dict[str, Any], context_variables: dict[str, str]
+    ) -> dict[str, StageHooks]:
+        """Parses raw stage hook configurations into typed StageHooks objects."""
+        parsed = {}
+        for stage, hook_config in hooks.items():
+            if not hook_config:
+                continue
 
-        Args:
-            job_id: The identifier for the job folder.
-            schema_file: The name of the CSV file.
+            # Process both pre and post actions dynamically using a unified tracking map
+            actions_map = {"pre": [], "post": []}
+            for phase, _ in actions_map.items():
+                for action in hook_config.get(phase) or []:
+                    actions_map[phase].append(
+                        self._parse_single_hook_action(action, context_variables)
+                    )
 
-        Returns:
-            list[ColumnMapping]: A list of mapping objects.
-        """
-        import csv
+            parsed[stage] = StageHooks(pre=actions_map["pre"], post=actions_map["post"])
+        return parsed
 
-        schema_path = JOB_CONFIG_DIR / job_id / schema_file
-        if not schema_path.exists():
-            LOG.warning(f"Schema file not found: {schema_path}")
-            return []
+    def _parse_single_hook_action(
+        self, action: dict[str, Any], context_variables: dict[str, str]
+    ) -> HookAction:
+        """Helper to transform and serialize a raw hook action configuration dict."""
+        resolved = self.resolve_strings(dict(action), context_variables)
+        mapped = dict(resolved)
 
-        LOG.debug(f"Loading schema from: {schema_path}")
+        # Flatten 'to' and 'from' prefix blocks
+        for prefix in ("to", "from"):
+            if prefix in mapped:
+                for k, v in mapped.pop(prefix).items():
+                    mapped[f"{prefix}_{k}"] = v
 
-        mappings = []
-        with schema_path.open(encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
+        # Standardize conditional syntax
+        if "if" in mapped:
+            mapped["condition"] = mapped.pop("if")
+
+        # Clean empty parameters
+        for k in list(mapped.keys()):
+            if mapped[k] is None:
+                mapped.pop(k)
+
+        return msgspec.convert(mapped, type=HookAction)
+
+    @staticmethod
+    def resolve_strings(
+        ctx_data: dict[str, Any],
+        context_variables: dict[str, Any],
+        exclude_prefixes: tuple[str, ...] = PATH_PREFIX_BLACKLIST,
+    ) -> dict[str, Any]:
+        """Flattens config, resolves templates/paths using dict utils, and reconstructs the dict."""
+
+        # 1. Flatten the dictionary to get clear dot-notation tracks
+        # e.g., {"extract": {"object": "./file.csv"}} -> {"extract.object": "./file.csv"}[cite: 8]
+        flat_configs = flatten_dict(ctx_data)
+
+        # Work on a copy of the base dictionary structure
+        resolved_data = ctx_data.copy()
+
+        env_pattern = re.compile(
+            r"\$?\$\{([^:-]+)(?::-([^}]*))?\}|\$([a-zA-Z_][a-zA-Z0-9_]*)"
+        )
+
+        # Matches valid variable names inside braces, e.g., {job_id}, {YYYY}
+        # This intentionally ignores empty JSON structures {} or numeric indices like {0}
+        named_template_pattern = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+
+        for path, value in flat_configs.items():
+            if not value or not isinstance(value, str):
+                continue
+
+            mutated_val = value
+
+            # STEP 1: Resolve Named String Templates FIRST (Safe from Path intervention)
+            if named_template_pattern.search(mutated_val):
                 try:
-                    mapping = ColumnMapping.from_csv_row(row)
-                    mappings.append(mapping)
-                except Exception as e:
-                    LOG.error(f"Failed to parse row {row}: {e}")
-                    raise
+                    clean_template = mutated_val.replace("@format ", "")
+                    # This will now successfully insert job_id, partition_date, and run_id
+                    mutated_val = clean_template.format(**context_variables)
+                except (KeyError, IndexError, ValueError):
+                    pass
 
-        LOG.debug(f"Loaded {len(mappings)} schema mappings")
-        if mappings:
-            LOG.debug(
-                f"First mapping: source_col={mappings[0].source_col}, "
-                f"target_col={mappings[0].target_col}"
-            )
+            # STEP 2: Resolve Environment Variables (${VAR:-DEFAULT})
+            if "$" in mutated_val:
 
-        return mappings
+                def _replacer(match):
+                    var_name = match.group(1) or match.group(3)
+                    default = match.group(2)
+                    return os.getenv(var_name, default if default is not None else "")
+
+                mutated_val = env_pattern.sub(_replacer, mutated_val)
+
+            # STEP 3: Resolve Path-Like Strings LAST (Once fully populated)
+            if is_path_like(mutated_val, exclude_prefixes=exclude_prefixes):
+                mutated_val = str(Path(mutated_val).expanduser().resolve().absolute())
+
+            # STEP 4: Save changes back if structural value mutated
+            if mutated_val != value:
+                resolved_data = set_nested_key(
+                    resolved_data, path=path, new_value=mutated_val
+                )
+
+        return resolved_data
 
     def build(
         self,
@@ -427,13 +547,6 @@ class TaskContextBuilder:
         )
         settings = self._resolve_service_refs(settings)
 
-        # Resolve partition date
-        date_spec = settings.get("partition_date_spec", {})
-        final_date = self._resolve_partition_date(date_spec, partition_date)
-        if not final_date:
-            tz = self.app_settings.get("timezone", "Asia/Singapore")
-            final_date = current_timestamp(timezone=tz, naive=True).strftime("%Y-%m-%d")
-
         # Get datasets
         all_datasets = settings.get("DATASETS", {})
         target_ids = set(all_datasets.keys()).intersection(dataset_ids)
@@ -447,7 +560,7 @@ class TaskContextBuilder:
             ctx = self._build_dataset_context(
                 job_id=job_id,
                 dataset_id=ds_id,
-                partition_date=final_date,
+                partition_date=partition_date or "",
                 settings=settings,
                 overrides=overrides,
             )
@@ -481,53 +594,107 @@ class TaskContextBuilder:
             return self._get_nested(settings, dataset_id, p, default)
 
         # Load schema
-        schema = get("schema", [])
-        if schema_file := get("extract.schema_file"):
-            schema = self._load_schema_file(job_id, schema_file)
+        # schema = get("schema", [])
+        # if schema_file := get("extract.schema_file"):
+        #     schema = self._load_schema_file(job_id, schema_file)
 
-        # Resolve services
-        services = {}
-        for section in ("extract", "load", "archive"):
-            # print(section, self._get_nested(settings, dataset_id, f"{section}.service"))
+        # Resolve partition date
+        date_spec = get("partition_date", {})
+        final_date = self._resolve_partition_date(date_spec, partition_date)
+        if not final_date:
+            tz = self.app_settings.get("timezone", "Asia/Singapore")
+            final_date = current_timestamp(timezone=tz, naive=True).strftime("%Y-%m-%d")
+
+        # Resolve services and stage hooks dynamically using Stage enum
+        connections = {}
+        for stage in (Stage.EXTRACT, Stage.WRITE, Stage.ARCHIVE):
             ref = self._get_nested(
-                settings, dataset_id, f"{section}.{SERVICE_REF_NEW_KEY}"
+                settings, dataset_id, f"{stage.value}.{SERVICE_REF_NEW_KEY}"
             )
-            services[section] = ref
+            connections[stage.value] = ref
 
+        hooks_raw = {}
+        for stage in ALL_STAGES:
+            stage_hooks = get(f"{stage.value}.hooks")
+            if stage_hooks:
+                hooks_raw[stage.value] = stage_hooks
+
+        # Get cache details to determine current run contexts if needed
+        now = datetime.now()
+        context_variables = {
+            "job_id": job_id,
+            "dataset_id": dataset_id,
+            "partition_date": final_date,
+            "workspace_dir": str(self.app_settings.get("workspace_dir", "")),
+            # "run_id": "default_run",  # Ensure this tracks or falls back safely
+            "YYYY": now.strftime("%Y"),
+            "MM": now.strftime("%m"),
+            "DD": now.strftime("%d"),
+        }
+
+        # STEP 1: Resolve strings and path locations while hooks are still raw dict objects
+
+        # --- STEP 1: Build raw dictionary components ---
+        raw_extract = {
+            "source_params": get("extract.params", {}),
+            SERVICE_REF_NEW_KEY: connections["extract"],
+            "num_workers": get("num_workers", 10),
+            "partition_on": get("partition_on"),
+            "mode": get("mode"),
+            "select": get("extract.select", []),
+            "columns": get("extract.columns", {}),
+            "batch_size": get("extract.batch_size"),
+            "null_if": get("extract.null_if"),
+            "flatten": get("extract.flatten"),
+            "sql": get("extract.sql"),
+            "where": get("extract.where"),
+            "limit": get("extract.limit"),
+            "object": get("extract.object"),
+            "compression": get("extract.compression"),
+            "format": get("extract.format"),
+            "header": get("extract.header"),
+            "skip_blank_lines": get("extract.skip_blank_lines"),
+            "encoding": get("extract.encoding"),
+        }
+        raw_transform = {
+            "transform_type": get("transform.type", "default"),
+            "transform_params": get("transform.options", {}),
+        }
+        raw_write = {
+            "sink_params": get("write.params", {}),
+            SERVICE_REF_NEW_KEY: connections["write"],
+            "partition_on": get("write.partition_on", DEFAULT_PARTITION_COL),
+            "partition_value": partition_date,
+        }
+        raw_archive = {
+            "archive_enabled": get("archive.enable_archival", False),
+            "archive_params": get("archive.archive_params", {}),
+            SERVICE_REF_NEW_KEY: connections["archive"],
+            "retention_days": get("archive.retention_days"),
+            "type": get("archive.archive_type"),
+        }
+
+        # --- STEP 2: Safe string template & path resolution on pure dicts ---
+        resolved_extract = self.resolve_strings(raw_extract, context_variables)
+        resolved_transform = self.resolve_strings(raw_transform, context_variables)
+        resolved_write = self.resolve_strings(raw_write, context_variables)
+        resolved_archive = self.resolve_strings(raw_archive, context_variables)
+
+        # Assemble finalized dict config without hooks yet
         ctx_data = {
             "job_id": job_id,
             "dataset_id": dataset_id,
-            "partition_date": partition_date,
+            "partition_date": final_date,
+            "primary_keys": get("primary_keys"),
             "output_path": f"storage/active/{job_id}/{dataset_id}",
-            "extract": ExtractConfig.from_params(
-                source_params=get("extract.params", {}),
-                service=services["extract"],
-                schema=schema,
-                num_workers=get("num_workers", 10),
-                load_mode=get("extract.load_mode", "snapshot"),
-            ),
-            "transform": TransformConfig.from_params(
-                transform_type=get("transform.type", "default"),
-                transform_params=get("transform.options", {}),
-                # source_dir=get("transform.source_dir", None),
-            ),
-            "load": LoadConfig.from_params(
-                sink_params=get("load.params", {}),
-                service=services["load"],
-                partition_by=get("load.partition_by", DEFAULT_PARTITION_COL),
-                partition_value=get("load.partition_value", partition_date),
-            ),
-            "archive": ArchiveConfig.from_params(
-                archive_enabled=get("archive.enable_archival", False),
-                archive_params=get("archive.archive_params", {}),
-                service=services["archive"],
-                retention_days=get("archive.retention_days"),
-                type=get("archive.archive_type"),
-            ),
+            "extract": resolved_extract,
+            "transform": resolved_transform,
+            "write": resolved_write,
+            "archive": resolved_archive,
             "flags": get("feature_flags", {}),
         }
 
-        # Apply overrides
+        # Apply CLI overrides
         if overrides:
             active = ChainMap(
                 overrides.get(dataset_id, {}), overrides.get("_global", {})
@@ -541,4 +708,8 @@ class TaskContextBuilder:
             if custom:
                 ctx_data["custom_overrides"] = custom
 
-        return msgspec.convert(ctx_data, type=TaskContext)
+        # --- STEP 3: Convert hooks to typed msgspec objects LAST ---
+        # This guarantees resolve_strings never steps on msgspec converted models
+        ctx_data["hooks"] = self.parse_stagehooks(hooks_raw, context_variables)
+
+        return TaskContext.from_params(ctx_data)

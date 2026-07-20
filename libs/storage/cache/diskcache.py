@@ -89,7 +89,9 @@ class DiskCache(Cache):
         try:
             return self._cache.get(self._prefixed(key), default)
         except Exception:
-            return default
+            LOG.exception(f"DiskCache structural read failure for key {key}")
+            raise  # Reraise to let the worker surface it
+            # return default
 
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set a value with optional TTL.
@@ -198,11 +200,12 @@ class DiskCache(Cache):
                 pattern = f"{self._prefix}*" if self._prefix else None
 
             for key in self._cache.iterkeys(pattern):
-                if key.startswith(self._prefix):
-                    yield self._unprefixed(key)
+                key_str = str(key, encoding="utf-8")
+                if key_str.startswith(self._prefix):
+                    yield self._unprefixed(key_str)
         except Exception:
             # Return an empty iterator on error to satisfy the return type
-            return iter([])
+            yield from iter([])
 
     def clear(self) -> None:
         """Clear the cache.

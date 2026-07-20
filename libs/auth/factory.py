@@ -35,33 +35,43 @@ class AuthFactory:
         if cls._instance:
             return cls._instance
 
-        provider_type = config.get("type", "local_file").strip().lower()
-
-        # # Force AWS in production
-        # if env == "prod":
-        #     LOG.info("Production environment - forcing AWS Secrets Manager")
-        #     provider_type = "aws_sm"
-
+        provider_type = config["key"].strip().casefold()
         LOG.info(f"Creating secret provider: {provider_type}")
 
         # Prepare config
-        if provider_type == "secure_file":
-            config["master_key"] = config.get(
-                DEFAULT_MASTER_KEY_ENV.casefold()
-            ) or os.getenv(DEFAULT_MASTER_KEY_ENV)
-            if not config["master_key"]:
-                raise ValueError("secure_file provider requires master_key")
-            config.setdefault(
-                "encrypted_file_path", config.get("path", DEFAULT_ENCRYPTED_PATH)
-            )
+        match provider_type:
+            case "secure_file":
+                master_key = config.get(DEFAULT_MASTER_KEY_ENV.casefold()) or os.getenv(
+                    DEFAULT_MASTER_KEY_ENV
+                )
+                if master_key:
+                    raise ValueError("secure_file provider requires master_key")
 
-        elif provider_type == "local_file":
-            config.setdefault("path", DEFAULT_SECRETS_PATH)
+                config = {
+                    "secrets_json": config["secrets_json"],
+                    "master_key": master_key,
+                }
+
+            case "local_file":
+                config = {
+                    "secrets_json": config["secrets_json"],
+                }
+            case "aws_sm":
+                config = {
+                    "region": config["region"],
+                    "sm_endpoint_url": config["sm_endpoint_url"],
+                    "sts_endpoint_url": config["sts_endpoint_url"],
+                    "role_arn": config["role_arn"],
+                    "profile": config["profile"],
+                    "aws_access_key_id": config["aws_access_key_id"],
+                    "aws_secret_access_key": config["aws_secret_access_key"],
+                }
+            case _:
+                raise ValueError(f"Unknown provider type: {provider_type}")
 
         # Instantiate
         provider_class = _PROVIDERS.get(provider_type)
         if not provider_class:
-            raise ValueError(f"Unknown provider type: {provider_type}")
+            raise ValueError("Unable to find matching provider type.")
 
-        cls._instance = provider_class(**config)
-        return cls._instance
+        return provider_class(**config)

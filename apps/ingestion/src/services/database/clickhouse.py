@@ -1,6 +1,5 @@
 """ClickHouse service implementation."""
 
-import re
 from collections.abc import Sequence
 from functools import cached_property
 from pathlib import Path
@@ -8,6 +7,7 @@ from typing import Any
 
 from apps.ingestion.src.services.database.base import DatabaseSink, DatabaseSource
 from apps.ingestion.src.services.factory import ServiceFactory
+from libs.auth.secret import Secret
 from libs.database.clients.clickhouse import ClickhouseClient
 from libs.utils.dates import current_timestamp
 from loguru import logger
@@ -22,7 +22,7 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         raw_pwd = self._config.get("password", "")
         password = (
             raw_pwd.resolve(url_encode=True)
-            if hasattr(raw_pwd, "resolve")
+            if isinstance(raw_pwd, Secret)
             else str(raw_pwd)
         )
         return ClickhouseClient(
@@ -32,6 +32,10 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             password=password,
             database=self._config.get("database"),
         )
+
+    def fetch(self, query: str) -> list[Sequence[Any]]:
+        LOG.debug(f"Executing query: {query}")
+        return self.client.sql(query)
 
     def close(self) -> None:
         if "client" in self.__dict__:
@@ -61,21 +65,19 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
 
         success = False
         try:
-            self.client.sql(
-                f"""
+            self.fetch(f"""
                     CREATE OR REPLACE TABLE {full_staging}
                     ENGINE = MergeTree()
                     ORDER BY tuple()
                     AS {target}
-                """
-            )
+                """)
             self.client.copy_from_file(
                 table=full_staging,
                 source_dir=str(source_dir),
                 file_ext=file_ext,
                 audit_values=audit_values or {},
             )
-            rows = self.count_rows(full_staging)
+            rows = self._count_rows(query=f"SELECT * FROM {full_staging}")
 
             if rows != expected_count:
                 raise ValueError(
@@ -90,14 +92,14 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             raise
         finally:
             if not success:
-                self.client.sql(f"DROP TABLE IF EXISTS {full_staging}")
+                self.delete(full_staging)
                 LOG.warning(f"Cleaned up failed staging: {full_staging}")
 
     def promote(
         self,
         staging: str,
         target: str,
-        partition_by: str,
+        partition_on: str,
         partition_value: str,
         expected_count: int,
     ) -> None:
@@ -114,22 +116,24 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
 
         success = False
         try:
-            self.client.sql(
-                f"DELETE FROM {target} WHERE {partition_by} = '{partition_value}'"
+            self.fetch(
+                f"DELETE FROM {target} WHERE {partition_on} = '{partition_value}'"
             )
-            self.client.sql(f"INSERT INTO {target} SELECT * FROM {staging}")
-            promoted = self.count_rows(target, f"{partition_by} = '{partition_value}'")
+            self.fetch(f"INSERT INTO {target} SELECT * FROM {staging}")
+            promoted = self._count_rows(
+                query=f"SELECT * FROM {target} WHERE {partition_on} = '{partition_value}'"
+            )
             if promoted != expected_count:
                 raise ValueError(
                     f"Row count mismatch after promotion: "
                     f"expected {expected_count}, got {promoted}"
                 )
             success = True
-            LOG.success(f"Promoted {partition_by}={partition_value} to {target}")
+            LOG.success(f"Promoted {partition_on}={partition_value} to {target}")
 
         finally:
             if success:
-                self.client.sql(f"DROP TABLE IF EXISTS {staging}")
+                self.delete(staging)
                 LOG.info(f"Cleaned up staging: {staging}")
 
     def is_equal(
@@ -138,14 +142,16 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
         other: str,
         exclude_columns: set[str] | None = None,
     ) -> bool:
-        if self.count_rows(ref) != self.count_rows(other):
+        ref_rows = self._count_rows(f"SELECT * FROM {ref}")
+        other_rows = self._count_rows(f"SELECT * FROM {other}")
+        if ref_rows != other_rows:
             return False
         if self._get_checksum(ref) == self._get_checksum(other):
             return True
         return self._minus(ref, other, exclude_columns) == 0
 
     def clone(self, source: Any, dest: Any) -> None:
-        self.client.sql(f"""
+        self.fetch(f"""
                 CREATE TABLE OR REPLACE {dest}
                 ENGINE = MergeTree() AS
                     SELECT * FROM {source}
@@ -176,7 +182,7 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             )
 
         cols = ", ".join(sorted(common))
-        result = self.client.sql(f"""
+        result = self.fetch(f"""
             SELECT count() FROM (
                 SELECT {cols} FROM {ref}
                 EXCEPT
@@ -187,7 +193,7 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
     def _get_checksum(self, name: str, columns: list[str] | None = None) -> str:
         cols = ", ".join(columns) if columns else "*"
         try:
-            result = self.client.sql(
+            result = self.fetch(
                 f"SELECT hex(groupBitXor(cityHash64({cols}))) FROM {name}"
             )
             return str(result[0][0]) if result else "0"
@@ -196,24 +202,32 @@ class ClickHouseService(DatabaseSource, DatabaseSink):
             return "ERROR"
 
     def delete(self, target: str) -> None:
-        self.client.sql(f"DROP TABLE IF EXISTS {target}")
+        self.fetch(f"DROP TABLE IF EXISTS {target}")
         LOG.warning(f"Dropped table: {target}")
 
-    def count_rows(
-        self, target: str, filter_condition: str | None = None, **kwargs
-    ) -> int:
-        where = (
-            re.sub(r"(?i)^where\s+", "", filter_condition.strip())
-            if filter_condition
-            else "1=1"
-        )
-        query = f"SELECT COUNT(*) FROM {target} WHERE {where.rstrip('; ')}"
-        try:
-            result = self.client.sql(query)
-            return int(result[0][0]) if result else 0
-        except Exception:
-            LOG.exception(f"Count failed for {target}")
-            return 0
+    def _partition_load(self, query: str, num_workers: int = 5) -> list[str]:
+        """
+        Generates partitioned SQL queries using cityHash64 for parallel loading.
+        Safely handles both plain tables and complex CTE blocks by wrapping them in subqueries.
 
-    def fetch(self, query: str) -> list[Sequence[Any]]:
-        return self.client.sql(query)
+        Args:
+            query: The fully compiled SQL query string or table expression.
+            num_workers: Number of workers/partitions to split across.
+
+        Returns:
+            set[str]: A set of partitioned query strings.
+        """
+        clean_query = query.strip().rstrip(";")
+
+        # Wrap the incoming query inside a subquery parentesis block.
+        # This prevents CTE declarations from clashing with the outer WHERE clause.
+        # Note: Hash primary key / sort keys when possible
+        return [
+            f"""
+            SELECT * FROM (
+                {clean_query}
+            )
+            WHERE cityHash64(*) % {num_workers} = {i}
+            """
+            for i in range(num_workers)
+        ]

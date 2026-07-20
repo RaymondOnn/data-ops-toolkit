@@ -15,8 +15,9 @@ class LocalClient(FileSystemClient):
         - auto_mkdir: True (Automatically create parent directories)
     """
 
-    def __init__(self, url: str, storage_options: dict[str, Any] | None = None):
-        super().__init__(url, storage_options)
+    def __init__(self, url: str, **options: Any) -> None:
+        """Initialize Local client matching the factory signature."""
+        super().__init__(url, **options)
 
     @property
     def fs(self) -> LocalFileSystem:

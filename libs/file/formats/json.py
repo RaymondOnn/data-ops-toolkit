@@ -54,11 +54,15 @@ class JSONHandler(FormatHandler):
         # Check format (NDJSON vs JSON array)
         first_file = next(iter(files))
         is_ndjson = self._is_ndjson(first_file)
+        skip_blank_lines = kwargs.get("skip_blank_lines", False)
 
         if is_ndjson:
-            return pl.scan_ndjson(
+            lf = pl.scan_ndjson(
                 list(files), storage_options=self.options, ignore_errors=True
             )
+            if skip_blank_lines:
+                lf = lf.filter(pl.all_horizontal().is_not_null())
+            return lf
 
         # Standard JSON - read and repair
         lfs = []

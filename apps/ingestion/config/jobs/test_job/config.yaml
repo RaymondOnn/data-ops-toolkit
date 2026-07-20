@@ -24,33 +24,67 @@ default:
   # ── Datasets (each key = dataset_id, values override job defaults) ─────────
   datasets:
     orders:
-      partition_date:
-        offset:
-          days: -1
+      mode: "append"
+      primary_keys: [order_id]
+
       extract:
         service_ref: "file"
+        object: ./mock_data/sample_orders.csv
         num_workers: 1          # overrides job-level num_workers if different
-        load_mode: "snapshot"
-        params:
-          type: file
-          file_pattern:
-             archive:
-             glob: ./mock_data/sample_orders.csv
-          remove_after:
-            enabled: true
-            mode: # file / directory / directory_if_empty
-          backup:
-            enabled: true
-            service_ref: s3_archive
-        schema_file: "schema.csv"
+        hooks:
+          post:
+            - id: archive_src_files
+              type: copy
+              from:
+                service_ref: file
+                path: "@format {this.datasets.orders.extract.object}"
+              to:
+                service_ref: s3_archive
+                # path: "{job_id}/{partition_date}/{run_id}/raw/"
+                path: s3://archive-vault/{job_id}/{partition_date}/{run_id}/raw
+              on_failure: warn # abort | warn | skip
+              single_file: true
+              timeout_secs:
+
+            # - id: cleanup_src_file
+            #   type: delete
+            #   location: "@format {this.datasets.orders.extract.object}"
+            #   recursive: true
+            #   on_failure: warn
+        glob:
+        select:
+          - order_id as ORDER_ID
+          - customer_id AS CUSTOMER_ID
+          - order_date AS ORDER_DATE
+          - amount AS AMOUNT
+          - status AS STATUS
+          # exclude updated_at
+
+        # params:
+        #   type: file
+        #   file_pattern:
+        #      archive:
+        #   remove_after:
+        #     enabled: true
+        #     mode: # file / directory / directory_if_empty
+        #   backup:
+        #     enabled: true
+        #     service_ref: s3_archive
+        # schema_file: "schema.csv"
       transform:
+        hooks:
+          pre: []
+
+          post: []
         type: default
         params:
-      load:
+      write:
         service_ref: "clickhouse"
+        hooks:
         params:
           type: database
           destination: TEST.ORDERS
+
       archive:
         enable_archival: true    # per-dataset archival override
         service_ref: "s3_archive"

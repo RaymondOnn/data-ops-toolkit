@@ -7,7 +7,7 @@ from typing import Any
 
 from diskcache import Index, Timeout
 
-from .base import PriorityQueue, TaskMessage
+from .base import Message, PriorityQueue
 
 LOG = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class DiskcacheQueue(PriorityQueue):
             directory: Directory for queue data
             timeout: Lock timeout in seconds
         """
-        self.directory = directory.expanduser().resolve()
+        self.directory = directory.expanduser().resolve().absolute()
         self.directory.mkdir(parents=True, exist_ok=True)
 
         # Single Index for all data
@@ -154,7 +154,7 @@ class DiskcacheQueue(PriorityQueue):
             time.sleep(0.05)
             self.cache[key] = value
 
-    def pop(self, visibility_timeout: int = 300) -> TaskMessage | None:
+    def pop(self, visibility_timeout: int = 300) -> Message | None:
         """Pop the highest priority task.
 
         Args:
@@ -162,7 +162,7 @@ class DiskcacheQueue(PriorityQueue):
                                if not acknowledged (zombie recovery)
 
         Returns:
-            TaskMessage with ID and data, or None if queue empty
+            Message with ID and data, or None if queue empty
         """
         # First, recover any zombies (expired processing tasks)
         self._recover_zombies()
@@ -172,35 +172,34 @@ class DiskcacheQueue(PriorityQueue):
         if not key:
             return None
 
-        # Atomically pop the key
-        try:
-            value = self.cache.pop(key)
-        except KeyError:
-            # Another process already popped this key
-            return self.pop(visibility_timeout)
+        return self.pop_by_key(key, visibility_timeout=visibility_timeout)
 
-        if not value:
-            return None
+    def pop_by_key(self, key: str, visibility_timeout: int = 300) -> Message | None:
+        """Atomically evict and return a specific task from the queue by its key."""
+        with self.cache.transact():
+            value = self.cache.pop(key, None)
+            if not value:
+                return None
 
-        # Generate message ID and store in processing ledger
-        msg_id = str(uuid.uuid4())
-        processing_key = self._make_processing_key(msg_id)
+            # Generate corresponding processing in-flight tracking tracking footprint
+            msg_id = str(uuid.uuid4())
+            processing_key = self._make_processing_key(msg_id)
 
-        processing_info = {
-            "queue_key": key,
-            "value": value,
-            "timeout": time.time() + visibility_timeout,
-            "priority": key.split(":")[-3],  # Extract priority
-            "started_at": time.time(),
-        }
+            processing_value = {
+                "data": value["data"],
+                "queue_key": key,
+                "value": value,
+                "started_at": time.time(),
+                "timeout": time.time() + visibility_timeout,  # Used by zombie recovery
+                "visibility_timeout": visibility_timeout,
+            }
 
-        # Store in processing ledger (same Index, different prefix)
-        self.cache[processing_key] = processing_info
-        self._in_flight.add(msg_id)
-
-        LOG.debug(f"Popped {key} with priority {value['priority']}, msg_id={msg_id}")
-
-        return TaskMessage(id_=msg_id, data=value["data"], metadata=value["metadata"])
+            self.cache[processing_key] = processing_value
+            self._in_flight.add(processing_key)
+            LOG.debug(
+                f"Popped {key} with priority {value['priority']}, msg_id={msg_id}"
+            )
+            return Message(id_=msg_id, data=value["data"], metadata=value["metadata"])
 
     def _recover_zombies(self) -> None:
         """Recover tasks that expired due to worker crashes.
@@ -305,7 +304,7 @@ class DiskcacheQueue(PriorityQueue):
         self.cache.close()
         self._in_flight.clear()
 
-    def peek(self) -> TaskMessage | None:
+    def peek(self) -> Message | None:
         """Peek at the highest priority task without removing it."""
         key = self._get_first_queue_key()
         if not key:
@@ -315,7 +314,7 @@ class DiskcacheQueue(PriorityQueue):
         if not value:
             return None
 
-        return TaskMessage(id_=key, data=value["data"], metadata=value["metadata"])
+        return Message(id_=key, data=value["data"], metadata=value["metadata"])
 
     def items(self) -> Generator[Any, None, None]:
         """Iterate over all items in the queue, yielding decoded task data."""
@@ -323,6 +322,4 @@ class DiskcacheQueue(PriorityQueue):
         for key in keys:
             value = self.cache.get(key)
             if value and "data" in value:
-                # Return the inner data dictionary/payload directly
-                # so the wrapper can decode it into TaskMetadata
-                yield value["data"]
+                yield key, value["data"]

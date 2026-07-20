@@ -27,7 +27,7 @@ class TriggerRuntime:
         self.orchestrator = orchestrator
 
         # Aliases for readability
-        self.scheduler = orchestrator.tasks
+        self.tasks = orchestrator.tasks
         self.state = orchestrator.state
         self.scanner = orchestrator.signals
 
@@ -113,9 +113,9 @@ class TriggerRuntime:
         )
 
         # Check hot cache first
-        with self.scheduler.lock:
-            pattern = f"{CACHE_TASK_NAMESPACE}:*:*:{identity.task_key}:{run_id}"
-            key = next(iter(self.scheduler.cache.iterkeys(pattern=pattern)), None)
+        with self.tasks.lock:
+            pattern = f"{CACHE_TASK_NAMESPACE}:*:*:{identity.key}:{run_id}"
+            key = next(iter(self.tasks.cache.find(pattern=pattern)), None)
             if key:
                 try:
                     return TaskRef.from_key(key).status

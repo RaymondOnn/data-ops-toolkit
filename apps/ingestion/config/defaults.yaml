@@ -9,6 +9,32 @@ default:
 
   extract:
     num_workers: 10
+    select:
+    where:
+    limit:
+    sql:
+
+    flatten: -1
+    columns: {}
+    null_if: [
+      # Standard string representations
+      "NA", "N/A", "na", "n/a", "N / A", "n / a",
+
+      # Literal null indicators
+      "NULL", "null", "Null", "\\N", "None", "NONE", "none",
+
+      # Common system/data placeholders
+      "NaN", "nan", "NAN", "UNDEFINED", "undefined", "UNKNOWN", "unknown",
+
+      # Punctuation/Empty markers
+      "-", ".", "?", "??", ""
+    ]
+
+    # ---- FILE ----
+    glob:
+    header: true # true | false
+    skip_blank_lines:
+    encoding: utf-8
 
   transform:
     type: default
@@ -26,7 +52,6 @@ default:
       years: 0
     format: "%Y-%m-%d"
     wrap_quotes: false
-
 
   # Global Feature Flag Defaults
   feature_flags:

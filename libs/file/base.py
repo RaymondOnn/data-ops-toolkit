@@ -24,7 +24,7 @@ class FileSystemClient(BaseIOClient, ABC):
     and other cloud storage providers.
     """
 
-    def __init__(self, url: str, options: dict[str, Any] | None = None):
+    def __init__(self, url: str, **options: Any):
         self.url = url.rstrip("/")
         self.options = options or {}
         self._fs = None
@@ -168,32 +168,56 @@ class FileSystemClient(BaseIOClient, ABC):
         """
         return self.fs.rm(self.resolve(path), recursive=recursive)
 
-    def walk(self, path: str, pattern: str | None = "*") -> Generator[str, None, None]:
-        """Recursively walk and yield matching files.
+    def glob(
+        self,
+        path: str | Path,
+        pattern: str | None = None,
+        recursive: bool = False,
+        stream: bool = False,
+    ) -> list[str] | Generator[str, None, None]:
+        """Find paths matching a pattern, with options for recursive search and streaming.
 
         Args:
-            path: The path to walk.
-            pattern: The pattern to match.
-
-        Returns:
-            Generator[str, None, None]: Generator of matching files.
+            path: The base directory path or a full pattern path.
+            pattern: Optional glob pattern (e.g., '*.parquet') to append to the path.
+            recursive: If True, enables deep nested directory matching (via /**/).
+            stream: If True, returns a lazy generator instead of a list.
         """
-        pattern = pattern or "*"
         resolved = self.resolve(path)
 
-        if not self.fs.exists(resolved):
-            raise FileNotFoundError(f"Path not found: {resolved}")
+        # 1. Combine path and pattern if pattern is provided
+        if pattern:
+            base = resolved.rstrip("/")
+            leaf = pattern.lstrip("/")
+            search = f"{base}/{leaf}" if base and leaf else base or leaf
+        else:
+            search = resolved
 
-        if self.fs.isfile(resolved):
-            if pattern == "*" or Path(resolved).match(pattern):
-                yield resolved
-            return
+        # 2. Inject recursive globbing operators if requested
+        if recursive and "/**/" not in search:
+            if "/*" in search:
+                search = search.replace("/*", "/**/", 1)
+            else:
+                search = search.rstrip("/") + "/**/*"
 
-        for p in self.fs.find(resolved):
-            path_str = p[0] if isinstance(p, list) else p
-            full = self.fs.unstrip_protocol(path_str)
-            if pattern == "*" or Path(full).match(pattern):
-                yield full
+        # 3. Define the internal generator
+        def _generator() -> Generator[str, None, None]:
+            # If it's a direct file path without wildcards, check existence directly
+            if "*" not in search:
+                if self.fs.exists(search) and self.fs.isfile(search):
+                    yield self.fs.unstrip_protocol(search)
+                return
+
+            # Otherwise run fsspec globbing
+            for p in self.fs.glob(search, recursive=recursive):
+                if self.fs.isfile(
+                    p
+                ):  # Standardize to only return files like walk/FormatHandler
+                    yield self.fs.unstrip_protocol(p)
+
+        if stream:
+            return _generator()
+        return list(_generator())
 
     def close(self) -> None:
         """Close the filesystem connection."""
@@ -276,7 +300,7 @@ class FileSystemSkills(Enum):
 def create_fs_client(
     url: str,
     capabilities: set[FileSystemSkills],
-    options: dict[str, Any] | None = None,
+    **options: Any,
 ) -> "FileSystemClient":
     """
     Create a filesystem client with dynamic mixin capabilities.
@@ -308,4 +332,4 @@ def create_fs_client(
 
     # Create dynamic class
     cls = type(f"Managed{base.__name__}", (base, *mixins), {})
-    return cls(url=url, storage_options=options or {})
+    return cls(url=url, **options)

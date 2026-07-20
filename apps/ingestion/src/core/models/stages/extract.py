@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import polars as pl
-from apps.ingestion.src.core.contexts import SERVICE_REF_NEW_KEY
+from apps.ingestion.src.core.contexts import ExtractConfig
 from apps.ingestion.src.core.models.task.manifest import ExtractPayload, FileInfo
 from apps.ingestion.src.core.strategies.extract import (
     ExtractContext,
@@ -27,47 +27,30 @@ LOG = logger
 
 
 @stage(Stage.EXTRACT.value)
-class ExtractStage(ExecutionStage):
+class ExtractStage(ExecutionStage[ExtractConfig]):
     """Extract raw data using a registered Extractor."""
+
+    config_attribute = "extract"
 
     def pre_flight(self, task: "Task") -> None:
         super().pre_flight(task)
-        LOG.debug(f"  Task context: job_id={task.job_id}, dataset_id={task.dataset_id}")
-        LOG.debug(
-            f"  Extract config: type={self.config.type}, "
-            f"resource={self.config.resource}"
-        )
         try:
-            self.service = ServiceFactory.get_source(
-                self.config.type, **self.config.service
-            )
+            self.source = ServiceFactory.get_source(**self.config.connection)
             LOG.info(f"PRE-FLIGHT: Service {self.config.type} initialized successfully")
         except Exception:
-            LOG.exception("PRE-FLIGHT: Failed to initialize service")
+            LOG.exception("PRE-FLIGHT: Failed to initialize source")
             raise
 
-    def execute(self, task: "Task") -> str:
-        LOG.info(f"EXECUTE: ExtractStage starting for task {task.run_id}")
+    def _execute(self, task: "Task") -> str:
+        LOG.debug(f"EXECUTE: ExtractStage starting for task {task.run_id}")
         start_ts = current_timestamp(naive=True)
 
         try:
-            options = self.config.params.copy()
-            if condition := options.get("filter_condition"):
-                original = condition
-                options["filter_condition"] = condition.replace(
-                    "{partition_date}", task.partition_date
-                )
-                LOG.debug(f"  Filter condition: {original} -> {condition}")
-
-            if "file" in self.config.type:
-                options["workspace"] = str(task.workspace.path)
-                options["cleanup"] = False
-
             ctx = ExtractContext(
                 kind=self.config.type,
-                resource=self.config.resource,
+                resource=str(self.config.resource),
+                src_connection=self.config.connection,
                 num_workers=self.config.num_workers,
-                schema=self.config.schema,
                 run_id=task.run_id,
                 partition_date=task.partition_date,
                 job_id=task.job_id,
@@ -76,11 +59,19 @@ class ExtractStage(ExecutionStage):
                     "signal_dir": str(task.exec_ctx.signal_path),
                     "cache_config": task.exec_ctx.cache_config,
                 },
-                params=options,
-            )
-            LOG.trace(
-                f"  Extract context: type={ctx.kind}, source={ctx.resource}, "
-                f"workers={ctx.num_workers}, params={ctx.params}"
+                select=self.config.select,
+                where=self.config.where,
+                limit=self.config.limit,
+                columns=self.config.columns,
+                batch_size=self.config.batch_size,
+                null_if=self.config.null_if,
+                compression=self.config.compression,
+                glob=self.config.glob,
+                header=self.config.header,
+                skip_blank_lines=self.config.skip_blank_lines,
+                flatten=self.config.flatten,
+                task_folder=str(task.workspace.path),
+                tmp_cleanup=False,
             )
 
             # Get extractor
@@ -98,7 +89,7 @@ class ExtractStage(ExecutionStage):
             schemas = []
 
             for i, file_data in enumerate(
-                extractor.extract(self.service, ctx, data_store)
+                extractor.extract(self.source, ctx, data_store)
             ):
                 path = file_data["path"]
                 rows = file_data["rows"]
@@ -140,7 +131,7 @@ class ExtractStage(ExecutionStage):
                 )
 
             # Backup source files if configured (non-blocking)
-            self._backup_source_files(task, ctx)
+            # self._backup_source_files(task, ctx)
 
             final_schema = self._merge_schemas(schemas)
             audit_identity = self.resolve_resource_identify(extractor)
@@ -229,39 +220,39 @@ class ExtractStage(ExecutionStage):
         LOG.debug(f"  Final schema: {len(result)} columns")
         return result
 
-    def _backup_source_files(self, task: "Task", ctx: "ExtractContext") -> None:
-        """Backup source files to archive storage if configured (non-blocking)."""
-        backup_config = ctx.params.get("backup", {})
-        if not backup_config.get("enabled"):
-            return
+    # def _backup_source_files(self, task: "Task", ctx: "ExtractContext") -> None:
+    #     """Backup source files to archive storage if configured (non-blocking)."""
+    #     backup_config = ctx.params.get("backup", {})
+    #     if not backup_config.get("enabled"):
+    #         return
 
-        source_path = ctx.resource  # or ctx.resource
-        if not source_path:
-            LOG.debug("No source path to backup")
-            return
+    #     source_path = ctx.resource  # or ctx.resource
+    #     if not source_path:
+    #         LOG.debug("No source path to backup")
+    #         return
 
-        # Check if source path exists
-        if not Path(source_path).exists():
-            LOG.debug(f"Source path does not exist, skipping backup: {source_path}")
-            return
+    #     # Check if source path exists
+    #     if not Path(source_path).exists():
+    #         LOG.debug(f"Source path does not exist, skipping backup: {source_path}")
+    #         return
 
-        backup_service_cfg = backup_config.get(SERVICE_REF_NEW_KEY)
-        if not backup_service_cfg:
-            LOG.warning("Backup enabled but no service config not found")
-            return
+    #     backup_service_cfg = backup_config.get(SERVICE_REF_NEW_KEY)
+    #     if not backup_service_cfg:
+    #         LOG.warning("Backup enabled but no service config not found")
+    #         return
 
-        try:
-            backup_type = backup_service_cfg.pop("type")
-            backup_service = ServiceFactory.get_archive(
-                backup_type, **backup_service_cfg
-            )
-            dest_path = task.get_archive_path(suffix="/raw")
-            backup_service.store(Path(source_path), dest_path)
-            LOG.info(f"Backing up source: {source_path} -> {dest_path}")
+    #     try:
+    #         backup_type = backup_service_cfg.pop("type")
+    #         backup_service = ServiceFactory.get_archive(
+    #             **backup_service_cfg
+    #         )
+    #         dest_path = task.get_archive_path(suffix="/raw")
+    #         backup_service.store(Path(source_path), dest_path)
+    #         LOG.info(f"Backing up source: {source_path} -> {dest_path}")
 
-        except Exception:
-            # Don't fail extraction if backup fails
-            LOG.exception("Source backup failed. Continuing...")
+    #     except Exception:
+    #         # Don't fail extraction if backup fails
+    #         LOG.exception("Source backup failed. Continuing...")
 
     def resolve_resource_identify(self, extractor: "Extractor") -> str:
         """
@@ -272,9 +263,6 @@ class ExtractStage(ExecutionStage):
         source_files = getattr(extractor, "source_files", [])
 
         # Pass additional context for better naming
-        return self.service.resolve_identity(
-            target=str(self.config.resource),
-            items=source_files,
-            source_type=self.config.type,
-            params=self.config.params,
+        return self.source.resolve_identity(
+            target=str(self.config.resource), items=source_files, glob=self.config.glob
         )

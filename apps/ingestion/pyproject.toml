@@ -12,7 +12,7 @@ dependencies = [
     "storage", # Depends on libs/storage
     "queue", # Depends on libs/queue
     "network", # Depends on libs/network
-    "ray[default]==2.48.0", # 2.39.0
+    "ray[default]<=2.48.0", # 2.39.0
     "polars",
     "pandas", # Required by Ray Data
     "pyarrow",
@@ -20,9 +20,10 @@ dependencies = [
     "nanoid",
     "typer",
     "filelock",
-    "dynaconf",
+    "dynaconf==3.2.13",
     "apscheduler",
-    "diskcache"
+    "simpleeval",
+    "numpy",
 ]
 requires-python = ">=3.11"
 

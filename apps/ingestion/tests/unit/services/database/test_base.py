@@ -221,7 +221,7 @@ class TestDatabaseSink:
                 self,
                 staging_location,
                 target_location,
-                partition_by,
+                partition_on,
                 partition_val,
                 expected_count,
             ):

@@ -105,35 +105,6 @@ class ClickhouseClient(DBClient):
         """Verifies connection health."""
         conn.ping()
 
-    def partition_load(
-        self,
-        table_name: str,
-        num_workers: int = 5,
-        filter_condition: str | None = None,
-    ) -> set[str]:
-        """
-        Generates partitioned SQL queries using cityHash64 for parallel loading.
-
-        Args:
-            table_name: Name of the source table.
-            num_workers: Number of workers/partitions to generate.
-            filter_condition: Optional WHERE clause logic.
-
-        Returns:
-            set[str]: A set of query strings.
-        """
-        filter_condition = (
-            filter_condition.replace("WHERE", "") if filter_condition else ""
-        )
-        return {
-            f"""
-            SELECT * FROM {table_name}
-            WHERE {filter_condition}
-            AND cityHash64(*) % {num_workers} = {i}
-            """
-            for i in range(num_workers)
-        }
-
     def copy_from_file(
         self,
         table: str,

@@ -1,6 +1,5 @@
-import time
+# 127 -> 107
 from collections.abc import Generator
-from typing import Any
 
 import msgspec
 from apps.ingestion.src.core.models.stages.enums import Stage
@@ -22,9 +21,9 @@ STAGES_PRIORITY: dict[Stage, int] = {
 
 # Internal weights to prioritize status within the same stage.
 STATUS_WEIGHTS: dict[ExecutionStatus, int] = {
-    ExecutionStatus.RETRY: 5,  # Highest: Finish what we started
-    ExecutionStatus.BLOCKED: 3,  # High: Clear backlogs after service recovery
-    ExecutionStatus.WAITING: 0,  # Baseline: New work
+    ExecutionStatus.RETRY: 0,  # Highest: Finish what we started
+    ExecutionStatus.WAITING: 3,  # Baseline: New work
+    ExecutionStatus.BLOCKED: 5,  # High: Clear backlogs after service recovery
 }
 
 
@@ -34,83 +33,99 @@ class TaskQueue:
     def __init__(self, queue_config):
         """Initializes the queue with a dedicated SQLite database.
 
-        Decision: Workspace Isolation.
-        The queue database is stored within the .cache directory of the
-        workspace, ensuring that different pipelines remain physically
-        isolated and can be cleaned up independently.
+        Args:
+            queue_config: Configuration dictionary for the queue backend.
+
+        Decision: Dedicated Queue Backend.
+        Each orchestrator instance uses its own SQLite database for task queuing,
+        ensuring isolation and preventing cross-job interference.
         """
         self.backend = ServiceFactory.get_task_queue(queue_config)
 
     def is_empty(self) -> bool:
         """Check if the queue has any pending tasks."""
-        if self.backend.size() > 0:
-            return True
-        return False
+        return self.backend.size() == 0
 
-    def _decode_task_metadata(self, data: Any) -> TaskMetadata | None:
-        """Decode TaskMetadata from dict, bytes, or string."""
-        try:
-            if isinstance(data, dict):
-                return msgspec.convert(data, type=TaskMetadata)
-            if isinstance(data, bytes):
-                return msgspec.json.decode(data, type=TaskMetadata)
-            if isinstance(data, str):
-                return msgspec.json.decode(data.encode(), type=TaskMetadata)
+    @staticmethod
+    def calculate_priority(metadata: TaskMetadata) -> int:
+        """Calculates the effective priority of a task based on its stage and status.
 
-            LOG.error(f"Unsupported data type for TaskMetadata: {type(data)}")
-            return None
-        except Exception as e:
-            LOG.error(f"Failed to decode TaskMetadata: {e}")
-            return None
+        Args:
+            metadata: The TaskMetadata object containing stage and status.
+
+        Returns:
+            An integer priority value where lower numbers indicate higher priority.
+        """
+        base = STAGES_PRIORITY.get(Stage(metadata.current_stage), 0)
+        bonus = STATUS_WEIGHTS.get(ExecutionStatus(metadata.status), 0)
+        return max(0, min(255, 255 - (base + bonus)))
 
     def push(
         self,
         meta: TaskMetadata,
-        stage: str,
-        status: ExecutionStatus = ExecutionStatus.WAITING,
     ):
         """Pushes a task onto the queue with calculated priority."""
-        meta.status = status.value
-        meta.last_hb = time.time()
-
-        priority = self.calculate_priority(stage, status)
+        priority = self.calculate_priority(meta)
         self.backend.push(
             data=msgspec.json.encode(meta),
             priority=priority,
             group=meta.job_id,
-            metadata={"run_id": meta.run_id},
+            # metadata={"run_id": meta.run_id},
+        )
+        LOG.trace(
+            "[DISPATCH] queue push success", run_id=meta.run_id, priority=priority
         )
 
-    def pop(self, visibility_timeout: int = 300):
+    def pop(self, visibility_timeout: int = 300) -> tuple[str, TaskMetadata] | None:
         """Pops the highest priority task from the queue."""
-        return self.backend.pop(visibility_timeout=visibility_timeout)
+        LOG.trace(
+            "[DISPATCH] queue pop",
+            visibility_timeout=visibility_timeout,
+            queue_size=self.backend.size(),
+        )
+        item = self.backend.pop()
+        if not item:
+            return None
+        msg_id = item.id
+        metadata: TaskMetadata = msgspec.json.decode(item.data, type=TaskMetadata)
+        return msg_id, metadata
+
+    def pop_by_key(self, msg_id: str) -> tuple[str, TaskMetadata] | None:
+        """Selectively pops a specific message from the underlying database layout."""
+        msg = self.backend.pop_by_key(msg_id)
+        if not msg:
+            return None
+        metadata: TaskMetadata = msgspec.json.decode(msg.data, type=TaskMetadata)
+        return msg.id, metadata
 
     def ack(self, msg_id: str):
         """Acknowledges successful completion of a task message."""
         self.backend.ack(msg_id)
+        LOG.trace("[DISPATCH] queue ack success", msg_id=msg_id)
 
-    @staticmethod
-    def calculate_priority(stage_name: str, status: ExecutionStatus) -> int:
-        """Maps internal priorities to FlashQ (0-255, where 0 is highest)."""
-        base = STAGES_PRIORITY.get(Stage(stage_name), 0)
-        bonus = STATUS_WEIGHTS.get(status, 0)
-        # Invert: our high priority (e.g. 105) should be closer to 0 (FlashQ's highest)
-        # FlashQ priority 0 is highest, 255 is lowest.
-        return max(0, min(255, 255 - (base + bonus)))
-
-    def items(self) -> Generator[TaskMetadata, None, None]:
+    def items(self) -> Generator[tuple[str, TaskMetadata], None, None]:
         """Iterates over the backend items and yields strictly decoded TaskMetadata instances."""
-        for raw_data in self.backend.items():
+        for key, value in self.backend.items():
             try:
-                if isinstance(raw_data, dict):
-                    yield msgspec.convert(raw_data, type=TaskMetadata)
-                else:
-                    # In case data comes back as a raw JSON string or byte block
-                    payload = (
-                        raw_data.encode() if isinstance(raw_data, str) else raw_data
-                    )
-                    yield msgspec.json.decode(payload, type=TaskMetadata)
+                yield key, TaskMetadata.from_raw_cache(value)
             except Exception:
                 # Gracefully swallow individual corrupt item parsing exceptions
                 # so a single invalid payload doesn't brick your manager health loop
                 continue
+
+    def peek(self) -> tuple[str, TaskMetadata] | None:
+        """Peeks at the highest priority task at the head of the queue without pulling it off.
+
+        Returns:
+            A tuple of (msg_id, TaskMetadata) if an item exists, otherwise None.
+        """
+        # FlashQ backend supports a peek method returning the raw (msg_id, payload) tuple
+        item = self.backend.peek()
+        if not item:
+            return None
+
+        msg_id, raw_payload = item
+
+        # Parse cleanly into the strongly typed TaskMetadata model using the same logic as pop()
+        metadata = msgspec.json.decode(raw_payload, type=TaskMetadata)
+        return msg_id, metadata

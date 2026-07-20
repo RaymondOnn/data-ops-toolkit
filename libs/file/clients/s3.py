@@ -22,9 +22,31 @@ class S3Client(FileSystemClient):
         use_ssl (bool): Whether to use SSL (default: False for LocalStack)
     """
 
-    def __init__(self, url: str, storage_options: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        url: str,
+        region: str,
+        sts_endpoint_url: str,
+        role_arn: str | None = None,
+        profile: str | None = None,
+        access_key: str | None = None,
+        secret_key: str | None = None,
+        use_ssl: bool = False,
+        anon: bool = False,
+        s3_endpoint_url: str | None = None,
+        **options: Any,
+    ) -> None:
         """Initialize S3 client with storage options."""
-        super().__init__(url, storage_options)
+        super().__init__(url, **options)
+        self.region = region
+        self.sts_endpoint_url = sts_endpoint_url
+        self.role_arn = role_arn
+        self.profile = profile
+        self.access_key = access_key
+        self.secret_key = secret_key
+        self.anon = anon
+        self.use_ssl = use_ssl
+        self.s3_endpoint_url = s3_endpoint_url
 
     @property
     def fs(self) -> S3FileSystem:
@@ -32,21 +54,15 @@ class S3Client(FileSystemClient):
         if self._fs is not None:
             return self._fs
 
-        client_cfg = self.options.pop("client", {})
-        s3_endpoint = self.options.pop("s3_endpoint_url", None)
-        anon = self.options.pop("anon", False)
-        use_ssl = self.options.pop("use_ssl", False)
-
-        # Configure AWS client
+        # Configure AWS client using explicit args or client config dict fallback
         aws = AWSClient(
             config=AWSConfig(
-                region=client_cfg.get("region", "ap-southeast-1"),
-                sts_endpoint=client_cfg.get("sts_endpoint_url"),
-                role_arn=client_cfg.get("role_arn"),
-                profile=client_cfg.get("profile_name"),
-                access_key=client_cfg.get("aws_access_key_id"),
-                secret_key=client_cfg.get("password")
-                or client_cfg.get("aws_secret_access_key"),
+                region=self.region,
+                sts_endpoint=self.sts_endpoint_url,
+                role_arn=self.role_arn,
+                profile=self.profile,
+                access_key=self.access_key,
+                secret_key=self.secret_key,
             )
         )
 
@@ -58,12 +74,12 @@ class S3Client(FileSystemClient):
             key=creds.access_key,
             secret=creds.secret_key,
             token=creds.token,
-            anon=anon,
+            anon=self.anon,
             asynchronous=False,
-            use_ssl=use_ssl,
+            use_ssl=self.use_ssl,
             use_listings_cache=False,  # Don't cache 404s
             client_kwargs={
-                "endpoint_url": s3_endpoint,
+                "endpoint_url": self.s3_endpoint_url,
                 "region_name": aws.config.region,
             },
             config_kwargs={
@@ -75,7 +91,7 @@ class S3Client(FileSystemClient):
         )
 
         LOG.debug(
-            f"S3Client initialized: endpoint={s3_endpoint}, region={aws.config.region}"
+            f"S3Client initialized: endpoint={self.s3_endpoint_url}, region={aws.config.region}"
         )
         return self._fs
 
@@ -104,18 +120,6 @@ class S3Client(FileSystemClient):
                 return False
             LOG.exception("Unexpected error in exists()")
             raise
-
-    def ls(self, path: str = "", detail: bool = False) -> list[Any]:
-        """List contents of S3 path."""
-        return self.fs.ls(self.resolve(path), detail=detail)
-
-    def open(self, path: str, mode: str = "rb") -> Any:
-        """Open S3 object for reading/writing."""
-        return self.fs.open(self.resolve(path), mode=mode)
-
-    def rm(self, path: str, recursive: bool = False) -> None:
-        """Delete S3 object(s)."""
-        self.fs.rm(self.resolve(path), recursive=recursive)
 
     # =========================================================================
     # Helper Methods

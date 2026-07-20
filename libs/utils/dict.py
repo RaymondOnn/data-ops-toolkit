@@ -51,20 +51,31 @@ def set_nested_key(
     Returns:
         dict[str, Any]: The modified dictionary.
     """
-    parts = path.split(".")
     target = deepcopy(data)
-    current = target  # Keep a reference to navigate
+    current = target
 
-    # Navigate to parent
-    for key in parts[:-1]:
-        current = current[key]  # Navigate through the copy
+    def get_node(obj: Any, segment: str) -> tuple[Any, Any]:
+        """Returns the parent container and the active key/index."""
+        if "]" in segment:
+            key, idx = segment.replace("]", "").split("[")
+            return obj[key], int(idx)
+        return obj, segment
 
-    old_key = parts[-1]
-    if old_key in current:
-        value = new_value if new_value is not None else current[old_key]
-        new_key = new_key or old_key
-        del current[old_key]
-        current[new_key] = value
+    # Navigate to the final parent segment
+    parts = path.split(".")
+    for part in parts[:-1]:
+        container, k = get_node(current, part)
+        current = container[k]
+
+    # Modify the terminal key or index
+    container, k = get_node(current, parts[-1])
+
+    if isinstance(k, int):  # It's a list index: update the value in place
+        container[k] = new_value if new_value is not None else container[k]
+    elif k in container:  # It's a dict key: swap the key/value
+        val = new_value if new_value is not None else container[k]
+        del container[k]
+        container[new_key or k] = val
 
     return target  # Return the full root dictionary
 
@@ -86,3 +97,15 @@ def deep_merge(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
         else:
             result[key] = value
     return result
+
+
+def flatten_dict(data: dict[str, Any], parent_key: str = "") -> dict[str, str]:
+    """Recursively flattens a nested dictionary into dot-notation string mappings."""
+    items: list[tuple[str, str]] = []
+    for k, v in data.items():
+        new_key = f"{parent_key}.{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(flatten_dict(v, new_key).items())
+        else:
+            items.append((new_key, str(v) if v is not None else ""))
+    return dict(items)

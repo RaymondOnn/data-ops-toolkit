@@ -7,6 +7,7 @@ from typing import Any
 import boto3
 from aiobotocore.session import get_session as get_aio_session
 from botocore.credentials import RefreshableCredentials
+from botocore.session import Session as BotocoreSession
 from botocore.session import get_session
 
 LOG = logging.getLogger(__name__)
@@ -178,10 +179,10 @@ class AWSClient:
         )
 
         # Add missing method for compatibility
-        if not hasattr(refreshable, "get_account_id"):
-            refreshable.get_account_id = lambda: None
+        # if not hasattr(refreshable, "get_account_id"):
+        #     refreshable.get_account_id = lambda: None
 
-        bc_session = get_session()
+        bc_session: BotocoreSession = get_session()
         bc_session.set_config_variable("profile", None)
         bc_session._credentials = refreshable
         bc_session.set_config_variable("region", self.config.region)

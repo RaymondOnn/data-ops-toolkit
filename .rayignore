@@ -4,3 +4,9 @@
 __pycache__/
 *.pyc
 .workspace/
+**/.git/
+
+# Forcefully match the mock_data directory at any depth
+mock_data/
+**/mock_data/**
+*.parquet

@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING
 
+from apps.ingestion.src.core.contexts import LoadConfig
 from apps.ingestion.src.core.models.task.manifest import PublishPayload
 from apps.ingestion.src.core.strategies.load.load import LoadContext, LoaderFactory
 from apps.ingestion.src.services.factory import ServiceFactory
@@ -15,12 +16,14 @@ from .utils import stage
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.task import Task
+    from apps.ingestion.src.core.models.task.manifest import WritePayload
+
 
 LOG = logger
 
 
 @stage(Stage.PUBLISH.value)
-class PublishStage(ExecutionStage):
+class PublishStage(ExecutionStage[LoadConfig]):
     """Stage for promoting staged data to production.
 
     This stage handles the "Promotion" phase of the load strategy, moving data
@@ -29,6 +32,9 @@ class PublishStage(ExecutionStage):
     """
 
     requires_disk_space: bool = False
+    config_attribute = "write"
+
+    write: "WritePayload"
 
     def pre_flight(self, task: "Task") -> None:
         """Initialize sink and verify staging artifact exists.
@@ -47,15 +53,18 @@ class PublishStage(ExecutionStage):
             re-attempt the staging process.
         """
         super().pre_flight(task)
-        self.sink = ServiceFactory.get_sink(self.config.type, **self.config.service)
+        self.sink = ServiceFactory.get_sink(**self.config.connection)
 
         # Verify write metadata exists
+        if task.manifest.write is None:
+            raise RollbackRequired(Stage.WRITE.value, "Missing write metadata")
         self.write = task.manifest.write
-        if not self.write or not self.write.staging_artifact:
+
+        if not self.write.staging_artifact:
             LOG.warning("Missing staging artifact, rewinding to WRITE")
             raise RollbackRequired(Stage.WRITE.value, "Staging artifact missing")
 
-    def execute(self, task: "Task") -> str:
+    def _execute(self, task: "Task") -> str:
         """Promote staged data to production.
 
         Args:
@@ -74,14 +83,12 @@ class PublishStage(ExecutionStage):
               (e.g., partition exchange, atomic renames, or transactional deletes).
         """
         start_ts = current_timestamp(naive=True).isoformat(sep=" ")
-        if self.write is None:
-            raise RollbackRequired(Stage.WRITE.value, "Write metadata missing")
 
         try:
             loader = LoaderFactory.get_loader(self.config.type)
             load_ctx = LoadContext(
                 target=self.config.destination,
-                partition_by=self.config.partition_by,
+                partition_on=self.config.partition_on,
                 partition_value=self.config.partition_value,
                 expected_count=self.write.write_count,
             )

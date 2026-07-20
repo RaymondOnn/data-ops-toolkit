@@ -1,11 +1,11 @@
 """Task execution session manager with lifecycle hooks."""
 
+# 143 ->
 import time
 
 from apps.ingestion.src.core.contexts import ExecutionContext
 from apps.ingestion.src.core.models.task import ExecutionStatus, Task
 from apps.ingestion.src.core.models.task.enums import TaskRef
-from apps.ingestion.src.utils.exceptions import RollbackRequired
 from loguru import logger
 
 
@@ -53,10 +53,13 @@ class TaskSession:
         We verify the existence of the task workspace immediately upon entry.
         This prevents later operations from failing due to missing directories.
         """
-        self._start_time = time.perf_counter()
 
+        self._start_time = time.perf_counter()
+        run_id = self.task_ref.identity.run_id  # Extract early
+
+        # 1. Establish logging context
         self._context_manager = logger.contextualize(
-            run_id=self.task_ref.identity.run_id,
+            run_id=run_id,
             job_id=self.task_ref.identity.job_id,
             stage=self.task_ref.stage,
         )
@@ -65,44 +68,54 @@ class TaskSession:
         log_dir = self.exec_ctx.workspace_dir / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_name = log_dir / (
-            f"{self.task_ref.identity.task_key}_"
-            f"{self.task_ref.identity.run_id}.jsonl".replace(":", "_")
+            f"{self.task_ref.id_key}_" f"{run_id}.jsonl".replace(":", "_")
         )
+
+        # FIX: Filter records so ONLY logs belonging to this run_id are written here
         self._handler_id = logger.add(
             str(log_name),
             level="DEBUG",
-            serialize=True,  # JSON format for structured logging
+            serialize=True,
             enqueue=True,
-            # Don't rotate per run - it's a single file per run
+            filter=lambda record: record["extra"].get("run_id") == run_id,
         )
 
-        self.log.info(f"Session initialized for task: {self.task_ref.identity.run_id}")
+        try:
+            self.log.info(f"Session initialized for task: {run_id}")
 
-        self.task = Task(
-            task_ref=self.task_ref.with_updates(status=ExecutionStatus.RUNNING),
-            worker_id=self.worker_id,
-            exec_ctx=self.exec_ctx,
-        )
-
-        # Verify workspace exists
-        if not self.task.workspace.exists():
-            raise FileNotFoundError(
-                f"Task workspace missing: {self.task.workspace.path}"
+            self.task = Task(
+                task_ref=self.task_ref.with_updates(status=ExecutionStatus.RUNNING),
+                worker_id=self.worker_id,
+                exec_ctx=self.exec_ctx,
             )
 
-        # Initialize
-        self.task.check_in(self.task_ref.stage)
+            # Verify workspace exists[cite: 11]
+            if not self.task.workspace.exists():
+                raise FileNotFoundError(
+                    f"Task workspace missing: {self.task.workspace.path}"
+                )
 
-        if (self.task.workspace.path / ".retrying").exists():
-            self.task.update_manifest(
-                {"retry_count": self.task.manifest.retry_count + 1}
-            )
-            self.task.workspace.remove_marker(".retrying")
+            # Initialize[cite: 11]
+            self.task.check_in(self.task_ref.stage)
 
-        self.task.workspace.remove_marker(".blocked")
-        self.log.info(f"Stage {self.task_ref.stage.upper()} started")
+            if (self.task.workspace.path / ".retrying").exists():
+                self.task.update_manifest(
+                    {"retry_count": self.task.manifest.retry_count + 1}
+                )
+                self.task.workspace.remove_marker(".retrying")
 
-        return self.task
+            self.task.workspace.remove_marker(".blocked")
+            self.log.info(f"Stage {self.task_ref.stage.upper()} started")
+            return self.task
+
+        except Exception:
+            # If initialization fails, clean up the handler immediately to prevent leaks[cite: 11]
+            if self._handler_id is not None:
+                logger.remove(self._handler_id)
+                self._handler_id = None
+            if self._context_manager:
+                self._context_manager.__exit__(None, None, None)
+            raise
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Exits the runtime context, handling exceptions and finalizing the task.
@@ -111,22 +124,12 @@ class TaskSession:
             exc_type: The type of the exception raised, or None if no exception.
             exc_val: The exception instance, or None.
             exc_tb: The traceback object, or None.
-
-        Decision: Rollback Exception Handling.
-        `RollbackRequired` is a special exception that signals a non-terminal
-        failure, allowing the task to be rewound without being marked as
-        permanently FAILED.
         """
         duration = time.perf_counter() - self._start_time
 
         # Log completion
         if exc_val:
-            if isinstance(exc_val, RollbackRequired):
-                self.log.warning(
-                    f"Stage {self.task_ref.stage.upper()} rewound ({duration:.2f}s)"
-                )
-            else:
-                self.log.error(f"Stage {self.task_ref.stage.upper()} failed: {exc_val}")
+            self.log.error(f"Stage {self.task_ref.stage.upper()} failed: {exc_val}")
         else:
             self.log.info(
                 f"Stage {self.task_ref.stage.upper()} completed ({duration:.2f}s)"

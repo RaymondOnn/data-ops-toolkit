@@ -54,18 +54,12 @@ project-includes = [
 project-excludes = [
     "**/tests/**",
     "**/test_*.py",
-    "**/*_test.py"
-]
-ignore = [
-    "**/tests/*",
-    "**/test_*.py",
-    "**/*_test.py"
+    "**/*_test.py",
+    "**/.venv/**",
 ]
 search-path = [
-    "apps/ingestion",
-    "libs/file",
+    "apps/ingestion/src",
     "libs",
-    ".",
 ]
 python-version = "3.11.0"
 infer-with-first-use = false

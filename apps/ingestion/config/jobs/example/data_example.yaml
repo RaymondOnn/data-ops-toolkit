@@ -29,7 +29,7 @@ datasets:
   orders:
     # Source config (e.g. Postgres → S3)
     target_destination: "public.orders" # Source DB table
-    read_mode: delta # delta | snapshot
+    read_mode: delta # delta | append
     expires_at: null              # or unix epoch (e.g. 1735776000)
     num_workers: 16
     filter_clause:
@@ -54,7 +54,7 @@ datasets:
 
   sales:
     target_destination: "public.sales" # Source DB table
-    read_mode: snapshot # delta | snapshot
+    read_mode: append # delta | append
     expires_at: null              # or unix epoch (e.g. 1735776000)
     num_workers: 16
     filter_clause:

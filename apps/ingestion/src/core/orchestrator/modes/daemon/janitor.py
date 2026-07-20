@@ -91,4 +91,4 @@ class DaemonJanitor:
             partition_date=str(record.PARTITION_DATE or ""),
             run_id=run_id,
         )
-        self.janitor.remove_orphaned_config(identity.task_key, run_id)
+        self.janitor.remove_orphaned_config(identity.key, run_id)

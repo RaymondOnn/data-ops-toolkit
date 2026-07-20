@@ -168,7 +168,7 @@ class TestStorageSink:
             sink.promote(
                 staging_location="tmp/stage_123",
                 target_location="prod/orders",
-                partition_by="dt",
+                partition_on="dt",
                 partition_val="2024-01-01",
             )
 

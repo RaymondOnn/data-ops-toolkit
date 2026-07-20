@@ -1,7 +1,11 @@
 """Transform stage for data processing."""
 
+from apps.ingestion.src.core.contexts import TransformConfig
 from apps.ingestion.src.core.models.task import Task
-from apps.ingestion.src.core.models.task.manifest import TransformPayload
+from apps.ingestion.src.core.models.task.manifest import (
+    ExtractPayload,
+    TransformPayload,
+)
 from apps.ingestion.src.core.strategies.transform import (
     TRANSFORMERS,
     TransformContext,
@@ -20,30 +24,33 @@ OUTPUT_FORMAT = "parquet"
 
 
 @stage(Stage.TRANSFORM.value)
-class TransformStage(ExecutionStage):
+class TransformStage(ExecutionStage[TransformConfig]):
     """Stage for transforming extracted data."""
+
+    config_attribute = "transform"
+    extract: "ExtractPayload"
 
     def pre_flight(self, task: Task) -> None:
         """Verify extract artifacts exist."""
         super().pre_flight(task)
 
-        extract = task.manifest.extract
+        if not task.manifest.extract:
+            raise RollbackRequired(Stage.EXTRACT.value, "Extraction metadata missing")
+
+        self.extract = task.manifest.extract
         extract_path = task.workspace.path / Stage.EXTRACT.value
+        if not extract_path.exists():
+            raise RollbackRequired(
+                Stage.EXTRACT.value, "Extraction data marker missing"
+            )
 
-        # Check conditions
-        checks = [
-            (extract is not None, "Extraction metadata missing"),
-            (extract_path.exists(), "Extraction data marker missing"),
-            (extract is None or extract.file_count > 0, "No data files found"),
-        ]
+        if not self.extract.file_count > 0:
+            raise RollbackRequired(Stage.EXTRACT.value, "No data files found")
 
-        if extract and extract.file_count > 0:
-            has_data = any(f.stat().st_size > 0 for f in extract_path.glob("*.parquet"))
-            checks.append((has_data, "Physical artifacts missing or empty"))
-
-        for ok, msg in checks:
-            if not ok:
-                raise RollbackRequired(Stage.EXTRACT.value, msg)
+        if not any(f.stat().st_size > 0 for f in extract_path.glob("*.parquet")):
+            raise RollbackRequired(
+                Stage.EXTRACT.value, "Physical artifacts missing or empty"
+            )
 
         # Validate transformer exists
         try:
@@ -52,10 +59,7 @@ class TransformStage(ExecutionStage):
             LOG.exception("Invalid transformer configuration")
             raise
 
-        if not self.config.type:
-            raise ValueError("Transform type not defined")
-
-    def execute(self, task: Task) -> str:
+    def _execute(self, task: Task) -> str:
         """Execute transformation using distributed executor."""
         start_time = current_timestamp(naive=True).isoformat(sep=" ")
         LOG.info(f"Starting transform: {self.config.type}")

@@ -5,6 +5,7 @@ import socket
 from contextlib import contextmanager
 
 import niquests
+from niquests.exceptions import HTTPError
 
 from libs.network.core.result import DiagnosticResult
 
@@ -110,10 +111,15 @@ class ProxyCheck(BaseCheck):
                     timeout=10.0,
                 )
                 response.raise_for_status()
-                public_ip = response.text.strip()
-                return self._success(f"Proxy working. Public IP: {public_ip}")
 
-        except niquests.HTTPStatusError as e:
+        except HTTPError as e:
+            if not e.response:
+                return self._failure(
+                    report="Proxy handshake failed (no response)",
+                    recommendation="Check proxy configuration",
+                    bash_command=f"curl -x {self.proxy_url} https://ipify.org -v",
+                    impact_level="HIGH",
+                )
             if e.response.status_code == 407:
                 return self._failure(
                     report="Proxy authentication failed (HTTP 407)",
@@ -132,6 +138,10 @@ class ProxyCheck(BaseCheck):
                 bash_command=f"telnet {self.proxy_host} {self.proxy_port}",
                 impact_level="HIGH",
             )
+        else:
+            if response:
+                public_ip = response.text.strip()
+                return self._success(f"Proxy working. Public IP: {public_ip}")
 
     def _parse_proxy_url(self, proxy_url: str) -> tuple[str, int]:
         """Parse proxy URL into host and port."""
@@ -151,9 +161,9 @@ class ProxyCheck(BaseCheck):
         if self.debug_traffic:
             try:
                 # niquests supports the same httptap integration
-                from httptap import httpx_tap  # httptap works with niquests too
+                from httptap import HTTPTapAnalyzer  # httptap works with niquests too
 
-                with httpx_tap():
+                with HTTPTapAnalyzer():
                     yield
             except ImportError:
                 yield

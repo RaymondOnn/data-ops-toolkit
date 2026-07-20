@@ -101,6 +101,73 @@ class TaskMetadata(msgspec.Struct):
             ),
         )
 
+    def generate_cache_key(self, status_override: ExecutionStatus | None = None) -> str:
+        """Centralizes key construction logic so it never leaks into business loops."""
+        status_val = status_override.value if status_override else self.status
+        return self.to_ref().build(status=status_val, stage=self.current_stage)
+
+    @classmethod
+    def from_raw_cache(cls, raw_data: Any) -> Self:
+        """Safely decompresses or deserializes raw cache records."""
+        if isinstance(raw_data, dict):
+            return msgspec.convert(raw_data, type=cls)
+        return msgspec.json.decode(raw_data, type=cls)
+
+
+# =============================================================================
+# TaskUpdate - State Transition Record
+# =============================================================================
+
+
+class TaskUpdate(msgspec.Struct, kw_only=True):
+    """State update to be written to the execution log."""
+
+    JOB_ID: str
+    DATASET_ID: str
+    PARTITION_DATE: str
+    JOB_STATUS: str
+    LAST_UPDATED_AT_TS_LC: str
+
+    SCHEDULED_TIMESTAMP_LC: str | None = None
+    START_TIMESTAMP_LC: str | None = None
+    END_TIMESTAMP_LC: str | None = None
+    CURRENT_STAGE: str | None = None
+    JOB_BITMASK: str | None = None
+    IS_SCHEDULED: int = 1
+    ERRORS: dict[str, str] | None = None
+    RUNTIME_OVERRIDES: dict[str, Any] | None = None
+    RETRY_ATTEMPTS: int = 0
+    SOURCE_ROW_COUNT: int | None = None
+    FINAL_ROW_COUNT: int | None = None
+    FINAL_MANIFEST: str | None = None
+    REMARKS: str | None = None
+
+    def __post_init__(self) -> None:
+        """Normalize timestamps and stage names."""
+        # Normalize stage
+        if self.CURRENT_STAGE:
+            super().__setattr__("CURRENT_STAGE", self.CURRENT_STAGE.upper())
+
+        # Normalize timestamp fields
+        for field in self.__struct_fields__:
+            if "TIMESTAMP" in field or field.endswith("_LC"):
+                val = getattr(self, field)
+                if val:
+                    super().__setattr__(field, to_ch_datetime(val))
+
+    @classmethod
+    def from_record(cls, record: "TaskRecord") -> "TaskUpdate":
+        """Factory method to cast a full TaskRecord snapshot down to an event TaskUpdate."""
+        # Convert the TaskRecord to a plain dictionary of primitive values
+        record_dict = msgspec.to_builtins(record)
+
+        # Pull out only the fields that are valid for TaskUpdate definitions
+        update_fields = {
+            k: v for k, v in record_dict.items() if k in cls.__struct_fields__
+        }
+
+        return msgspec.convert(update_fields, type=cls)
+
 
 # =============================================================================
 # TaskRecord - Database Source Record
@@ -114,8 +181,8 @@ class TaskRecord(msgspec.Struct, kw_only=True):
     RUN_ID: str
     DATASET_ID: str
     SCHEDULED_TIMESTAMP_LC: datetime
-    JOB_STATUS: str
 
+    JOB_STATUS: str | None = None
     PARTITION_DATE: str | None = None
     START_TIMESTAMP_LC: datetime | None = None
     END_TIMESTAMP_LC: datetime | None = None
@@ -163,44 +230,11 @@ class TaskRecord(msgspec.Struct, kw_only=True):
                 result[field] = value
         return result
 
+    def to_update(self) -> TaskUpdate:
+        """Converts this full snapshot record into a TaskUpdate event payload."""
+        # msgspec.to_builtins converts the struct to a standard dictionary safely
+        fields = msgspec.to_builtins(self)
 
-# =============================================================================
-# TaskUpdate - State Transition Record
-# =============================================================================
-
-
-class TaskUpdate(msgspec.Struct, kw_only=True):
-    """State update to be written to the execution log."""
-
-    JOB_ID: str
-    DATASET_ID: str
-    PARTITION_DATE: str
-    JOB_STATUS: str
-    LAST_UPDATED_AT_TS_LC: str
-
-    SCHEDULED_TIMESTAMP_LC: str | None = None
-    START_TIMESTAMP_LC: str | None = None
-    END_TIMESTAMP_LC: str | None = None
-    CURRENT_STAGE: str | None = None
-    JOB_BITMASK: str | None = None
-    IS_SCHEDULED: int = 1
-    ERRORS: dict[str, str] | None = None
-    RUNTIME_OVERRIDES: dict[str, Any] | None = None
-    RETRY_ATTEMPTS: int = 0
-    SOURCE_ROW_COUNT: int | None = None
-    FINAL_ROW_COUNT: int | None = None
-    FINAL_MANIFEST: str | None = None
-    REMARKS: str | None = None
-
-    def __post_init__(self) -> None:
-        """Normalize timestamps and stage names."""
-        # Normalize stage
-        if self.CURRENT_STAGE:
-            super().__setattr__("CURRENT_STAGE", self.CURRENT_STAGE.upper())
-
-        # Normalize timestamp fields
-        for field in self.__struct_fields__:
-            if "TIMESTAMP" in field or field.endswith("_LC"):
-                val = getattr(self, field)
-                if val:
-                    super().__setattr__(field, to_ch_datetime(val))
+        # We extract fields that don't map 1:1 or need special care
+        # e.g., if TaskRecord has "ERRORS" as a structured object but TaskUpdate takes a dict
+        return msgspec.convert(fields, type=TaskUpdate)

@@ -36,28 +36,34 @@ class FormatHandler(ABC):
     def _glob_files(
         self, path: Path | str, pattern: str | None, default_glob: str
     ) -> set[str]:
-        """Discover files matching pattern or default glob."""
-        base_raw = self.fs._strip_protocol(str(path))
-        if isinstance(base_raw, list | tuple):
-            base_raw = base_raw[0] if base_raw else ""
-        base = str(base_raw).rstrip("/")
-        leaf = pattern.lstrip("/") if pattern else ""
-        search = f"{base}/{leaf}" if base and leaf else base or leaf or ""
+        """Discover files matching pattern or default glob using centralized client logic."""
+        # Convert path to string cleanly
+        search_path = str(path)
 
-        if "*" in search:
-            return {
-                str(self.fs.unstrip_protocol(str(p)))
-                for p in self.fs.glob(search)
-                if self.fs.isfile(p)
-            }
+        # If there's no wildcard and it isn't an explicit file, fall back to default glob
+        if (
+            "*" not in search_path
+            and not pattern
+            and not self.fs.isfile(self.fs._strip_protocol(search_path))
+        ):
+            pattern = default_glob
 
-        if search and self.fs.isfile(search):
-            return {str(self.fs.unstrip_protocol(search))}
+        # If your handler already has access to a FileSystemClient instance, call it directly:
+        # return set(self.client.glob(search_path, pattern=pattern))
 
-        final = f"{search.rstrip('/')}/{default_glob}" if search else default_glob
+        # Direct fallback leveraging the internal handler fs mapping:
+        search = (
+            f"{search_path.rstrip('/')}/{pattern.lstrip('/')}"
+            if pattern
+            else search_path
+        )
+
+        if "*" not in search and self.fs.isfile(self.fs._strip_protocol(search)):
+            return {str(self.fs.unstrip_protocol(self.fs._strip_protocol(search)))}
+
         return {
-            str(self.fs.unstrip_protocol(str(p)))
-            for p in self.fs.glob(final)
+            str(self.fs.unstrip_protocol(p))
+            for p in self.fs.glob(search)
             if self.fs.isfile(p)
         }
 

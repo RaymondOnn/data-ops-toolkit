@@ -1,7 +1,8 @@
 """Write stage for loading transformed data to staging."""
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
+from apps.ingestion.src.core.contexts import LoadConfig
 from apps.ingestion.src.core.models.task.manifest import WritePayload
 from apps.ingestion.src.core.strategies.load.load import LoadContext, LoaderFactory
 from apps.ingestion.src.services.factory import ServiceFactory
@@ -21,20 +22,24 @@ LOG = logger
 
 
 @stage(Stage.WRITE.value)
-class WriteStage(ExecutionStage):
+class WriteStage(ExecutionStage[LoadConfig]):
     """Stage for loading transformed data to staging area."""
 
     requires_disk_space: bool = False
+    config_attribute = "write"
+    transform: "TransformPayload"
 
     def pre_flight(self, task: "Task") -> None:
         """Verify sink connectivity and transform artifacts."""
         super().pre_flight(task)
 
-        self.sink = ServiceFactory.get_sink(self.config.type, **self.config.service)
+        self.sink = ServiceFactory.get_sink(**self.config.connection)
 
         # Verify transform metadata exists
         if task.manifest.transform is None:
             raise RollbackRequired(Stage.TRANSFORM.value, "Missing transform metadata")
+
+        self.transform = task.manifest.transform
 
         # Verify transform data exists
         transform_path = task.workspace.path / Stage.TRANSFORM.value
@@ -42,15 +47,13 @@ class WriteStage(ExecutionStage):
             raise RollbackRequired(Stage.TRANSFORM.value, "Missing transform data")
 
         # Verify parquet files exist if rows were expected
-        transform = task.manifest.transform
-        if transform.output_count and not any(transform_path.glob("*.parquet")):
+        if self.transform.output_count and not any(transform_path.glob("*.parquet")):
             raise RollbackRequired(Stage.TRANSFORM.value, "Missing parquet files")
 
-    def execute(self, task: "Task") -> str:
+    def _execute(self, task: "Task") -> str:
         """Load transformed data to staging."""
         start_ts = current_timestamp(naive=True).isoformat(sep=" ")
         extract = task.manifest.extract
-        transform = cast("TransformPayload", task.manifest.transform)
 
         try:
             source_dir = (task.workspace.path / Stage.TRANSFORM.value).resolve()
@@ -60,9 +63,9 @@ class WriteStage(ExecutionStage):
             loader = LoaderFactory.get_loader(self.config.type)
             load_ctx = LoadContext(
                 target=self.config.destination,
-                partition_by=self.config.partition_by,
-                partition_value=self.config.partition_value,
-                expected_count=transform.output_count,
+                partition_on=task.context.partition_on,
+                partition_value=task.context.partition_date,
+                expected_count=self.transform.output_count,
             )
 
             audit = {
@@ -83,7 +86,7 @@ class WriteStage(ExecutionStage):
                 sink_type=self.config.type,
                 staging_artifact=staging_id,
                 write_count=rows,
-                partition_by=self.config.partition_by or "",
+                partition_on=self.config.partition_on or "",
                 partition_value=self.config.partition_value or "",
                 start_time=start_ts,
             )

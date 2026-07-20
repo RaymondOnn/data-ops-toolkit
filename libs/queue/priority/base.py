@@ -6,6 +6,15 @@ from loguru import logger
 LOG = logger
 
 
+class Message:
+    """Wrapper for queue message with ID and data."""
+
+    def __init__(self, id_: str, data: Any, metadata: dict[str, Any] | None = None):
+        self.id = id_
+        self.data = data
+        self.metadata = metadata or {}
+
+
 class PriorityQueue(ABC):
     """Abstract base class for priority task queues."""
 
@@ -41,6 +50,15 @@ class PriorityQueue(ABC):
         pass
 
     @abstractmethod
+    def pop_by_key(self, key: str) -> Any | None:
+        """Atomically pop a specific task by its unique storage key.
+
+        Args:
+            key: The specific storage key identifier to evict.
+        """
+        pass
+
+    @abstractmethod
     def ack(self, msg_id: str) -> None:
         """Acknowledge successful task completion.
 
@@ -71,15 +89,15 @@ class PriorityQueue(ABC):
         """
         pass
 
+    @abstractmethod
+    def peek(self) -> Any | None:
+        """Peek at the highest priority task without removing it.
+
+        Returns:
+            Task message object with id and data, or None if queue empty
+        """
+        pass
+
     def __repr__(self) -> str:
         param_str = ", ".join([f"{k}={v!r}" for k, v in self.__dict__.items()])
         return f"{self.__class__.__name__}({param_str})"
-
-
-class TaskMessage:
-    """Wrapper for queue message with ID and data."""
-
-    def __init__(self, id_: str, data: Any, metadata: dict[str, Any] | None = None):
-        self.id = id_
-        self.data = data
-        self.metadata = metadata or {}

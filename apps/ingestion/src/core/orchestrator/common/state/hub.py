@@ -3,8 +3,9 @@
 from pathlib import Path
 from typing import Any
 
-from apps.ingestion.src.core.contexts.execution import ExecutionContext
-from apps.ingestion.src.core.models.task.enums import TaskRef
+import msgspec
+from apps.ingestion.src.core.contexts import ExecutionContext, TaskContext
+from apps.ingestion.src.core.models.task import TaskManifest
 from apps.ingestion.src.core.orchestrator.enums import TaskUpdate
 from apps.ingestion.src.utils.common import find_path
 from loguru import logger
@@ -49,20 +50,22 @@ class StateHub:
 
         LOG.info("StateHub initialized", workspace=str(self.workspace_dir))
 
-    def add_task(self, task_ref: TaskRef) -> None:
-        """Registers a new task in both the cache and the log stream.
+    # def add_task(self, task_ref: TaskRef) -> None:
+    #     """Registers a new task in both the cache and the log stream.
 
-        Args:
-            task_ref: Routing and identity handle for the task.
-        """
-        run_id = task_ref.identity.run_id
-        LOG.debug("Adding task to state tracking", run_id=run_id)
+    #     Args:
+    #         task_ref: Routing and identity handle for the task.
+    #     """
+    #     run_id = task_ref.identity.run_id
+    #     LOG.debug("Adding task to state tracking", run_id=run_id)
 
-        self.store.add(task_ref)
-        record = self.store.get(run_id)
-        if record:
-            self.sink.append(record)
-            LOG.debug("Task added to sink buffer", run_id=run_id)
+    #     self.store.update(task_ref)
+    #     record = self.store.get(run_id)
+    #     if record:
+    #         print(record)
+    #         initial_event = TaskUpdate.from_record(record)
+    #         self.sink.append(initial_event)
+    #         LOG.debug("Task added to sink buffer", run_id=run_id)
 
     def update_task(self, run_id: str, updates: TaskUpdate | dict[str, Any]) -> None:
         """Applies partial updates to a task and flushes to the sink.
@@ -76,15 +79,18 @@ class StateHub:
             actual value change. This prevents redundant I/O for
             idempotent heartbeats.
         """
-        LOG.debug("Updating task state", run_id=run_id, updates=str(updates)[:200])
+        LOG.trace("Updating task state", run_id=run_id, updates=str(updates)[:200])
 
-        if self.store.update(run_id, updates):
-            record = self.store.get(run_id)
-            if record:
-                self.sink.append(record)
-                LOG.debug("Task update appended to buffer", run_id=run_id)
-        else:
-            LOG.warning("Task update failed", run_id=run_id)
+        try:
+            # Single point of structural validation!
+            task_update = msgspec.convert(updates, type=TaskUpdate)
+
+            # Route updates
+            if self.store.update(run_id, task_update):
+                self.sink.append(task_update)
+        except Exception:
+            LOG.exception("Update failed", run_id=run_id)
+            raise
 
     def remove_task(self, run_id: str) -> None:
         """Evicts a task from the in-memory registry.
@@ -111,16 +117,24 @@ class StateHub:
         """
         metadata = metadata or {}
 
-        if isinstance(folder_path, str) and not Path(folder_path).exists():
-            resolved = find_path(self.exec_ctx.workspace_dir, folder_path)
+        resolved_path = Path(folder_path)
+        if not resolved_path.exists():
+            resolved = find_path(self.exec_ctx.workspace_dir, str(folder_path))
             if not resolved:
-                LOG.warning(
-                    "Could not resolve path for manifest sync", path=folder_path
-                )
+                LOG.warning(f"Could not resolve path for manifest sync: {folder_path}")
                 return
-            folder_path = resolved
+            resolved_path = resolved
 
-        self.source.sync_folder(Path(folder_path), deep_sync, metadata)
+        task_manifest = TaskManifest.from_path(folder_path=resolved_path)
+        task_context = TaskContext.from_path(folder_path=resolved_path)
+
+        task_update = self.source.parse_update(
+            task_manifest, task_context, deep_sync, metadata
+        )
+
+        # Route updates
+        if self.store.update(task_manifest.run_id, task_update):
+            self.sink.append(task_update)
 
     def find_task_path(self, identifier: str) -> Path | None:
         """Resolves the physical workspace path for a given task ID.

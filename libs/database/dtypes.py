@@ -1,5 +1,4 @@
 from enum import StrEnum
-from functools import lru_cache
 from typing import Any, Final
 
 import polars as pl
@@ -18,41 +17,49 @@ class TypeGroup(StrEnum):
 
 
 # Type Registry: Database -> Native Type -> TypeGroup
-_TYPE_REGISTRY: Final = {
-    "postgres": {
-        "int4": TypeGroup.NUMERIC,
-        "int8": TypeGroup.NUMERIC,
-        "varchar": TypeGroup.TEXT,
-        "text": TypeGroup.TEXT,
-        "bool": TypeGroup.BOOLEAN,
-        "timestamp": TypeGroup.TEMPORAL,
-        "timestamptz": TypeGroup.TEMPORAL,
-        "date": TypeGroup.TEMPORAL,
-        "jsonb": TypeGroup.OBJECT,
-        "bytea": TypeGroup.BINARY,
-        "_int4": TypeGroup.NUMERIC,  # Array types
-        "_text": TypeGroup.TEXT,
-    },
+_GLOBAL_TYPE_MAPPING: Final[dict[str, TypeGroup]] = {
+    # Text types (Consolidating all database variations to TEXT)
+    "varchar": TypeGroup.TEXT,
+    "varchar2": TypeGroup.TEXT,
+    "nvarchar2": TypeGroup.TEXT,
+    "text": TypeGroup.TEXT,
+    "string": TypeGroup.TEXT,
+    "fixedstring": TypeGroup.TEXT,
+    "clob": TypeGroup.TEXT,
+    "uuid": TypeGroup.TEXT,
+    "_text": TypeGroup.TEXT,
+    # Numeric types
+    "int4": TypeGroup.NUMERIC,
+    "int8": TypeGroup.NUMERIC,
+    "int32": TypeGroup.NUMERIC,
+    "int64": TypeGroup.NUMERIC,
+    "float64": TypeGroup.NUMERIC,
+    "number": TypeGroup.NUMERIC,
+    "binary_double": TypeGroup.NUMERIC,
+    "_int4": TypeGroup.NUMERIC,
+    # Boolean types
+    "bool": TypeGroup.BOOLEAN,
+    "boolean": TypeGroup.BOOLEAN,
+    # Temporal types
+    "date": TypeGroup.TEMPORAL,
+    "datetime": TypeGroup.TEMPORAL,
+    "timestamp": TypeGroup.TEMPORAL,
+    "timestamptz": TypeGroup.TEMPORAL,
+    # Object / Semi-structured types
+    "jsonb": TypeGroup.OBJECT,
+    "json": TypeGroup.OBJECT,
+    # Binary types
+    "bytea": TypeGroup.BINARY,
+    "raw": TypeGroup.BINARY,
+}
+
+_PROVIDER_OVERRIDES: Final[dict[str, dict[str, TypeGroup]]] = {
     "oracle": {
-        "number": TypeGroup.NUMERIC,
-        "binary_double": TypeGroup.NUMERIC,
-        "varchar2": TypeGroup.TEXT,
-        "nvarchar2": TypeGroup.TEXT,
-        "clob": TypeGroup.TEXT,
+        # Treat Oracle DATE as TEMPORAL instead of basic DATE
         "date": TypeGroup.TEMPORAL,
-        "timestamp": TypeGroup.TEMPORAL,
-        "raw": TypeGroup.BINARY,
     },
-    "clickhouse": {
-        "int32": TypeGroup.NUMERIC,
-        "int64": TypeGroup.NUMERIC,
-        "float64": TypeGroup.NUMERIC,
-        "string": TypeGroup.TEXT,
-        "fixedstring": TypeGroup.TEXT,
-        "bool": TypeGroup.BOOLEAN,
-        "date": TypeGroup.TEMPORAL,
-        "datetime": TypeGroup.TEMPORAL,
-        "uuid": TypeGroup.TEXT,
+    "postgres": {
+        # Custom Postgres resolutions if any anomalies arise
     },
 }
 
@@ -75,26 +82,26 @@ class TypeResolver:
     """Resolves database-specific types to canonical Polars types."""
 
     @classmethod
-    @lru_cache(maxsize=1000)
     def resolve_to_group(cls, db_type: str, raw_type: str) -> TypeGroup:
         """Convert DB-specific type string to canonical TypeGroup."""
         base_type = cls._normalize_type(raw_type)
         db_key = db_type.lower()
 
-        provider_map = _TYPE_REGISTRY.get(db_key)
-        if not provider_map:
-            return DEFAULT_TYPE_GROUP
+        # Check database-specific overrides first
+        if (provider_map := _PROVIDER_OVERRIDES.get(db_key)) and (
+            mapped_group := provider_map.get(base_type)
+        ):
+            return mapped_group
 
-        return provider_map.get(base_type, DEFAULT_TYPE_GROUP)
+        # Fall back to the consolidated global multi-string map
+        return _GLOBAL_TYPE_MAPPING.get(base_type, DEFAULT_TYPE_GROUP)
 
     @classmethod
-    @lru_cache(maxsize=100)
     def group_to_polars(cls, group: TypeGroup) -> Any:
         """Map TypeGroup to canonical Polars data type."""
         return _POLARS_MAP.get(group, DEFAULT_POLARS_TYPE)
 
     @classmethod
-    @lru_cache(maxsize=1000)
     def resolve_to_polars(cls, db_type: str, raw_type: str) -> pl.DataType:
         """Complete resolution: DB type -> Polars type."""
         group = cls.resolve_to_group(db_type, raw_type)
@@ -102,17 +109,22 @@ class TypeResolver:
 
     @classmethod
     def _normalize_type(cls, raw_type: str) -> str:
-        """Normalize type string (handle arrays, parameters, case)."""
+        """Strip parameters, nullability wrappers, and whitespace from type strings."""
         if not raw_type:
             return ""
 
         raw = raw_type.strip().lower()
 
-        # Handle PostgreSQL array notation (_int4, _text)
+        # 1. Unpack Nullable or LowCardinality wrappers commonly used in ClickHouse
+        # e.g. "nullable(string)" -> "string"
+        while raw.startswith("nullable(") or raw.startswith("lowcardinality("):
+            raw = raw[raw.find("(") + 1 : -1].strip()
+
+        # 2. Handle PostgreSQL array notation (_int4, _text)
         if raw.startswith("_"):
             return raw
 
-        # Remove parameters (varchar(255) -> varchar)
+        # 3. Remove parameters (e.g., "varchar(255)" -> "varchar")
         if "(" in raw:
             raw = raw.split("(", maxsplit=1)[0]
 
@@ -128,10 +140,3 @@ class TypeResolver:
     def is_text(cls, db_type: str, raw_type: str) -> bool:
         """Check if a type belongs to the TEXT group."""
         return cls.resolve_to_group(db_type, raw_type) == TypeGroup.TEXT
-
-    @classmethod
-    def clear_cache(cls) -> None:
-        """Clear all LRU caches (useful for testing)."""
-        cls.resolve_to_group.cache_clear()
-        cls.group_to_polars.cache_clear()
-        cls.resolve_to_polars.cache_clear()

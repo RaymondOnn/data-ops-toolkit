@@ -1,0 +1,38 @@
+# ClickHouse is notoriously strict about two things that standard ANSI
+# SQL databases aren't:
+# 1. Table Engines: Every CREATE TABLE query must declare an engine (usually
+#   MergeTree()) and define how the data is ordered (ORDER BY).
+# 2. Nullability: ClickHouse types are non-nullable by default.
+#   If a source database has NULL values, the columns in ClickHouse must be
+#   wrapped in Nullable(...) modifiers.
+
+core:
+  drop_table: "drop table if exists {table}"
+
+  # ClickHouse requires an ENGINE. Sling defaults to MergeTree ordered by a dummy tuple
+  # unless primary keys are explicitly specified in the config.
+  create_table: "create table if not exists {table} ({col_types}) engine = MergeTree() order by tuple()"
+
+  truncate: "truncate table {table}"
+  insert: "insert into {table} ({fields}) values ({values})"
+
+metadata:
+  tables: |
+    select name
+    from system.tables
+    where database = '{database}'
+  columns: |
+    select name, type
+    from system.columns
+    where database = '{database}' and table = '{table}'
+
+# -------------------------------------------------------------------------
+# ClickHouse General Type Map (Leverages Nullable wraps to prevent sync crashes)
+# -------------------------------------------------------------------------
+general_type_map:
+  string: "Nullable(String)"
+  integer: "Nullable(Int64)"
+  decimal: "Nullable(Decimal(38, 10))"
+  boolean: "Nullable(Bool)"
+  datetime: "Nullable(DateTime64(6, 'UTC'))"
+  json: "Nullable(String)" # Maps nested JSON payloads as raw strings in Clickhouse

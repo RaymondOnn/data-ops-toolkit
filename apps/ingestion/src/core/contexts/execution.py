@@ -122,11 +122,11 @@ class ExecutionContext(msgspec.Struct, kw_only=True):
 
     def get_run_path(self, identity: TaskIdentity, category: str = "active") -> Path:
         """Get task run directory path."""
-        return self.workspace_dir / category / identity.task_key / identity.run_id
+        return self.workspace_dir / category / identity.key / identity.run_id
 
     def get_signal_name(self, identity: TaskIdentity, extension: str) -> str:
         """Generate signal filename for a task."""
-        return f"{identity.task_key}:{identity.run_id}{extension}"
+        return f"{identity.key}:{identity.run_id}{extension}"
 
     def parse_task_id(self, full_string: str) -> TaskIdentity:
         """Parse colon-delimited string into TaskIdentity."""

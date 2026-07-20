@@ -61,7 +61,7 @@ services:
     environment:
       - SERVICES=iam,s3,secretsmanager,sts,logs,cloudwatch
       - DEBUG=1 # Better than SERVICES; tells you what's happening in logs
-      - ACTIVATE_PRO=0 # Explicitly use community features
+      - ACTIVATE_PRO=0 # Community version: No physical files, things stored in memory
       - DOCKER_HOST=unix:///var/run/docker.sock
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-ap-southeast-1}
       - LANDING_ZONE_BUCKET=${LANDING_ZONE_BUCKET:-landing-zone}

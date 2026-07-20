@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 import msgspec
 import pendulum
 import ray
-from apps.ingestion.src.core.models.task import Task
+from apps.ingestion.src.core.models.task import ExecutionStatus, Task
 from apscheduler.events import EVENT_JOB_ERROR, JobExecutionEvent
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -227,15 +227,24 @@ class DaemonRuntime:
             return
 
         # Update cache state
-        cache_keys = list(self.tasks.cache.iterkeys(pattern=f"*:*:{request.run_id}"))
+        cache_keys = list(self.tasks.cache.find(pattern=f"*:*:{request.run_id}"))
         if cache_keys:
             key = cache_keys[0]
             metadata: TaskMetadata = self.tasks.cache.get(key)
-            metadata.rewind_history = {}
-            metadata.retry_count = 0
-            if request.from_stage:
-                metadata.current_stage = request.from_stage
-            self.tasks.cache[key] = metadata
+
+            # Determine target resume stage
+            resume_stage = request.from_stage or metadata.current_stage
+
+            # Package extra state overrides to pass directly to transition_cache mutations
+            # We enforce WAITING status so the scheduling ring immediately picks it up
+            self.tasks.cache.transition_state(
+                metadata=metadata,
+                next_status=ExecutionStatus.WAITING,
+                next_stage=resume_stage,
+                rewind_history={},  # Clears rewind history via mutations kwargs
+                retry_count=0,  # Resets retry count via mutations kwargs
+                remarks=f"Manual Resume requested. Target stage: {resume_stage}.",
+            )
 
         # Update manifest
         task = Task.from_path(folder, self.exec_ctx)
@@ -266,7 +275,7 @@ class DaemonRuntime:
                     break
 
             try:
-                active_refs = list(self.tasks.active_tasks.keys())
+                active_refs = list(self.tasks.active_tasks.values())
                 if not active_refs:
                     self.signals.wait(timeout=60.0)
                 else:
@@ -311,7 +320,7 @@ class DaemonRuntime:
         try:
             if not self.orchestrator.state.store.records:
                 return
-            self.orchestrator.state.sink.flush_to_disk(force=True)
+
             self.tasks.recover_zombie_tasks()
         except Exception:
             LOG.exception("Recovery sweep failed")

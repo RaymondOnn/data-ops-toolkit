@@ -57,8 +57,8 @@ class ServiceMonitor:
         if cls.__cache is None:
             cls._signal_dir = Path(signal_dir)
             cls.__cache = CacheFactory.create(
-                cache_type=cache_config["type"],
                 **{
+                    "key": cache_config["key"],
                     "directory": cache_config["directory"],
                     "namespace": REGISTRY_CACHE_NAMESPACE,
                     "size_limit": cache_config.get("size_limit", 2**30),
@@ -189,8 +189,8 @@ def monitor(breaker: CircuitBreaker) -> Callable:
                 ServiceMonitor.reset(service)
                 return result
 
-            except breaker.tracked_exceptions as e:
-                breaker.fail(e)
+            except breaker.tracked_exceptions:
+                breaker.fail()
                 ServiceMonitor.record_failure(service)
                 ServiceMonitor.set_state(service, breaker.state)
                 raise

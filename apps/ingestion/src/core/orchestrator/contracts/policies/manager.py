@@ -2,10 +2,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import ray
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
-from apps.ingestion.src.core.models.task import (
-    TaskRef,
-)
-from apps.ingestion.src.core.orchestrator.common.task.compute import Compute
+from apps.ingestion.src.core.orchestrator.common.task.cache import TaskCache
 from apps.ingestion.src.core.orchestrator.enums import TaskMetadata
 from loguru import logger
 
@@ -18,10 +15,9 @@ class AdmissionPolicy(Protocol):
 
     def admit(
         self,
-        cache: Any,
+        cache: TaskCache,
         lock: Any,
-        task_ref: TaskRef,
-        metadata: TaskMetadata,
+        task_meta: TaskMetadata,
     ) -> bool:
         """Return True if task can be admitted, False otherwise."""
         ...
@@ -33,19 +29,10 @@ class MaintenancePolicy(Protocol):
 
     def run(
         self,
-        cache: Any,
+        cache: TaskCache,
         lock: Any,
-        active_refs: dict[ray.ObjectRef, str],
-        compute: Compute,
+        active_tasks: dict[str, ray.ObjectRef],
         exec_ctx: ExecutionContext,
-    ) -> list[tuple[TaskMetadata, str]] | None:
+    ) -> list[TaskMetadata] | None:
         """Run one maintenance cycle."""
-        ...
-
-    def cleanup_tasks(
-        self,
-        active_refs: dict[ray.ObjectRef, str],
-        compute: Compute,
-    ) -> None:
-        """Reclaims resources from completed Ray tasks."""
         ...

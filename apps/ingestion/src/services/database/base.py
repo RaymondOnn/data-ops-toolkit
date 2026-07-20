@@ -5,12 +5,14 @@ handling connection pooling, resource-aware partitioning, and circuit
 breaker integration to ensure resilient data extraction and loading.
 """
 
+import re
 from abc import abstractmethod
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import msgspec
 import polars as pl
 from apps.ingestion.src.core.monitor import monitor
 from apps.ingestion.src.services.base import Service, Sink, Source
@@ -31,6 +33,51 @@ breaker = CircuitBreaker(
     timeout_secs=300,
     tracked_exceptions=(ClientCantConnect, ConnectionError, TimeoutError),
 )
+
+
+class SQLContext(msgspec.Struct, frozen=True):
+    """Encapsulates parameters for building dynamic and complex SQL queries safely."""
+
+    resource: str  # The target table name
+    select: list[str] = msgspec.field(
+        default_factory=list
+    )  # Specific columns to select
+    where: str | None = None  # Filtering expression
+    limit: int | None = None  # Row limitations
+    sql: str | None = None  # Optional raw/complex query
+
+    def compile(self) -> str:
+        """
+        Compiles the components into a single, unified ClickHouse-compatible SQL query
+        using a CTE to cleanly combine 'sql' and 'select/where/limit'.
+        """
+        # 1. Resolve the base dataset (Either the custom SQL query or a standard SELECT *)
+        if self.sql:
+            # Strip trailing semicolons if present in the raw SQL
+            base_query = self.sql.strip().rstrip(";")
+        else:
+            base_query = f"SELECT * FROM {self.resource}"
+
+        # 2. Wrap the base dataset in a CTE so we can safely chain filters/limits
+        cte_query = f"WITH __base_dataset AS ({base_query})"
+
+        # 3. Determine target columns
+        cols_str = ", ".join(self.select) if self.select else "*"
+
+        # 4. Assemble the outer wrapper query
+        final_query = f"{cte_query} SELECT {cols_str} FROM __base_dataset"
+
+        if self.where:
+            # Strip potential user-entered 'WHERE ' prefix for resilience
+            clean_where = self.where.strip()
+            if clean_where.lower().startswith("where"):
+                clean_where = clean_where[5:].strip()
+            final_query += f" WHERE {clean_where}"
+
+        if self.limit is not None:
+            final_query += f" LIMIT {int(self.limit)}"
+
+        return final_query
 
 
 class DatabaseService(Service):
@@ -135,7 +182,29 @@ class DatabaseService(Service):
         Returns:
             int: Total row count.
         """
-        raise NotImplementedError("Database client must implement count_units method.")
+        where = (
+            re.sub(r"(?i)^where\s+", "", filter_condition.strip())
+            if filter_condition
+            else "1=1"
+        )
+        query = f"SELECT COUNT(*) FROM {target} WHERE {where.rstrip('; ')}"
+        return self._count_rows(query)
+
+    def _count_rows(self, query: str) -> int:
+        """
+        Counts rows for a target table or a complex query (including CTEs).
+        """
+        # Wrap the entire complex query/CTE statement as a subquery
+        query_clean = query.strip().rstrip(";")
+        count_sql = f"SELECT COUNT(*) FROM ({query_clean})"
+        print(count_sql)
+
+        try:
+            result = self.fetch(count_sql)
+            return int(result[0][0]) if result else 0
+        except Exception:
+            LOG.exception(f"Count failed for target query/table: {query[:50]}...")
+            return 0
 
 
 class DatabaseSource(DatabaseService, Source):
@@ -147,7 +216,7 @@ class DatabaseSource(DatabaseService, Source):
         num_workers: int | None = None,
         filter_condition: str | None = None,
         **kwargs: Any,
-    ) -> set[str]:
+    ) -> list[str]:
         """Calculates optimal parallel partitions based on a Cell-Budget heuristic.
 
         Instead of splitting by row count alone, we calculate the total volume
@@ -164,8 +233,15 @@ class DatabaseSource(DatabaseService, Source):
         Returns:
             set[str]: A collection of parallel SQL queries.
         """
-        total_rows = self.count_units(target, filter_condition)
-        num_columns = len(kwargs.get("schema", [])) or 20
+        sql_context = kwargs.get("sql_context")
+        if sql_context:
+            compiled_query = sql_context.compile()
+            num_columns = len(sql_context.select)
+        else:
+            compiled_query = f"SELECT * FROM {target}"
+            num_columns = self.client.get_schema(target).height
+
+        total_rows = self._count_rows(compiled_query)
         total_cells = total_rows * num_columns
 
         if num_workers:
@@ -178,7 +254,7 @@ class DatabaseSource(DatabaseService, Source):
                     f"Manual worker count ({num_workers}) may cause OOM. "
                     f"Each worker will handle {cells_per_worker:_} cells. "
                     f"Suggested workers for this width: {suggested}",
-                    service=self.name,
+                    source=self.name,
                 )
         else:
             # 1. Calculate ideal worker count based on cell memory budget
@@ -196,10 +272,29 @@ class DatabaseSource(DatabaseService, Source):
         LOG.info(
             f"DB Partitioning: {total_rows:_} rows, {num_columns} cols "
             f"({total_cells:_} total cells). Using {num_workers} workers.",
-            service=self.name,
+            source=self.name,
         )
 
-        return self.client.partition_load(target, num_workers, filter_condition)
+        return self._partition_load(query=compiled_query, num_workers=num_workers)
+
+    @abstractmethod
+    def _partition_load(
+        self,
+        query: str,
+        num_workers: int = 10,
+    ) -> list[str]:
+        """
+        Generates a set of partitioned queries for parallel loading.
+
+        Args:
+            table_name: Fully qualified name of the source table.
+            num_workers: Number of parallel loaders/workers.
+            filter_condition: Optional filter condition.
+
+        Returns:
+            set[str]: A set of query strings for distributed execution.
+        """
+        raise NotImplementedError("Subclasses must implement this method")
 
     def resolve_identity(
         self, target: str, items: list[str] | None = None, **kwargs
@@ -249,7 +344,7 @@ class DatabaseSink(DatabaseService, Sink):
         self,
         staging: str,
         target: str,
-        partition_by: str,
+        partition_on: str,
         partition_value: str,
         expected_count: int,
     ) -> None:
@@ -258,7 +353,7 @@ class DatabaseSink(DatabaseService, Sink):
         Args:
             staging: The staging table identifier.
             target: The production table identifier.
-            partition_by: The column used for partitioning logic.
+            partition_on: The column used for partitioning logic.
             partition_value: The value to overwrite.
             expected_count: Final count verification.
         """

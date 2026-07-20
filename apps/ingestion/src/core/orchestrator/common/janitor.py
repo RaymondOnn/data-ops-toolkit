@@ -75,7 +75,8 @@ class Janitor:
         except Exception:
             LOG.exception(f"Quarantine failed for {folder_path}")
 
-    def recover_task(self, folder_path: Path) -> None:
+    # TO-DO: Duplicate cache update?
+    def recover_task(self, resume_stage: str, folder_path: Path) -> None:
         """Recover a quarantined / failed task and re-queue it."""
         try:
             task = Task.from_path(folder_path, self.exec_ctx)

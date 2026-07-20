@@ -62,7 +62,7 @@ def test_task_ref_properties(sample_ref):
     WHEN identifier is accessed
     THEN it should return the correctly formatted subsets of the identity
     """
-    assert sample_ref.task_key == "daily_sales:orders:2024-01-01"
+    assert sample_ref.id_key == "daily_sales:orders:2024-01-01"
 
 
 def test_task_ref_build(sample_ref):

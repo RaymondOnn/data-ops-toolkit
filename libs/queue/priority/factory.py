@@ -24,14 +24,12 @@ class QueueFactory:
     _queues: ClassVar[dict[str, PriorityQueue]] = {}
 
     @classmethod
-    def create(
-        cls,
-        queue_type: QueueType = QueueType.DISKCACHE,
-        **kwargs,
-    ) -> PriorityQueue:
+    def create(cls, **kwargs) -> PriorityQueue:
         """Create a priority queue instance."""
+        if not (key := kwargs.get("key")):
+            raise ValueError("Queue key is required.")
 
-        match queue_type:
+        match queue_type := QueueType(value=str(key)):
             case QueueType.DISKCACHE:
                 directory = kwargs.get("directory")
                 if not directory:
@@ -59,7 +57,7 @@ class QueueFactory:
     ) -> PriorityQueue:
         """Get or create a singleton queue instance."""
         if name not in cls._queues:
-            cls._queues[name] = cls.create(queue_type, **kwargs)
+            cls._queues[name] = cls.create(**kwargs)
         return cls._queues[name]
 
     @classmethod

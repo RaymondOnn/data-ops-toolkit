@@ -6,6 +6,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import polars as pl
 from apps.ingestion.src.core.monitor import monitor
 from apps.ingestion.src.utils.exceptions import TryAgainLater
@@ -73,7 +74,8 @@ class BaseStorage(Service):
         return create_fs_client(
             url=self.url,
             capabilities=self.capabilities,
-            options={**self.options, **resolved_config},
+            **self.options,
+            **resolved_config,
         )
 
     @property
@@ -135,11 +137,11 @@ class StorageSource(BaseStorage, Source):
         self, target: str, items: list[str] | None = None, **kwargs
     ) -> str:
         items = items or []
-        file_pattern = kwargs.get("file_pattern")
+        glob = kwargs.get("glob")
 
-        if file_pattern:
+        if glob:
             # Archive with internal pattern
-            return f"📦 {Path(target).name} → {file_pattern}"
+            return f"📦 {Path(target).name} → {glob}"
         if len(items) == 1:
             # Single file
             return f"📄 {Path(items[0]).name}"
@@ -211,7 +213,7 @@ class StorageSource(BaseStorage, Source):
             # Coalesce small files (Setup cost > Processing cost)
             if total_bytes < MIN_BYTES_PER_WORKER:
                 LOG.info(f"Coalescing small files ({total_bytes/1024:.1f}KB)")
-                return [{"files": files}]
+                units = [{"files": files}]
 
             if not num_workers:
                 num_workers = int(total_bytes // MIN_BYTES_PER_WORKER)
@@ -221,12 +223,25 @@ class StorageSource(BaseStorage, Source):
             # A few large files vs many workers
             if len(files) < num_workers and handler.splittable:
                 LOG.debug(f"Intra-file slicing with {num_workers} workers")
-                return self._slice_files(files, num_workers, handler)
+                units = self._slice_files(files, num_workers, handler)
 
             # Default: Greedy File-level sharding
             active = min(num_workers, len(files))
             LOG.debug(f"File-level greedy sharding with {active} workers")
-            return self._balance_workload(files, active)
+            units = self._balance_workload(files, active)
+
+            sql_configs = {
+                "select": kwargs.get("select"),
+                "where": kwargs.get("where"),
+                "limit": kwargs.get("limit"),
+                "sql": kwargs.get("sql"),
+                "skip_blank_lines": kwargs.get("skip_blank_lines"),
+                "header": kwargs.get("header"),
+            }
+            for unit in units:
+                unit.update(sql_configs)
+
+            return units
 
         finally:
             if temp_dir and cleanup:
@@ -308,7 +323,7 @@ class StorageSource(BaseStorage, Source):
         units = []
 
         for meta in metadata:
-            path, rows = meta["path"], meta["rows"]
+            path, rows = str(meta["path"]), int(meta["rows"])
             slices = max(1, round(rows / per_worker))
             slice_size = rows // slices
 
@@ -325,30 +340,81 @@ class StorageSource(BaseStorage, Source):
         return units
 
     @monitor(breaker)
-    def pull(self, unit: dict | list | str) -> pl.LazyFrame:
+    def pull(self, unit: dict | list | str) -> pl.DataFrame:
         """Fetch data for a work unit."""
-        if isinstance(unit, dict):
-            paths = unit["files"]
-            slice_conf = unit.get("slice")
-        else:
-            paths = [unit] if isinstance(unit, str) else unit
-            slice_conf = None
-
-        # Resolve paths
+        # Normalize incoming unit structures up front
+        unit_dict = unit if isinstance(unit, dict) else {}
+        paths = (
+            unit_dict["files"]
+            if isinstance(unit, dict)
+            else ([unit] if isinstance(unit, str) else unit)
+        )
+        slice_conf = unit_dict.get("slice")
         resolved = [p if "://" in str(p) else self.client.resolve(p) for p in paths]
 
-        # Get handler from first file's extension (no get_handler needed)
         ext = Path(resolved[0]).suffix.lstrip(".").lower()
         handler = FormatFactory.get(ext, self.client.fs, self.client.options)
 
-        frames = []
-        for p in resolved:
-            df = handler.to_df(p)
-            if slice_conf:
-                df = df.slice(slice_conf["offset"], slice_conf["length"])
-            frames.append(df)
+        # Extract file arguments and execution bounds
+        file_kwargs = {
+            "has_header": unit_dict.get("header"),
+            "skip_blank_lines": unit_dict.get("skip_blank_lines"),
+        }
+        local_limit = unit_dict.get("limit")
 
-        return pl.concat(frames) if frames else pl.LazyFrame()
+        processed_frames = []
+        rows_accumulated = 0
+
+        for p in resolved:
+            lf = handler.to_df(p, **file_kwargs)
+            lf = lf.lazy() if isinstance(lf, pl.DataFrame) else lf
+
+            if slice_conf:
+                lf = lf.slice(slice_conf["offset"], slice_conf["length"])
+
+            # 1. Check for complete raw SQL replacement override
+            if sql_query := unit_dict.get("sql"):
+                ctx = pl.SQLContext(raw_df=lf)
+                lf = ctx.execute(sql_query, eager=False)
+
+            # 2. Build and run the standard filter/projection/budget pipeline
+            unified_sql = self._build_unified_sql(unit_dict, rows_accumulated)
+            ctx = pl.SQLContext(raw_df=lf)
+            lf = ctx.execute(unified_sql, eager=False)
+
+            df_file = lf.collect()
+            if (rows_in_file := df_file.height) > 0:
+                processed_frames.append(df_file)
+                rows_accumulated += rows_in_file
+
+            # Break early if our global worker limits are fully fulfilled
+            if local_limit is not None and rows_accumulated >= local_limit:
+                break
+
+        return pl.concat(processed_frames) if processed_frames else pl.DataFrame()
+
+    @staticmethod
+    def _build_unified_sql(unit_dict: dict[str, Any], rows_accumulated: int) -> str:
+        """Generates a combined projection, filter, and budget limit SQL query."""
+        select_cols = unit_dict.get("select")
+        if isinstance(select_cols, np.ndarray):
+            select_cols = select_cols.tolist()
+
+        projection = "*"
+        if select_cols:
+            clean_cols = [col.rstrip(",").strip() for col in select_cols]
+            projection = ", ".join(clean_cols)
+
+        query_parts = [f"SELECT {projection} FROM raw_df"]
+
+        if where_cond := unit_dict.get("where"):
+            query_parts.append(f"WHERE {where_cond}")
+
+        if local_limit := unit_dict.get("limit"):
+            remaining_needed = max(0, local_limit - rows_accumulated)
+            query_parts.append(f"LIMIT {remaining_needed}")
+
+        return " ".join(query_parts)
 
 
 class StorageSink(BaseStorage, Sink):
@@ -370,12 +436,12 @@ class StorageSink(BaseStorage, Sink):
         self,
         staging: str,
         target: str,
-        partition_by: str,
+        partition_on: str,
         partition_value: str,
         expected_count: int,
     ) -> None:
         """Move staged data to production."""
-        final = f"{target}/{partition_by}={partition_value}"
+        final = f"{target}/{partition_on}={partition_value}"
 
         if self.client.exists(final):
             self.client.rm(final, recursive=True)

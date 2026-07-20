@@ -1,14 +1,13 @@
-# health.py
+# system.py
 """System health monitoring and management."""
 
-import sys
 import time
 from enum import Enum
 from pathlib import Path
-from typing import ClassVar, Self
+from typing import ClassVar
 
 import msgspec
-from libs.utils.system import get_disk_usage, get_system_vitals
+import psutil
 from loguru import logger
 
 LOG = logger
@@ -20,6 +19,24 @@ DISK_THRESHOLD_BLOCKED = 95.0
 MEMORY_THRESHOLD_WARN = 80.0
 MEMORY_THRESHOLD_CRITICAL = 90.0
 MEMORY_THRESHOLD_BLOCKED = 95.0
+
+
+def get_disk_usage(path: Path) -> float:
+    """Get disk usage percentage for a given path."""
+    try:
+        usage = psutil.disk_usage(str(path))
+        return usage.percent
+    except Exception:
+        return 0.0
+
+
+def get_system_vitals() -> dict:
+    """Get system vitals including memory percentage."""
+    try:
+        mem = psutil.virtual_memory()
+        return {"mem_pct": mem.percent, "cpu_pct": psutil.cpu_percent(interval=0.1)}
+    except Exception:
+        return {"mem_pct": 0.0, "cpu_pct": 0.0}
 
 
 class HealthStatus(Enum):
@@ -45,27 +62,17 @@ class HealthStatus(Enum):
 
 
 class SystemHealth(msgspec.Struct):
-    """Current system health snapshot.
-
-    Notes:
-    - We use msgspec.Struct to ensure efficient serialization and deserialization.
-    """
+    """Current system health snapshot."""
 
     disk_usage_pct: float
     memory_usage_pct: float
     disk_status: HealthStatus
     memory_status: HealthStatus
     status: HealthStatus
-    last_checked: float
 
     @classmethod
-    def from_metrics(
-        cls,
-        disk_usage_pct: float,
-        memory_usage_pct: float,
-        last_checked: float | None = None,
-    ):
-        # Evaluate statuses
+    def from_metrics(cls, disk_usage_pct: float, memory_usage_pct: float):
+        """Create SystemHealth from metrics."""
         disk_status = HealthStatus.evaluate(
             disk_usage_pct,
             DISK_THRESHOLD_WARN,
@@ -88,14 +95,12 @@ class SystemHealth(msgspec.Struct):
         ]
         status = max([disk_status, memory_status], key=status_order.index)
 
-        # Call parent struct initializer
         return cls(
             disk_usage_pct=disk_usage_pct,
             memory_usage_pct=memory_usage_pct,
             disk_status=disk_status,
             memory_status=memory_status,
             status=status,
-            last_checked=last_checked or time.time(),
         )
 
     def message(self) -> str:
@@ -171,20 +176,29 @@ class SystemMonitor:
             pass
     """
 
-    _instance: ClassVar[Self | None] = None
-    _last_report: ClassVar[SystemHealth | None] = None
+    _instance: ClassVar["SystemMonitor| None"] = None
     _workspace_dir: ClassVar[Path | None] = None
     _initialized: ClassVar[bool] = False
 
-    def __new__(cls, workspace_dir: Path) -> Self:
+    # Lazy-loading TTL cache configurations
+    _report: ClassVar[SystemHealth | None] = None
+    _report_expires_at: ClassVar[float] = 0.0
+    _report_ttl_secs: ClassVar[float] = 10.0
+
+    # Hard Resource Constraint Circuit Breaker
+    _disk_blocked_until: ClassVar[float] = 0.0
+    _cooldown_secs: ClassVar[float] = 300.0
+
+    def __new__(cls, workspace_dir: Path) -> "SystemMonitor":
         if cls._instance is None:
             cls._instance = super().__new__(cls)
+            cls._workspace_dir = Path(workspace_dir)
         return cls._instance
 
     def __init__(self, workspace_dir: Path):
-        # Access and modify the variables at the class level (cls)
+        # Only initialize once
         if not self.__class__._initialized:
-            self.__class__._workspace_dir = workspace_dir
+            self.__class__._workspace_dir = Path(workspace_dir)
             self.__class__._initialized = True
             # Perform initial check
             self.check()
@@ -193,9 +207,18 @@ class SystemMonitor:
     def reset(cls) -> None:
         """Reset singleton (for testing)."""
         cls._instance = None
-        cls._last_report = None
         cls._workspace_dir = None
+        cls._report = None
         cls._initialized = False
+
+    @property
+    def report(self) -> SystemHealth:
+        """Lazy-loaded report property that refreshes automatically if expired."""
+        now = time.time()
+        if self._report is None or now >= self._report_expires_at:
+            # Cache missed or expired; trigger a fresh system diagnostic run
+            self.check()
+        return self._report
 
     def check(self) -> SystemHealth:
         """
@@ -204,135 +227,136 @@ class SystemMonitor:
         Returns:
             SystemHealth: Current health snapshot.
         """
-        if self._workspace_dir is None:
-            raise RuntimeError("SystemMonitor not initialized with workspace_dir")
+        if self.__class__._workspace_dir is None:
+            return SystemHealth(
+                0.0,
+                0.0,
+                HealthStatus.HEALTHY,
+                HealthStatus.HEALTHY,
+                HealthStatus.HEALTHY,
+            )
 
-        vitals = get_system_vitals()
-        disk = get_disk_usage(self._workspace_dir)
+        try:
+            now = time.time()
+            vitals = get_system_vitals()
+            mem_pct = vitals.get("mem_pct", 0.0)
 
-        health = SystemHealth.from_metrics(
-            disk_usage_pct=disk.percent,
-            memory_usage_pct=vitals.mem_pct,
-        )
+            disk_pct = get_disk_usage(self.__class__._workspace_dir)
 
-        # Cache the result at the class level so class methods can access it
-        self.__class__._last_report = health
+            disk_status = HealthStatus.evaluate(
+                disk_pct,
+                DISK_THRESHOLD_WARN,
+                DISK_THRESHOLD_CRITICAL,
+                DISK_THRESHOLD_BLOCKED,
+            )
+            memory_status = HealthStatus.evaluate(
+                mem_pct,
+                MEMORY_THRESHOLD_WARN,
+                MEMORY_THRESHOLD_CRITICAL,
+                MEMORY_THRESHOLD_BLOCKED,
+            )
 
-        # Log if degraded
-        if health.is_degraded:
-            LOG.warning(health.message())
+            # Overall status is the worst of the two
+            status_order = [
+                HealthStatus.HEALTHY,
+                HealthStatus.DEGRADED,
+                HealthStatus.CRITICAL,
+                HealthStatus.BLOCKED,
+            ]
+            overall_status = max([disk_status, memory_status], key=status_order.index)
 
-        return health
+            report = SystemHealth(
+                disk_usage_pct=disk_pct,
+                memory_usage_pct=mem_pct,
+                disk_status=disk_status,
+                memory_status=memory_status,
+                status=overall_status,
+            )
 
-    @classmethod
-    def get_last_report(cls) -> SystemHealth | None:
-        """Get the last cached health report."""
-        return cls._last_report
+            # Update cache timestamps
+            self.__class__._report = report
+            self.__class__._report_expires_at = now + self.__class__._report_ttl_secs
 
-    @classmethod
-    def is_disk_blocked(cls) -> bool:
+            # If disk pressure is critical or worse, trip the 5-minute circuit breaker window
+            if disk_status in (HealthStatus.CRITICAL, HealthStatus.BLOCKED):
+                self.__class__._disk_blocked_until = now + self.__class__._cooldown_secs
+                LOG.error(
+                    f"System disk pressure CRITICAL ({disk_pct:.1f}%). "
+                    f"Tripping health circuit breaker for {self._cooldown_secs}s."
+                )
+
+            return report
+
+        except Exception as e:
+            LOG.error(f"Failed to compile system health diagnostic check: {e}")
+            return SystemHealth(
+                0.0,
+                0.0,
+                HealthStatus.HEALTHY,
+                HealthStatus.HEALTHY,
+                HealthStatus.HEALTHY,
+            )
+
+    def is_disk_blocked(self) -> bool:
         """
         Check if disk is currently blocked.
 
         Returns:
             bool: True if disk usage is at BLOCKED level.
         """
-        if cls._last_report is None:
-            # If no report, assume healthy (caller should check first)
-            return False
-        return cls._last_report.is_disk_blocked
+        now = time.time()
+        # Fast-path check: Is the circuit breaker currently tripped?
+        if now < self.__class__._disk_blocked_until:
+            return True
 
-    @classmethod
-    def is_memory_blocked(cls) -> bool:
+        # Inspect via the lazy-loaded property (will trigger check() internally if expired)
+        report = self.report
+        return report.disk_status in (HealthStatus.CRITICAL, HealthStatus.BLOCKED)
+
+    def is_memory_blocked(self) -> bool:
         """
         Check if memory is currently blocked.
 
         Returns:
             bool: True if memory usage is at BLOCKED level.
         """
-        if cls._last_report is None:
-            return False
-        return cls._last_report.memory_status == HealthStatus.BLOCKED
+        return self.report.memory_status == HealthStatus.BLOCKED
 
-    @classmethod
-    def is_degraded(cls) -> bool:
+    def is_degraded(self) -> bool:
         """
         Check if system is degraded.
 
         Returns:
             bool: True if system is in degraded state.
         """
-        if cls._last_report is None:
-            return False
-        return cls._last_report.is_degraded
+        return self.report.is_degraded
 
-    @classmethod
-    def get_disk_usage(cls) -> float | None:
+    def get_disk_usage(self) -> float | None:
         """
         Get current disk usage percentage.
 
         Returns:
             Optional[float]: Disk usage percentage or None if not available.
         """
-        if cls._last_report is None:
+        if self.__class__._report is None:
             return None
-        return cls._last_report.disk_usage_pct
+        return self.__class__._report.disk_usage_pct
 
-    @classmethod
-    def get_memory_usage(cls) -> float | None:
+    def get_memory_usage(self) -> float | None:
         """
         Get current memory usage percentage.
 
         Returns:
             Optional[float]: Memory usage percentage or None if not available.
         """
-        if cls._last_report is None:
+        if self.__class__._report is None:
             return None
-        return cls._last_report.memory_usage_pct
-
-    @classmethod
-    def validate_or_halt(cls) -> None:
-        """
-        Check health and halt if system is blocked.
-
-        Raises:
-            SystemExit: If system is in BLOCKED state.
-        """
-        if cls._last_report is None:
-            # No report available - create one if we have workspace_dir
-            if cls._instance is not None and cls._workspace_dir is not None:
-                cls._instance.check()
-            else:
-                LOG.warning("Cannot validate health - SystemMonitor not initialized")
-                return
-
-        if cls._last_report and cls._last_report.status == HealthStatus.BLOCKED:
-            LOG.critical(
-                f"Disk full ({cls._last_report.disk_usage_pct:.1f}%). "
-                "Stopping orchestrator."
-            )
-            sys.exit(1)
+        return self.__class__._report.memory_usage_pct
 
     @classmethod
     def force_refresh(cls) -> SystemHealth | None:
-        """
-        Force a refresh of the health check.
-
-        Returns:
-            Optional[SystemHealth]: Updated health report or None if not initialized.
-        """
-        if cls._instance is not None and cls._workspace_dir is not None:
-            return cls._instance.check()
+        """Bypasses active cache intervals to force an immediate raw device check."""
+        if cls._instance is not None:
+            cls._report_expires_at = 0.0  # Invalidate current cache window instantly
+            return cls._instance.report
         return None
-
-    @classmethod
-    def get_status_message(cls) -> str:
-        """
-        Get a human-readable status message.
-
-        Returns:
-            str: Status message or "Unknown" if not available.
-        """
-        if cls._last_report is None:
-            return "System status unknown"
-        return cls._last_report.message()

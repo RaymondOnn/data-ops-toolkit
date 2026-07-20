@@ -1,0 +1,137 @@
+# postgres.yaml
+
+# -----------------------------------------------------------------------------
+# 1. CORE OPERATIONAL SQL (DDL & DML)
+# -----------------------------------------------------------------------------
+core:
+  drop_table: "drop table if exists {table} cascade"
+  drop_view: "drop view if exists {view} cascade"
+  drop_schema: "drop schema if exists {schema} cascade"
+
+  create_schema: "create schema if not exists {schema}"
+  create_table: "create table if not exists {table} ({col_types})"
+
+  truncate: "truncate table {table}"
+
+  # Standard insert using standard positional parameters ($1, $2, etc.)
+  insert: "insert into {table} ({fields}) values ({values})"
+
+  # PostgreSQL native upsert for target_options (merge_strategy: upsert)
+  replace: "insert into {table} ({fields}) values ({values}) on conflict ({pk}) do update"
+
+  # Secondary temp updates used during some legacy sync steps
+  update_temp: "update {table} set {set_values} where {join_cond}"
+
+# -----------------------------------------------------------------------------
+# 2. MERGE STRATEGIES (Used during Incremental / Upsert Sync Modes)
+# -----------------------------------------------------------------------------
+merge:
+  # Strategy 1: merge_strategy: update (Overwrite matching rows, ignore new ones)
+  merge_update: |
+    update {tgt_table} tgt
+    set {set_values}
+    from {src_table} src
+    where {join_cond}
+
+  # Strategy 2: merge_strategy: insert (Only insert missing rows based on primary keys)
+  merge_insert: |
+    insert into {tgt_table} ({insert_fields})
+    select {src_fields}
+    from {src_table} src
+    where not exists (
+      select 1
+      from {tgt_table} tgt
+      where {join_cond}
+    )
+
+  # Strategy 3: merge_strategy: upsert (Transactional drop-stage update + insert loop)
+  merge_delete: |
+    delete from {tgt_table} tgt
+    using {src_table} src
+    where {join_cond}
+
+# -----------------------------------------------------------------------------
+# 3. METADATA QUERIES (Sling schema discovery & target table inspection)
+# -----------------------------------------------------------------------------
+metadata:
+  # Check if a specific table exists in the DB
+  table_exists: |
+    select count(*)
+    from information_schema.tables
+    where table_schema = '{schema}' and table_name = '{table}'
+
+  # Discover all tables inside a specific database schema
+  tables: |
+    select table_name
+    from information_schema.tables
+    where table_schema = '{schema}' and table_type = 'BASE TABLE'
+    order by table_name
+
+  # Fetch column lists and active data types to build schema maps
+  columns: |
+    select column_name, data_type, character_maximum_length, numeric_precision, numeric_scale, is_nullable
+    from information_schema.columns
+    where table_schema = '{schema}' and table_name = '{table}'
+    order by ordinal_position
+
+  # Identify primary keys to automate incremental sync configs
+  primary_keys: |
+    select kcu.column_name
+    from information_schema.table_constraints tc
+    join information_schema.key_column_usage kcu
+      on tc.constraint_name = kcu.constraint_name
+      and tc.table_schema = kcu.table_schema
+    where tc.constraint_type = 'PRIMARY KEY'
+      and tc.table_schema = '{schema}'
+      and tc.table_name = '{table}'
+    order by kcu.ordinal_position
+
+# -----------------------------------------------------------------------------
+# 4. DATA PROFILING & CHECKS
+# -----------------------------------------------------------------------------
+analysis:
+  count: "select count(*) as cnt from {table}"
+  sample: "select {fields} from {table} limit {n}"
+
+# -----------------------------------------------------------------------------
+# 5. IN-FLIGHT TRANSFORM FUNCTION WRAPPER TEMPLATES
+# -----------------------------------------------------------------------------
+function:
+  cast_to_date: "cast({val} as date)"
+  cast_to_string: "cast({val} as varchar)"
+  md5: "md5({val})"
+  coalesce: "coalesce({val}, {default})"
+
+# -----------------------------------------------------------------------------
+# 6. TYPE MAPS (Direct translation rules between Sling and Postgres)
+# -----------------------------------------------------------------------------
+general_type_map:
+  string: "varchar(65535)"
+  integer: "bigint"
+  decimal: "numeric(38,9)"
+  float: "double precision"
+  boolean: "boolean"
+  date: "date"
+  time: "time without time zone"
+  datetime: "timestamp with time zone"
+  json: "jsonb"
+  binary: "bytea"
+
+native_type_map:
+  character varying: "string"
+  text: "string"
+  character: "string"
+  bigint: "integer"
+  integer: "integer"
+  smallint: "integer"
+  numeric: "decimal"
+  double precision: "float"
+  real: "float"
+  boolean: "boolean"
+  date: "date"
+  time without time zone: "time"
+  timestamp with time zone: "datetime"
+  timestamp without time zone: "datetime"
+  jsonb: "json"
+  json: "json"
+  bytea: "binary"

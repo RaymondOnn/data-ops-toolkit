@@ -10,16 +10,16 @@ default:
 
   # Secret Provider (global, environment-specific)
   secret_provider:
-    type: "env_file"           # env_file, aws_secrets_manager, file_encrypted
-    path: "./secrets.json"     # for env_file type
-    master_key_env: "MASTER_KEY"  # for encrypted secrets
+    key: "env_file"           # env_file, aws_secrets_manager, file_encrypted
+    secrets_json: "./secrets.json"     # for env_file type
+    master_key: "MASTER_KEY"  # for encrypted secrets
 
   cache:
-    type: diskcache
+    key: diskcache
     directory: "@format {this.workspace_dir}/.cache/task_cache"
 
   task_queue:
-    type: diskcache
+    key: diskcache
     directory: "@format {this.workspace_dir}/.cache/task_queue"
 
   meta_db:
@@ -34,15 +34,15 @@ default:
 
 local:
   secret_provider:
-    type: "local_file"
-    path: "./apps/ingestion/infra/environments/local/.secrets.json"
-    master_key: "SECRET_MASTER_KEY" # This can be an env var name or plain text for local dev
+    key: "local_file"
+    secrets_json: "./apps/ingestion/infra/environments/local/.secrets.json"
+    # master_key: "SECRET_MASTER_KEY" # This can be an env var name or plain text for local dev
 
   # archive:
   #   base_path: "s3://archive-vault"
 
   cache:
-    type: diskcache
+    key: diskcache
     directory: "@format {this.workspace_dir}/.cache/task_cache"
 
   timeouts:
@@ -51,24 +51,20 @@ local:
 
 dev:
   secret_provider:
-    type: aws_secrets_manager
-    service:
-      endpoint_url: "http://${LOCALSTACK_HOST:-localhost}:4566"
-    client:
-      region: "ap-southeast-1"
-      sts_endpoint_url: "http://${LOCALSTACK_HOST:-localhost}:4566"
-      role_arn: "arn:aws:iam::123456789012:role/DevIngestionRole"
-  services:
+    key: aws_secrets_manager
+    sm_endpoint_url: "http://${LOCALSTACK_HOST:-localhost}:4566"
+    region: "ap-southeast-1"
+    sts_endpoint_url: "http://${LOCALSTACK_HOST:-localhost}:4566"
+    role_arn: "arn:aws:iam::123456789012:role/DevIngestionRole"
+
 
 
 prod:
   secret_provider:
-    type: aws_secrets_manager
-    service:
-      endpoint_url: "https://secretsmanager.ap-southeast-1.amazonaws.com"
-    client:
-      region: "ap-southeast-1"
-      sts_endpoint_url: "https://sts.us-west-2.amazonaws.com"
-      role_arn: "arn:aws:iam::123456789012:role/ProdIngestionRole"
+    key: aws_secrets_manager
+    sm_endpoint_url: "https://secretsmanager.ap-southeast-1.amazonaws.com"
+    region: "ap-southeast-1"
+    sts_endpoint_url: "https://sts.us-west-2.amazonaws.com"
+    role_arn: "arn:aws:iam::123456789012:role/ProdIngestionRole"
   archive:
     base_path: "s3://prod-vault/archival"

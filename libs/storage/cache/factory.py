@@ -18,8 +18,6 @@ class CacheFactory:
 
     @staticmethod
     def create(
-        cache_type: str,
-        namespace: str | None = None,
         **kwargs,
     ) -> Cache:
         """Create a cache instance.
@@ -66,37 +64,41 @@ class CacheFactory:
                 namespace="test"
             )
         """
+        key = kwargs.get("key")
+        if not key:
+            raise ValueError("Cache Key is required...")
 
-        if cache_type == CacheType.DISKCACHE:
-            from .diskcache import DiskCache
+        namespace = kwargs.get("namespace")
+        match key:
+            case CacheType.DISKCACHE:
+                from .diskcache import DiskCache
 
-            directory = kwargs.get("directory")
-            if not directory:
-                raise ValueError("directory is required for DiskCache")
+                if not (directory := kwargs.get("directory")):
+                    raise ValueError("directory is required for DiskCache")
 
-            cache: Cache = DiskCache(
-                directory=directory,
-                namespace=namespace,
-                size_limit=kwargs.get("size_limit", 2**30),
-                timeout=kwargs.get("timeout", 5),
-            )
+                cache: Cache = DiskCache(
+                    directory=directory,
+                    namespace=namespace,
+                    size_limit=kwargs.get("size_limit", 2**30),
+                    timeout=kwargs.get("timeout", 5),
+                )
 
-        elif cache_type == CacheType.REDIS:
-            from .redis import RedisCache
+            case CacheType.REDIS:
+                from .redis import RedisCache
 
-            cache = RedisCache(
-                redis_url=kwargs.get("redis_url", "redis://localhost:6379/0"),
-                namespace=namespace,
-                **{k: v for k, v in kwargs.items() if k not in ["redis_url"]},
-            )
+                cache = RedisCache(
+                    redis_url=kwargs.get("redis_url", "redis://localhost:6379/0"),
+                    namespace=namespace,
+                    **{k: v for k, v in kwargs.items() if k not in ["redis_url"]},
+                )
 
-        elif cache_type == CacheType.MEMORY:
-            from .memory import MemoryCache
+            case CacheType.MEMORY:
+                from .memory import MemoryCache
 
-            cache = MemoryCache(namespace=namespace)
+                cache: Cache = MemoryCache(namespace=namespace)
 
-        else:
-            raise ValueError(f"Unsupported cache type: {cache_type}")
+            case _:
+                raise ValueError(f"Unsupported cache type: {key}")
 
-        LOG.info(f"Created {cache_type} cache | namespace={namespace}")
+        LOG.info(f"Created {key} cache | namespace={namespace}")
         return cache

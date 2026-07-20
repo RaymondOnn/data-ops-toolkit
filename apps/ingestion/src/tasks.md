@@ -3,30 +3,27 @@ incorporate data retention policies i.e. can keep data for 1 year
 error_handling / exception hook /.
 feature flags
 database mode: truncate / incremental (update_key) / snapshot / cdc
-ween off schema.csv. Use for validation app?
-
-- rename columns
 - primary key field
-- remove masking feature. Better done downstream with role access
-- select field
-- columns fields
-client interfaces: bring them to the forefront
-saving to filesystem -> data lakes
-bash pipe input and output
-Core Type Mapping Engine
-
-<!-- masking type
-load from archive -->
 refine custom transform logic
-work on CD process. Can't proceed to K8S without this
-Why constantly evict expired run?
-check updates
+work on CD process.
+- Can't proceed to K8S without this
+- regression testing
+bug: Why constantly evict expired run?
+bug: check updates
+bug: Dynaconf: New version structure different
+qn: merge state cache with task cache?
+qn: daemon mode + overrides
+idea: saving to filesystem -> data lakes
+idea: bash pipe input and output
+idea: using column info in insert using select query
+idea: new stages: download, iterate, parse for ai pipeline
+idea: two extract steps -> merge the two datasets
+idea: dry run mode
 
-dry run mode
-regression testing
-servicemonitor
 
-### Planned Enhancements & Reliability
+
+
+### Planned Enhancements & s
 
 - [ ] **Status Integrity**: Add automated validation in `TaskMetadata` ensuring the status in the key matches the serialized object state.
 - [ ] **Queue Monitoring**: Implement 'queue age' tracking to issue `WARNING` logs for tasks stuck in `PENDING` for > 30 minutes.

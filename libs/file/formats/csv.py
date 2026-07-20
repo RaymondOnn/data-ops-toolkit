@@ -51,18 +51,30 @@ class CSVHandler(FormatHandler):
             return pl.LazyFrame()
 
         encoding = kwargs.get("encoding", "utf-8")
+        has_header = kwargs.get("header", False)
+        skip_blank_lines = kwargs.get("skip_blank_lines", False)
+
         lfs = []
 
         for f in files:
             size = self.fs.size(f)
-            # Use scan for large files (>2GB)
-            if size and size > 2 * 1024**3 and not kwargs.get("force_repair"):
-                lfs.append(
-                    pl.scan_csv(f, storage_options=self.options, encoding=encoding)
+            if size and size > 2 * 1024**3 and not self.options.get("force_repair"):
+                # Use scan for large files (>2GB)
+                lf = pl.scan_csv(
+                    source=f,
+                    has_header=has_header,
+                    # storage_options=self.options,
+                    encoding=encoding,
                 )
+                if skip_blank_lines:
+                    lf = lf.filter(pl.any_horizontal(pl.all().is_not_null()))
+                lfs.append(lf)
             else:
                 buffer = self.read_raw(f, encoding=encoding)
-                lfs.append(pl.read_csv(buffer).lazy())
+                df = pl.read_csv(buffer)
+                if skip_blank_lines:
+                    df = df.filter(pl.any_horizontal(pl.all().is_not_null()))
+                lfs.append(df.lazy())
 
         return pl.concat(lfs) if lfs else pl.LazyFrame()
 
@@ -105,7 +117,7 @@ class CSVHandler(FormatHandler):
 
                 # Normalize encoding
                 if encoding.lower() != "utf-8":
-                    raw = raw.decode(encoding, errors="ignore").encode("utf-8")
+                    raw = raw.decode(encoding, errors="ignore")  # .encode("utf-8")
 
                 combined += raw
 

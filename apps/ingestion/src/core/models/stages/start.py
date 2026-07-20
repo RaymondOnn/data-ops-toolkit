@@ -21,7 +21,7 @@ LOG = logger
 
 
 @stage(Stage.START.value)
-class StartStage(ExecutionStage):
+class StartStage(ExecutionStage[None]):
     requires_disk_space: bool = False
 
     def pre_flight(self, task: "Task") -> None:
@@ -46,7 +46,7 @@ class StartStage(ExecutionStage):
 
         LOG.debug("Physical task artifacts verified", run_id=task.run_id)
 
-    def execute(self, task: "Task") -> str:
+    def _execute(self, task: "Task") -> str:
         # persist job-start metadata using engine helper
         start_ts = current_timestamp(naive=STRIP_TZ_FOR_DB).isoformat(sep=" ")
         try:

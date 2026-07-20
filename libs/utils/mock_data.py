@@ -30,7 +30,7 @@ def generate_simulation_artifacts(
         "default": {
             "job": {
                 "extract": {"service_ref": "file", "num_workers": 4},
-                "load": {"service_ref": "clickhouse", "partition_by": "event_date"},
+                "load": {"service_ref": "clickhouse", "partition_on": "event_date"},
             },
             "datasets": {
                 dataset: {

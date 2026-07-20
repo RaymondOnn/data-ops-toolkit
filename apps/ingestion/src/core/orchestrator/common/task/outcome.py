@@ -1,264 +1,315 @@
-"""Handlers for task execution outcomes."""
-
 import time
 import traceback
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import msgspec
 from apps.ingestion.src.core.models.stages.enums import Stage
 from apps.ingestion.src.core.models.task import ExecutionStatus, Task, TaskSignal
-from apps.ingestion.src.core.orchestrator.enums import TaskMetadata, TaskRef
+from apps.ingestion.src.core.orchestrator.enums import TaskMetadata
 from apps.ingestion.src.utils.dates import epoch_to_iso
 from apps.ingestion.src.utils.exceptions import OutOfDiskSpace, TryAgainLater
+from libs.clients.base import ClientCantConnect
+from libs.resilience.circuit_breaker import CircuitOpen
 from libs.utils.dates import current_timestamp
+from libs.utils.exceptions import (
+    HostUnreachable,
+    TransientError,
+)
 from loguru import logger
+
+if TYPE_CHECKING:
+    from .manager import TaskManager
 
 LOG = logger
 
 
-def calculate_backoff(retry_count: int, error: Exception) -> int:
-    """Calculate backoff time."""
-    if hasattr(error, "wait_seconds") and error.wait_seconds is not None:
-        return int(error.wait_seconds)
-    if isinstance(error, OutOfDiskSpace):
-        return 60
-    return min(600, (2**retry_count) * 30)
+# 1. Define the Protocol (The structural contract only)
+@runtime_checkable
+class TaskOutcome(Protocol):
+    status: ExecutionStatus
+
+    def handle(self, manager: "TaskManager", task: Task, ctx: Any) -> None:
+        """Any class with this method and a status property matches the Protocol."""
+        ...
 
 
-class OutcomeHandlers:
-    """Collection of task outcome handlers."""
-
-    def __init__(self, executor):
-        """Initialize with reference to executor for cache/queue access."""
-        self.executor = executor
-        self.cache = executor.cache
-        self.queue = executor.queue
-        self.timeout = executor.timeout
-
-    def apply_rollback(
-        self, task: Task, exception: Exception, log: Any, metadata: TaskMetadata
-    ) -> None:
-        """Rewinds the task progress to a previous stage.
-
-        Notes:
-        - We limit rollbacks to one attempt per stage using the
-          rewind_history map. This prevents infinite cycles if a
-          transformation consistently fails due to persistent data drift.
-        """
-        target = task.task_ref.stage
-        if target in metadata.rewind_history:
-            log.error(f"Maximum rewind limit (1) reached for {target}")
-            self.executor.conclude_task(task, runtime_exception=exception)
-            return
-
-        metadata.rewind_history[target] = current_timestamp().isoformat()
-        metadata.status = ExecutionStatus.WAITING.value
-        metadata.current_stage = target
-
-        task.update_manifest(
-            {
-                "status": ExecutionStatus.WAITING.value,
-                target: None,
-                "current_stage": target,
-            }
+def is_retryable(task: Task, error: Exception) -> bool:
+    """Check if error is retryable."""
+    if task.manifest.retry_count >= 3:
+        LOG.debug(
+            f"Retry exhausted for {task.run_id} (attempts={task.manifest.retry_count})"
         )
+        return False
 
-        old_key = task.task_ref.build(status=ExecutionStatus.RUNNING)
-        self.cache.pop(old_key, None)
-        new_key = (
-            TaskRef.from_key(old_key)
-            .with_updates(status=ExecutionStatus.WAITING, stage=target)
-            .build()
-        )
-        self.cache[new_key] = metadata
+    now = current_timestamp(naive=True)
+    midnight = now.replace(hour=23, minute=59, second=59, microsecond=0)
+    if now >= midnight:
+        LOG.debug(f"Retry refused: past midnight for {task.run_id}")
+        return False
 
-    def handle_disk_pressure(self, task: Task, error: OutOfDiskSpace) -> None:
-        """Handle disk pressure scenario - block task until disk space recovers."""
-        blocked_by = "DISK_PRESSURE"
-        wait_secs = getattr(error, "wait_seconds", 60)
-        disk_usage = getattr(error, "disk_usage", 0.0)
-        remarks = f"Disk full ({disk_usage:.1f}%)" if disk_usage > 0 else "Disk full"
+    return isinstance(
+        error,
+        (
+            TryAgainLater
+            | TransientError
+            | HostUnreachable
+            | ClientCantConnect
+            | CircuitOpen
+            | OutOfDiskSpace
+        ),
+    )
 
-        task.workspace.create_marker(".blocked")
-        task.workspace.remove_marker(".retrying")
 
-        task.update_manifest(
-            {
-                "status": ExecutionStatus.BLOCKED.value,
-                "blocked_by": blocked_by,
-                "error": {
-                    "message": str(error),
-                    "disk_usage": disk_usage,
-                    "type": type(error).__name__,
-                },
-            }
-        )
+def is_complete(task: Task) -> bool:
+    """Check if task is complete."""
+    from apps.ingestion.src.core.models.stages.enums import StageBitmask
 
-        metadata = self.executor._update_task_state(
-            old_key=task.task_ref.build(status=ExecutionStatus.RUNNING),
-            new_status=ExecutionStatus.BLOCKED,
-            metadata_override={"blocked_by": blocked_by, "remarks": remarks},
-        )
+    if StageBitmask(task.manifest.bitmask) == StageBitmask.all():
+        return True
+    return bool(
+        task.context.to_stage and task.context.to_stage == task.manifest.current_stage
+    )
 
-        if metadata:
-            self.queue.push(metadata, task.task_ref.stage, ExecutionStatus.BLOCKED)
 
+# 2. Extract the common logic into a pure helper function
+def transition_task_cache(
+    manager: "TaskManager",
+    task: "Task",
+    target_status: "ExecutionStatus",
+    next_stage: str | None = None,
+    **overrides,
+) -> TaskMetadata | None:
+    """Atomically rotates the cache key to the new state status."""
+    old_key = task.task_ref.build(status=ExecutionStatus.RUNNING)
+    metadata = manager.cache.get(old_key)
+    if not metadata:
+        LOG.error(f"Failed to find hot-cache metadata for task run: {task.run_id}")
+        return None
+
+    manager.cache.transition_state(
+        metadata, next_stage=next_stage, next_status=target_status, overrides=overrides
+    )
+    LOG.trace(
+        "[DISPATCH] outcome cache updated",
+        run_id=task.run_id,
+        new_status=target_status.value,
+    )
+    return metadata
+
+
+# 3. Implement the clean child class (No class inheritance needed!)
+class SuccessOutcome:
+    status = ExecutionStatus.SUCCESS
+
+    def handle(self, manager: "TaskManager", task: Task) -> None:
+        task.update_manifest({"status": self.status.value})
+        task.send_signal(TaskSignal.DONE)
+        manager.timeout.release_dataset_cache(task.run_id, task.dataset_id)
+
+        # Call the standalone helper function directly
+        transition_task_cache(manager, task, target_status=self.status)
+        LOG.success(f"Task {task.run_id} completed successfully")
+
+
+class ProgressOutcome:
+    status = ExecutionStatus.WAITING
+
+    def handle(self, manager: "TaskManager", task: Task, ctx: Any) -> None:
+        current_stage = Stage(task.task_ref.stage or task.stage.name)
+        next_stage_enum = current_stage.next()
+        if not next_stage_enum:
+            raise ValueError("No next stage found.")
+
+        next_stage = next_stage_enum.value
+        task.update_manifest({"status": self.status.value, "current_stage": next_stage})
         task.send_signal(TaskSignal.SYNC)
-        LOG.warning(
-            f"Task {task.run_id} BLOCKED due to disk pressure "
-            f"({disk_usage:.1f}% used). Will retry in {wait_secs}s"
+
+        metadata = transition_task_cache(
+            manager, task, next_stage=next_stage, target_status=self.status
         )
-
-    def handle_retry(self, task: Task, error: Exception) -> None:
-        """Route retryable errors to appropriate handler based on type."""
-
-        # Extract service_name from error (handles TryAgainLater too)
-        service_name = getattr(error, "service_name", None)
-
-        # For TryAgainLater, service_name might be in a specific attribute
-        if isinstance(error, TryAgainLater):
-            service_name = error.service_name
-
-            # Service outage (has service_name attribute)
-            if service_name:
-                self.handle_service_outage(task, error)
-                return
-
-        # Generic transient error
-        self.handle_transient_error(task, error)
-
-    def handle_service_outage(self, task: Task, error: TryAgainLater) -> None:
-        """Handle service outage scenario - block task until service recovers."""
-        service_name = error.service_name
-        remarks = f"Service '{service_name}' unavailable"
-
-        task.workspace.create_marker(".blocked")
-        task.workspace.remove_marker(".retrying")
-
-        task.update_manifest(
-            {
-                "status": ExecutionStatus.BLOCKED.value,
-                "blocked_by": service_name,
-                "error": {
-                    "message": str(error),
-                    "service": service_name,
-                    "type": type(error).__name__,
-                },
-            }
-        )
-
-        metadata = self.executor._update_task_state(
-            old_key=task.task_ref.build(status=ExecutionStatus.RUNNING),
-            new_status=ExecutionStatus.BLOCKED,
-            metadata_override={"blocked_by": service_name, "remarks": remarks},
-        )
-
         if metadata:
-            self.queue.push(metadata, task.task_ref.stage, ExecutionStatus.BLOCKED)
+            manager.queue.push(metadata)
+        LOG.info(f"Task {task.run_id} progressing to {next_stage}")
 
-        task.send_signal(TaskSignal.SYNC)
-        LOG.warning(
-            f"Task {task.run_id} BLOCKED due to service outage: {service_name}."
+
+class RetryOutcome:
+    status = ExecutionStatus.RETRY
+
+    def handle(self, manager: "TaskManager", task: Task, exc: Exception) -> None:
+        LOG.trace(
+            "[DISPATCH] execute transient error",
+            run_id=task.run_id,
+            error_type=type(exc).__name__,
+            error=str(exc),
         )
-
-    def handle_transient_error(self, task: Task, error: Exception) -> None:
-        """Handle generic transient error - retry with exponential backoff."""
         retry_count = task.manifest.retry_count
-        wait_secs = calculate_backoff(retry_count, error)
+        wait_secs = getattr(exc, "wait_seconds", min(600, (2**retry_count) * 30))
         remarks = f"Transient error, retrying (attempt {retry_count + 1})"
 
-        retry_info = {
-            "retry_at": current_timestamp(naive=True).isoformat(),
-            "reason": str(error),
-            "wait_seconds": wait_secs,
-            "attempt": retry_count + 1,
-        }
-        task.workspace.write_text(".retrying", msgspec.json.encode(retry_info).decode())
+        task.workspace.write_text(
+            ".retrying",
+            msgspec.json.encode(
+                {
+                    "retry_at": current_timestamp(naive=True).isoformat(),
+                    "reason": str(exc),
+                    "wait_seconds": wait_secs,
+                    "attempt": retry_count + 1,
+                }
+            ).decode(),
+        )
         task.workspace.remove_marker(".blocked")
-
         task.update_manifest(
             {
-                "status": ExecutionStatus.RETRY.value,
-                "error": {"message": str(error), "type": type(error).__name__},
+                "status": self.status.value,
+                "error": {"message": str(exc), "type": type(exc).__name__},
             }
         )
 
-        metadata = self.executor._update_task_state(
-            old_key=task.task_ref.build(status=ExecutionStatus.RUNNING),
-            new_status=ExecutionStatus.RETRY,
+        metadata = transition_task_cache(
+            manager,
+            task,
             next_attempt_ts=epoch_to_iso(time.time() + wait_secs),
             metadata_override={"remarks": remarks},
+            target_status=self.status,
         )
-
         if metadata:
-            self.queue.push(metadata, task.task_ref.stage, ExecutionStatus.RETRY)
+            manager.queue.push(metadata)
 
         task.send_signal(TaskSignal.SYNC)
-        LOG.info(
-            f"Task {task.run_id} RETRY scheduled in {wait_secs}s "
-            f"(attempt {retry_count + 1}, error: {type(error).__name__})"
-        )
+        if not isinstance(exc, TryAgainLater):
+            raise TryAgainLater(reason=str(exc), wait_seconds=wait_secs) from exc
 
-        if not isinstance(error, TryAgainLater):
-            raise TryAgainLater(
-                reason=str(error),
-                wait_seconds=wait_secs,
-                service_name=getattr(error, "service_name", None),
-            ) from error
 
-    def handle_failure(self, task: Task, error: Exception) -> None:
-        """Handle permanent failure."""
+class BlockedOutcome:
+    status = ExecutionStatus.BLOCKED
+
+    def handle(self, manager: "TaskManager", task: Task, exc: Exception) -> None:
+        if is_disk := isinstance(exc, OutOfDiskSpace):
+            LOG.trace(
+                "[DISPATCH] execute disk pressure",
+                run_id=task.run_id,
+                disk_usage=exc.disk_usage if hasattr(exc, "disk_usage") else "unknown",
+            )
+            blocked_by = "DISK_PRESSURE"
+            remarks = f"Disk full ({getattr(exc, 'disk_usage', 0):.1f}%))"
+        else:
+            blocked_by = getattr(exc, "service_name", "UNKNOWN_SERVICE")
+            remarks = f"Service '{blocked_by}' unavailable"
+
+        task.workspace.create_marker(".blocked")
+        task.workspace.remove_marker(".retrying")
         task.update_manifest(
             {
-                "status": ExecutionStatus.FAILED.value,
+                "status": self.status.value,
+                "blocked_by": blocked_by,
+                "error": {
+                    "message": str(exc),
+                    "type": type(exc).__name__,
+                    **(
+                        {"disk_usage": getattr(exc, "disk_usage", 0)}
+                        if is_disk
+                        else {"service": blocked_by}
+                    ),
+                },
+            }
+        )
+
+        metadata = transition_task_cache(
+            manager,
+            task,
+            metadata_override={"blocked_by": blocked_by, "remarks": remarks},
+            target_status=self.status,
+        )
+        if metadata:
+            manager.queue.push(metadata)
+
+        task.send_signal(TaskSignal.SYNC)
+        LOG.warning(f"Task {task.run_id} BLOCKED: {remarks}")
+
+
+class FailedOutcome:
+    status = ExecutionStatus.FAILED
+
+    def handle(self, manager: "TaskManager", task: Task, exc: Exception) -> None:
+        if isinstance(exc, TimeoutError):
+            LOG.trace(
+                "[DISPATCH] execute timeout",
+                run_id=task.run_id,
+                stage=task.task_ref.stage,
+            )
+        else:
+            LOG.trace(
+                "[DISPATCH] execute exception",
+                run_id=task.run_id,
+                stage=task.task_ref.stage,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+        task.update_manifest(
+            {
+                "status": self.status.value,
                 "error": {
                     "stage": task.task_ref.stage,
-                    "message": str(error),
-                    "error_type": type(error).__name__,
+                    "message": str(exc),
+                    "error_type": type(exc).__name__,
                     "traceback": traceback.format_exc(),
                 },
             }
         )
         task.send_signal(TaskSignal.FAIL)
-        self.timeout.release_dataset_cache(task.run_id, task.dataset_id)
-        self.cache.pop(task.task_ref.build(status=ExecutionStatus.RUNNING), None)
+        manager.timeout.release_dataset_cache(task.run_id, task.dataset_id)
+
+        # Pull from cache completely on permanent failure
+        manager.cache.client.pop(
+            task.task_ref.build(status=ExecutionStatus.RUNNING), None
+        )
         LOG.exception(
-            f"Task {task.run_id} FAILED at {task.task_ref.stage}. Error: {error}"
+            f"Task {task.run_id} FAILED at {task.task_ref.stage}. Error: {exc}"
         )
 
-    def handle_success(self, task: Task) -> None:
-        """Handle successful completion."""
-        task.update_manifest({"status": ExecutionStatus.SUCCESS.value})
-        task.send_signal(TaskSignal.DONE)
-        self.timeout.release_dataset_cache(task.run_id, task.dataset_id)
-        self.cache.pop(task.task_ref.build(status=ExecutionStatus.RUNNING), None)
-        LOG.success(f"Task {task.run_id} completed successfully")
 
-    def handle_progress(self, task: Task) -> None:
-        """Handle progress to next stage."""
-        current_stage_enum = Stage(task.task_ref.stage or task.stage.name)
-        next_stage_enum = current_stage_enum.next()
-        next_stage = next_stage_enum.value if next_stage_enum else None
+class RollbackOutcome:
+    status = ExecutionStatus.WAITING
 
-        if not next_stage:
-            raise ValueError("No next stage found.")
+    def handle(self, manager: "TaskManager", task: Task, exc: Exception) -> None:
+        LOG.trace(
+            "[DISPATCH] execute rollback",
+            run_id=task.run_id,
+            stage=task.task_ref.stage,
+            error=str(exc),
+        )
+        target = task.task_ref.stage
+        old_key = task.task_ref.build(status=ExecutionStatus.RUNNING)
+        metadata = manager.cache.get(
+            old_key
+        )  # Get metadata safely using the unified interface
 
-        target_status = ExecutionStatus.WAITING
+        if not metadata or target in metadata.rewind_history:
+            LOG.error(
+                f"Maximum rollback reached or metadata missing for {target}. Dropping to Failure."
+            )
+            FailedOutcome().handle(manager, task, exc)
+            return
+
+        # Prepare updates
+        metadata.rewind_history[target] = current_timestamp().isoformat()
         task.update_manifest(
-            {
-                "status": target_status.value,
-                "current_stage": next_stage,
-            }
-        )
-        task.send_signal(TaskSignal.SYNC)
-
-        metadata = self.executor._update_task_state(
-            old_key=task.task_ref.build(status=ExecutionStatus.RUNNING),
-            new_status=target_status,
-            next_stage=next_stage,
+            {"status": self.status.value, target: None, "current_stage": target}
         )
 
-        if metadata:
-            self.queue.push(metadata, next_stage, target_status)
+        # Transition cache atomically using helper (Updates cache, syncs DB telemetry, returns new metadata)
+        updated_metadata = transition_task_cache(
+            manager,
+            task,
+            target_status=self.status,
+            next_stage=target,
+            rewind_history=metadata.rewind_history,
+            remarks=f"Rolled back task to stage {target}",
+        )
 
-        LOG.info(f"Task {task.run_id} progressed to {next_stage}")
+        # Re-enqueue the rolled back task to run again at the target stage
+        if updated_metadata:
+            manager.queue.push(updated_metadata)
+            LOG.trace(
+                f"[DISPATCH] Rolled back and re-queued task {task.run_id} back to stage {target}"
+            )

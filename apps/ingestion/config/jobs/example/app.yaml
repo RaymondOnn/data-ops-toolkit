@@ -4,15 +4,15 @@ defaults:
   enable_archival: true
   archive_type: "standard_archive"
   num_workers: 10
-  read_mode: "snapshot"
+  mode: "append"
   timezone: "Asia/Singapore"
-  partition_date:
-    offset:
-      years: 0
-      months: 0
-      days: 0
-    format: "%Y-%m-%d"
-    wrap_quotes: false
+  # partition_date:
+  #   offset:
+  #     years: 0
+  #     months: 0
+  #     days: 0
+  #   format: "%Y-%m-%d"
+  #   wrap_quotes: false
 
 
 accounts:

@@ -44,7 +44,7 @@ This document defines how the Ingestion Engine handles infrastructure failures, 
 
 ### 4. Task Expiry (TTL Management)
 
-**Scenario:** A triggered snapshot job has been waiting in the queue too long.
+**Scenario:** A triggered append job has been waiting in the queue too long.
 
 * **Detection:** `ExpiredState` checks the `EXPIRATION_THRESHOLD` in the database.
 * **Sunk Cost Protection:** If the `EXTRACT` stage is already complete (`EXT+` in bitmask), the task **will not expire**. We protect the expensive data acquisition work even if the TTL is breached.

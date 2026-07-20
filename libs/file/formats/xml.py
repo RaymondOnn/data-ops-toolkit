@@ -45,7 +45,7 @@ class XMLHandler(FormatHandler):
 
         lfs = []
         for f in files:
-            buffer = self.read_raw(f, **kwargs)
+            buffer = self.read_raw(f)
             data = xmltodict.parse(buffer.read())
             lfs.append(pl.DataFrame(data).lazy())
 

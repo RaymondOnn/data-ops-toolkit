@@ -29,17 +29,23 @@ class SecretProvider(ABC):
 class LocalSecretProvider(SecretProvider):
     """Local JSON file provider (development only)."""
 
-    def __init__(self, **config):
-        self.path = Path(config.get("path", "./.secrets.json"))
-        self._secrets = self._load() if self.path.exists() else {}
+    def __init__(self, secrets_json: str):
+        self.path = Path(secrets_json)
+        self._secrets: dict[str, str] = self._load(self.path)
 
-    def _load(self) -> dict[str, str]:
-        LOG.info(f"Loading secrets from {self.path}")
-        with self.path.open() as f:
-            return json.load(f)
+    def _load(self, path: Path) -> dict[str, str]:
+        if not path.exists():
+            raise FileNotFoundError(f"File not found at path: {path}")
+
+        LOG.info(f"Loading secrets from {path}")
+
+        with path.open() as f:
+            return json.load(f) or {}
 
     def get(self, secret_id: str) -> str:
-        return self._secrets.get(secret_id) or os.getenv(secret_id, "dev_fallback")
+        if secret_id and (value := self._secrets.get(secret_id)):
+            return value
+        return os.getenv(secret_id, "dev_fallback")
 
     def set(self, secret_id: str, value: Any) -> None:
         self._secrets[secret_id] = str(value)
@@ -51,15 +57,16 @@ class LocalSecretProvider(SecretProvider):
 class LocalEncryptedProvider(SecretProvider):
     """Encrypted local JSON provider."""
 
-    def __init__(self, **config):
-        self.path = Path(config["encrypted_file_path"])
-        self._fernet = Fernet(config["master_key"])
-        self._secrets = self._load()
+    def __init__(self, secrets_json: str, master_key: str):
+        self.path = Path(secrets_json)
+        self._fernet = Fernet(master_key)
+        self._secrets = self._load(self.path)
 
-    def _load(self) -> dict[str, str]:
+    def _load(self, path: Path) -> dict[str, str]:
         if not self.path.exists():
             raise FileNotFoundError(f"Secrets file not found: {self.path}")
-        with self.path.open() as f:
+
+        with path.open() as f:
             return json.load(f)
 
     def get(self, secret_id: str) -> str:
@@ -75,24 +82,29 @@ class LocalEncryptedProvider(SecretProvider):
 class AWSSecretProvider(SecretProvider):
     """AWS Secrets Manager provider (production)."""
 
-    def __init__(self, **config):
-        from libs.cloud.aws import AWSClient, AWSClientConfig
+    def __init__(
+        self,
+        region: str,
+        sm_endpoint_url: str,
+        sts_endpoint_url: str,
+        role_arn: str,
+        profile: str | None = None,
+        aws_access_key_id: str | None = None,
+        aws_secret_access_key: str | None = None,
+    ):
+        from libs.cloud.aws import AWSClient, AWSConfig
 
-        client_cfg = config.get("client", {})
-        aws_config = AWSClientConfig(
-            region=client_cfg.get("region", "ap-southeast-1"),
-            sts_endpoint_url=client_cfg.get("sts_endpoint_url"),
-            role_arn=client_cfg.get("role_arn"),
-            profile_name=client_cfg.get("profile_name"),
-            aws_access_key_id=client_cfg.get("aws_access_key_id"),
-            aws_secret_access_key=client_cfg.get("aws_secret_access_key"),
+        aws_config = AWSConfig(
+            region=region,
+            sts_endpoint=sts_endpoint_url,
+            role_arn=role_arn,
+            profile=profile,
+            access_key=aws_access_key_id,
+            secret_key=aws_secret_access_key,
         )
 
         aws = AWSClient(config=aws_config)
-        svc_cfg = config["service"]
-        self._client = aws.get_client(
-            "secretsmanager", endpoint_url=svc_cfg["endpoint_url"]
-        )
+        self._client = aws.get_client("secretsmanager", endpoint=sm_endpoint_url)
 
     def get(self, secret_id: str) -> str:
         LOG.debug(f"Fetching secret from AWS: {secret_id}")

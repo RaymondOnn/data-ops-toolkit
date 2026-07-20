@@ -5,7 +5,7 @@ from datetime import time as dt_time
 def end_of_day_timestamp() -> float:
     """Returns the Unix timestamp for 23:59:59 of the current day.
 
-    This is typically used to set 'expires_at' values for snapshot jobs,
+    This is typically used to set 'expires_at' values for append jobs,
     ensuring they expire at the end of the day they were created.
 
     Returns:

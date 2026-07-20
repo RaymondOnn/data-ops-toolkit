@@ -3,6 +3,7 @@
 import time
 from typing import TYPE_CHECKING, Any
 
+import ray
 from apps.ingestion.src.core.models.task.status import ExecutionStatus
 from apps.ingestion.src.utils.common import find_path
 from apps.ingestion.src.utils.constants import MANIFEST_FILENAME, STRIP_TZ_FOR_DB
@@ -28,14 +29,15 @@ class ZombieState(DetectedState):
         metadata = kwargs.get("metadata")
         active_tasks = kwargs.get("active_tasks", {})
         exec_ctx = kwargs.get("exec_ctx")
-        cache_key = kwargs.get("cache_key")
 
         if not metadata or not exec_ctx:
             return False
 
         # 1. Still active in Ray?
-        if cache_key and cache_key in active_tasks.values():
-            return False
+        if metadata.run_id in active_tasks.values():
+            return cls._is_ray_task_stuck(
+                metadata.run_id, active_tasks[metadata.run_id], exec_ctx
+            )
 
         # 2. Heartbeat too old (>5 minutes)?
         if time.time() - metadata.last_hb < 300:
@@ -43,13 +45,37 @@ class ZombieState(DetectedState):
 
         # 3. Manifest file recently modified?
         run_path = find_path(exec_ctx.active_path, metadata.run_id)
-        if run_path:
-            manifest = run_path / MANIFEST_FILENAME
-            if manifest.exists() and time.time() - manifest.stat().st_mtime < 300:
-                return False
+        if run_path and cls._is_manifest_recent(run_path):
+            return False
 
         LOG.warning(f"Zombie task detected: {metadata.run_id}")
         return True
+
+    @classmethod
+    def _is_ray_task_stuck(cls, run_id: str, ref: Any, exec_ctx: Any) -> bool:
+        """Helper to verify if an active cluster task is physically stuck or crashed."""
+        if exec_ctx.ray_mode == "LOCAL" or not ray.is_initialized():
+            return False
+
+        try:
+            ready, _ = ray.wait([ref], timeout=0.0)
+            if ready:
+                LOG.error(
+                    f"Physical Ray task for {run_id} finished or crashed, but state is stuck."
+                )
+                return True
+        except Exception as e:
+            LOG.warning(
+                f"Ray task exception caught during reconciliation for {run_id}: {e}"
+            )
+
+        return False
+
+    @staticmethod
+    def _is_manifest_recent(run_path: Any) -> bool:
+        """Helper to verify recent file modifications on the run manifest."""
+        manifest = run_path / MANIFEST_FILENAME
+        return manifest.exists() and time.time() - manifest.stat().st_mtime < 300
 
 
 class ExpiredState(DetectedState):

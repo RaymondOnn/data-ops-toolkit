@@ -49,13 +49,13 @@ class OracleService(DatabaseSource, DatabaseSink):
         self,
         staging: str,
         target: str,
-        partition_by: str,
+        partition_on: str,
         partition_value: str,
         expected_count: int,
     ) -> None:
         sql = f"""
         BEGIN
-            DELETE FROM {target} WHERE {partition_by} = '{partition_value}';
+            DELETE FROM {target} WHERE {partition_on} = '{partition_value}';
             INSERT /*+ APPEND */ INTO {target} SELECT * FROM {staging};
             COMMIT;
             EXECUTE IMMEDIATE 'DROP TABLE {staging}';
@@ -114,10 +114,3 @@ class OracleService(DatabaseSource, DatabaseSink):
     def delete(self, target: str) -> None:
         self.client.sql(f"DROP TABLE {target} PURGE")
         LOG.warning(f"Dropped table: {target}")
-
-    def count_rows(
-        self, target: str, filter_condition: str | None = None, **kwargs
-    ) -> int:
-        where = f"WHERE {filter_condition}" if filter_condition else ""
-        result = self.client.sql(f"SELECT COUNT(*) FROM {target} {where}")
-        return int(result[0][0]) if result else 0

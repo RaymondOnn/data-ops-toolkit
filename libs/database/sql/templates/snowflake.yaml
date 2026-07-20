@@ -1,0 +1,39 @@
+# Built-in snowflake.yaml (Representative Blueprint)
+
+core:
+  drop_table: "drop table if exists {table}"
+  create_table: "create table if not exists {table} ({col_types})"
+  truncate: "truncate table {table}"
+  insert: "insert into {table} ({fields}) values ({values})"
+
+  # Snowflake-specific merge template for deduplication / incremental syncs
+  merge: |
+    merge into {tgt_table} as tgt
+    using {src_table} as src
+    on {join_cond}
+    when matched then
+      update set {set_values}
+    when not matched then
+      insert ({fields}) values ({values})
+
+metadata:
+  tables: |
+    select table_name
+    from information_schema.tables
+    where table_schema = '{schema}' and table_catalog = '{database}'
+  columns: |
+    select column_name, data_type
+    from information_schema.columns
+    where table_catalog = '{database}' and table_schema = '{schema}' and table_name = '{table}'
+
+# -------------------------------------------------------------------------
+# Snowflake General Type Map
+# -------------------------------------------------------------------------
+general_type_map:
+  string: "varchar(16777216)"    # Maps to Snowflake's maximum string limit
+  integer: "number(38,0)"        # Explicitly declares scale 0 to prevent float conversion
+  decimal: "number(38,10)"
+  boolean: "boolean"
+  datetime: "timestamp_tz"       # Ensures timezone retention (Timestamp with Time Zone)
+  json: "variant"                # Automatically maps JSON arrays/objects to Snowflake's VARIANT
+  binary: "binary"

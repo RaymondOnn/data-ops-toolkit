@@ -15,7 +15,7 @@ class LoadContext(Struct):
     """Context for data loading operations."""
 
     target: str  # Table name or path
-    partition_by: str
+    partition_on: str | None
     partition_value: str
     expected_count: int
 
@@ -72,7 +72,7 @@ class DataLoader(Loader):
         """
         LOG.info(
             f"Staging to {context.target} for "
-            f"{context.partition_by}={context.partition_value}"
+            f"{context.partition_on}={context.partition_value}"
         )
 
         result = sink.stage(
@@ -107,7 +107,7 @@ class DataLoader(Loader):
         sink.promote(
             staging=staging_id,
             target=context.target,
-            partition_by=context.partition_by,
+            partition_on=context.partition_on,
             partition_value=context.partition_value,
             expected_count=context.expected_count,
         )
@@ -173,7 +173,7 @@ class FileLoader(Loader):
         sink.promote(
             staging=staging_id,
             target=context.target,
-            partition_by=context.partition_by,
+            partition_on=context.partition_on,
             partition_value=context.partition_value,
             expected_count=context.expected_count,
         )

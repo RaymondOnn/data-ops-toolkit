@@ -60,13 +60,13 @@ class PostgresService(DatabaseSource, DatabaseSink):
         self,
         staging: str,
         target: str,
-        partition_by: str,
+        partition_on: str,
         partition_value: str,
         expected_count: int,
     ) -> None:
         sql = f"""
         BEGIN;
-        DELETE FROM {target} WHERE {partition_by} = '{partition_value}';
+        DELETE FROM {target} WHERE {partition_on} = '{partition_value}';
         INSERT INTO {target} SELECT * FROM {staging};
         COMMIT;
         DROP TABLE {staging};

@@ -1,5 +1,6 @@
 import polars as pl
-from apps.ingestion.src.core.db.base import DBClient
+
+from .base import DBClient
 
 
 class SnowflakeADBCClient(DBClient):

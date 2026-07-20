@@ -20,7 +20,7 @@ def mock_publish_task(mock_task):
     # Setup context
     mock_task.context.load.sink_type = "clickhouse"
     mock_task.context.load.destination = "prod.orders"
-    mock_task.context.load.partition_by = "dt"
+    mock_task.context.load.partition_on = "dt"
     mock_task.context.load.partition_value = "2024-01-01"
 
     # Mock manifest
@@ -66,7 +66,7 @@ def test_publish_execute_success(publish_stage, mock_task, mock_sink):
         mock_sink.promote.assert_called_once_with(
             staging_location="stg_orders_123",
             target_location="prod.orders",
-            partition_by="dt",
+            partition_on="dt",
             partition_val="2024-01-01",
             expected_count=500,
         )

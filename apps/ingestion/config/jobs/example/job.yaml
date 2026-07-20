@@ -11,36 +11,63 @@ job:
 datasets:
   # DATASET 1: Standard 50M row import
   orders: # dataset_id
-    partition_date:
-      offset:
-        days: -1
-        months: 0
-        years: 0
-      format: "%Y-%m-%d"
-      wrap_quotes: false
+    mode: delta # Loading Strategy: delta (update_key) | append | truncate | cdc
+    partition_on:
+
+
     extract:
-      service_ref: "postgres" # for credential lookup
-      load_mode: delta # Loading Strategy: delta | snapshot
-      source_params:
-        batch_size: 100000
+      object: # table name / file name /
+        name: "s3://bucket/path/orders_{{partition_date}}.csv"
+        service_ref: "postgres" # for credential lookup
 
-        # file source
-        type: file
-        file_pattern: "s3://bucket/path/orders_{{partition_date}}.csv"
+        # ---- FILE ----
+        glob:
+        header: # true | false
+        skip_blank_lines:
+        encoding:
 
-        # Database Source
-        type: database
-        table_name: "production.orders"
-        # For delta load mode
-        filter_condition: "status = 'COMPLETED' AND updated_at >= {{partition_date}}"
-
-        # API Source
-        type: api
-        endpoint: "example.com/v1/orders"
-        query_params:
+        # ---- API ----
+        endpoint:
+        headers:
+        params:
           include_deleted: false
           region: "EMEA"
-      schema_file: "orders.csv"
+
+      hooks:
+        pre: []
+
+        post:
+          - id: archive file
+            typw: copy
+            from:
+              service_ref:
+              path:
+            to:
+              service_ref:
+              path:
+            on_failure: # abort | warn | skip
+            timeout_secs:
+
+          - id: cleanup
+            if: archive_file.success()
+            type: delete
+            location:
+            recursive: true
+            on_failure:
+
+
+      sql:
+      select: []
+      where: "status = 'COMPLETED' AND updated_at >= {{partition_date}}"
+      limit:
+      columns: # schema override
+        col1: dtype1
+        col2: dtype2
+      batch_size: 100000
+      null_if:
+      flatten:
+
+      file_pattern: "s3://bucket/path/orders_{{partition_date}}.csv"
 
     # Note: defaults to DefaultTransformer if type is not specified
     transform:
@@ -66,9 +93,22 @@ datasets:
       params:
 
     load:
+      object: "TEST.ORDERS" # file: "s3://bucket/processed/orders/"
       service_ref: "clickhouse"
-      sink_params:
-        destination: "TEST.ORDERS" # file: "s3://bucket/processed/orders/"
+      add_new_columns: # true / false
+
+      hooks:
+        pre:
+
+        post:
+
+
+
+
+    publish:
+      object:
+      primary_key: []
+      delete_missing: # hard | soft
 
 
 
@@ -93,7 +133,7 @@ datasets:
     raw:
       source_type: "api"
       resource: "/v1/ledger"
-      load_mode: snapshot
+      load_mode: append
       params:
         query_params:
           include_deleted: false
@@ -126,7 +166,7 @@ datasets:
     raw:
       source_type: "api"
       resource: "/v1/logs"
-      load_mode: snapshot
+      load_mode: append
       params:
         query_params:
           include_deleted: false

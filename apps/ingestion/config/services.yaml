@@ -8,14 +8,11 @@ version: "1.0"
 x-localstack-base: &localstack_base
   s3_endpoint_url: "http://${LOCALSTACK_HOST:-localhost}:4566"
   use_ssl: false
-
-x-localstack-client: &localstack_client
   region: ap-southeast-1
   sts_endpoint_url: http://${LOCALSTACK_HOST:-localhost}:4566
   role_arn: arn:aws:iam::000000000000:role/ProdIngestionRole
   aws_access_key_id: test
-  secret_key: AWS_SECRET_ACCESS_KEY
-  use_ssl: false
+  aws_secret_access_key: secret://AWS_SECRET_ACCESS_KEY
   anon: false
 
 x-aws-dev-client: &aws_dev_client
@@ -29,60 +26,58 @@ x-aws-prod-client: &aws_prod_client
   role_arn: "arn:aws:iam::123456789012:role/ProdIngestionRole"
 
 x-s3-archive-base: &s3_archive_base
-  type: "standard_archive"
+  key: "standard_archive"
+  type: file
   storage_options:
     s3_storage_class: "DEEP_ARCHIVE"
 
 x-s3-cas-base: &s3_cas_base
-  type: "cas_archive"
+  key: "cas_archive"
+  type: file
   storage_options:
     s3_storage_class: "GLACIER"
 
 x-s3-source-base: &s3_source_base
-  type: "data_lake"
+  key: "data_lake"
+  type: file
+
 
 local:
   file:
-    type: flat_file
+    key: flat_file
+    type: file
     url: "."
   clickhouse: # Now pointing to a Docker container
-    type: clickhouse_db
+    key: clickhouse_db
+    type: database
     host: localhost
     port: 8123
     user: default
-    secret_key: CLICKHOUSE_PASSWORD
+    password: secret://CLICKHOUSE_PASSWORD
     secure: false
   s3_source:
-    <<: *s3_source_base
-    url: "s3://landing-zone"
-    storage_options:
-      client: *localstack_client
-      <<: *localstack_base
-      anon: false
+    <<: [*s3_source_base, *localstack_base]
+    url: s3://landing-zone
+
   s3_archive:
-    <<: *s3_archive_base
-    url: "s3://archive-vault"
-    storage_options:
-      client: *localstack_client
-      <<: *localstack_base
-      anon: false
+    <<: [*s3_archive_base, *localstack_base]
+    url: s3://archive-vault
+
   s3_cas:
-    <<: *s3_cas_base
-    url: "s3://cas-vault"
-    storage_options:
-      client: *localstack_client
-      <<: *localstack_base
-      anon: false
+    <<: [*s3_cas_base, *localstack_base]
+    url: s3://cas-vault
 
 dev:
   file:
-    type: flat_file
+    key: flat_file
+    type: file
   clickhouse: # Now pointing to a Docker container
-    type: "clickhouse_db"
+    key: "clickhouse_db"
+    type: database
     host: "localhost"
     port: 8123
     user: "default"
-    secret_key: "CLICKHOUSE_PASSWORD"
+    password: secret://CLICKHOUSE_PASSWORD
   s3_source:
     <<: *s3_source_base
     url: "s3://dev-landing-zone"

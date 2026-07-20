@@ -100,7 +100,7 @@ class TriggerManager:
         run_path = self.exec_ctx.get_run_path(identity)
         pending_path = (
             self.exec_ctx.active_path
-            / f"{identity.task_key}:{record.RUN_ID}_{CONFIG_FILENAME}"
+            / f"{identity.key}:{record.RUN_ID}_{CONFIG_FILENAME}"
         )
         if run_path.exists():
             return load_context(run_path)

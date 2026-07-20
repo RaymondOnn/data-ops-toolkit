@@ -1,5 +1,6 @@
 from datetime import timedelta
 
+from apps.ingestion.src.core.contexts import ArchiveConfig
 from apps.ingestion.src.core.models.task import Task, TaskSignal
 from apps.ingestion.src.core.models.task.manifest import ArchivePayload
 from apps.ingestion.src.services.factory import ServiceFactory
@@ -15,20 +16,19 @@ DEFAULT_RETENTION_DAYS = 2555  # 7 years
 
 
 @stage(Stage.ARCHIVE.value)
-class ArchiveStage(ExecutionStage):
+class ArchiveStage(ExecutionStage[ArchiveConfig]):
     requires_disk_space: bool = False
+    config_attribute = "archive"
 
     def pre_flight(self, task: Task) -> None:
         """Verify archive destination is reachable."""
         super().pre_flight(task)
-        if not self.config.enabled or not self.config.service:
+
+        if not self.config.enabled:
             return
 
-        if not (archive_type := self.config.type):
-            raise ValueError("Archive type is required when archive is enabled")
-        self.archive = ServiceFactory.get_archive(
-            service_type=archive_type, **self.config.service
-        )
+        if not self.config.enabled or not self.config.connection:
+            return
 
         # Validate bucket/root exists (not just prefix)
         check_url = self.config.base_path
@@ -36,11 +36,15 @@ class ArchiveStage(ExecutionStage):
             # Extract protocol + bucket: s3://my-bucket/prefix -> s3://my-bucket
             check_url = "/".join(check_url.split("/")[:3])
 
+        self.archive = ServiceFactory.get_archive(**self.config.connection)
         if not self.archive.exists(check_url):
             raise ConnectionError(f"Archive destination unreachable: {check_url}")
 
-    def execute(self, task: Task) -> str:
+    def _execute(self, task: Task) -> str:
         """Execute archival and cleanup."""
+        if not self.config.enabled:
+            return self._next_stage()
+
         LOG.info(f"Archiving job {task.job_id}, run {task.run_id}")
         start_time = current_timestamp(naive=True).isoformat(sep=" ")
 
@@ -71,9 +75,6 @@ class ArchiveStage(ExecutionStage):
         if not self.config.enabled:
             return None
 
-        if not self.config.base_path:
-            raise ValueError("Archive base path required")
-
         # Build archive path: base/job_id/partition_date/run_id
         archive_root = task.get_archive_path(base_path=self.config.base_path)
 
@@ -96,6 +97,11 @@ class ArchiveStage(ExecutionStage):
 
         Returns an ISO-formatted string representing the retention expiry date.
         """
-        days = self.config.retention_days or DEFAULT_RETENTION_DAYS
+
+        days = (
+            self.config.retention_days
+            if self.config.enabled
+            else DEFAULT_RETENTION_DAYS
+        )
         expiry = current_timestamp(naive=True) + timedelta(days=days)
         return expiry.date().isoformat()

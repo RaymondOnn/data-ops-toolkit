@@ -282,7 +282,7 @@ class Doctor:
     def _test_service_connection(self, service_type: str, config: dict) -> bool:
         """Test a single service connection."""
         try:
-            svc = ServiceFactory.get(service_type=service_type, **config)
+            svc = ServiceFactory.get(**config)
             if hasattr(svc, "fetch"):
                 svc.fetch("SELECT 1")
             elif hasattr(svc, "client") and hasattr(svc.client, "sql"):

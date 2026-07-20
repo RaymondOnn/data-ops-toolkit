@@ -6,7 +6,7 @@ from threading import RLock
 
 import msgspec
 import polars as pl
-from apps.ingestion.src.core.orchestrator.enums import TaskRecord
+from apps.ingestion.src.core.orchestrator.enums import TaskUpdate
 from apps.ingestion.src.services.factory import ServiceFactory
 from libs.database import TypeResolver
 from loguru import logger
@@ -42,7 +42,7 @@ class StateSink:
         self.archive_dir = workspace_dir / "archive"
         self.flush_threshold = flush_threshold
 
-        self._buffer: list[TaskRecord] = []
+        self._buffer: list[TaskUpdate] = []
         self._buffer_lock = RLock()
         self.stream_path = workspace_dir / "execution_stream.jsonl"
 
@@ -53,13 +53,13 @@ class StateSink:
         self.archive_dir.mkdir(parents=True, exist_ok=True)
 
         LOG.info(
-            "StateStream initialized",
+            "StateSink initialized",
             stage_dir=str(self.stage_dir),
             archive_dir=str(self.archive_dir),
             flush_threshold=flush_threshold,
         )
 
-    def append(self, record: TaskRecord) -> None:
+    def append(self, update: TaskUpdate) -> None:
         """Adds a record to the in-memory buffer.
 
         Args:
@@ -70,41 +70,60 @@ class StateSink:
         the buffer reaches the flush_threshold. This balances
         durability with system performance.
         """
+        ready_to_flush = False
+
         with self._buffer_lock:
-            self._buffer.append(record)
+            self._buffer.append(update)
             buffer_size = len(self._buffer)
-            LOG.trace(
-                "Appended to buffer", run_id=record.RUN_ID, buffer_size=buffer_size
-            )
+            LOG.trace("Appended to buffer", buffer_size=buffer_size)
 
             if buffer_size >= self.flush_threshold:
                 LOG.debug(
                     "Buffer threshold reached, flushing to disk",
                     buffer_size=buffer_size,
                 )
-                self.flush_to_disk()
+                records_to_write = list(self._buffer)
+                self._buffer.clear()
+                ready_to_flush = True
 
-    def flush_to_disk(self, force: bool = False) -> None:
+        # Perform disk operations OUTSIDE the lock context
+        if ready_to_flush:
+            self.flush_to_disk(records_to_write)
+
+    def flush_to_disk(self, records: list[TaskUpdate], force: bool = False) -> None:
         """Appends buffered records to the local JSONL stream file.
 
         Args:
             force: If True, ignores threshold and flushes immediately.
         """
-        with self._buffer_lock:
-            if not self._buffer:
-                return
+        if not records:
+            return
 
-            if not force and len(self._buffer) < self.flush_threshold:
-                return
+        if not force and len(records) < self.flush_threshold:
+            return
 
-            batch = b"".join(
-                msgspec.json.encode(r.to_dict()) + b"\n" for r in self._buffer
+        self.stream_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            LOG.debug(
+                f"Writing {len(records)} state records to stream path: {self.stream_path}"
             )
-            with self.stream_path.open("ab") as f:
-                f.write(batch)
+            # Re-use a single stateful encoder instance to process the entire list
+            encoder = msgspec.json.Encoder()
 
-            LOG.info("Flushed records to JSONL", count=len(self._buffer), forced=force)
-            self._buffer.clear()
+            with self.stream_path.open("ab") as f:
+                for record in records:
+                    # encoder.encode() emits highly optimized raw byte streams
+                    # without generating excess intermediate object overhead
+                    f.write(encoder.encode(record) + b"\n")
+        except Exception:
+            LOG.exception(
+                "CRITICAL: Failed to write state buffer records to JSONL stream file.",
+                stream_path=str(self.stream_path),
+                record_count=len(records),
+            )
+            # Optional: Re-raise or append back to an error-fallback collection depending on critical tolerance
+            raise
 
     def _spill_over_to_file(self) -> Path | None:
         """Rotates the primary stream file into a timestamped batch file.
@@ -118,7 +137,14 @@ class StateSink:
         fresh file while the database loader processes the previous batch
         in isolation.
         """
-        self.flush_to_disk(force=True)
+        # 1. Grab everything left inside the buffer regardless of the threshold size
+        with self._buffer_lock:
+            remnants = list(self._buffer)
+            self._buffer.clear()
+
+        # 2. Force append all buffered items to disk out-of-lock
+        if remnants:
+            self.flush_to_disk(remnants, force=True)
 
         if not self.stream_path.exists() or self.stream_path.stat().st_size == 0:
             LOG.debug("No data to rotate", path=str(self.stream_path))
@@ -146,9 +172,8 @@ class StateSink:
         """
         if self._db is None:
             config = self.db_config.copy()
-            service_type = config.pop("type")
-            LOG.debug("Initializing database client", service_type=service_type)
-            self._db = ServiceFactory.get(service_type=service_type, **config)
+            LOG.debug("Initializing database client", service_type=config.get("key"))
+            self._db = ServiceFactory.get(**config)
         return self._db
 
     def _get_schema(self) -> pl.DataFrame:
@@ -270,22 +295,26 @@ class StateSink:
 
     def _load_to_database(self) -> None:
         """Load all staged Parquet files to ClickHouse."""
-        pending = list(self.stage_dir.glob("*.parquet"))
-        if not pending:
-            LOG.debug("No pending Parquet files to load")
-            return
+        try:
+            pending = list(self.stage_dir.glob("*.parquet"))
+            if not pending:
+                LOG.debug("No pending Parquet files to load")
+                return
 
-        LOG.info("Loading Parquet files to ClickHouse", count=len(pending))
+            LOG.info("Loading Parquet files to ClickHouse", count=len(pending))
 
-        self.db.client.copy_from_file(
-            table=DESTINATION_TBL,
-            source_dir=str(self.stage_dir),
-            file_ext="parquet",
-        )
+            self.db.client.copy_from_file(
+                table=DESTINATION_TBL,
+                source_dir=str(self.stage_dir),
+                file_ext="parquet",
+            )
 
-        for pq_file in pending:
-            pq_file.rename(self.archive_dir / pq_file.name)
-            LOG.debug("Archived Parquet file", file=pq_file.name)
+            for pq_file in pending:
+                pq_file.rename(self.archive_dir / pq_file.name)
+                LOG.debug("Archived Parquet file", file=pq_file.name)
+        except Exception:
+            LOG.exception("StateSink failed to load database")
+            raise
 
     def close(self) -> None:
         """Close stream and cleanup resources."""

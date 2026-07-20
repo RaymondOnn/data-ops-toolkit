@@ -109,7 +109,7 @@ class Source(Service, ABC):
         num_workers: int | None = None,
         filter_condition: str | None = None,
         **kwargs: Any,
-    ) -> Any:
+    ) -> Sequence:
         """
         Calculates how this service splits a dataset into parallel chunks.
 
@@ -169,7 +169,7 @@ class Sink(Service, ABC):
         self,
         staging: str,
         target: str,
-        partition_by: str,
+        partition_on: str,
         partition_value: str,
         expected_count: int,
     ) -> None:
@@ -179,7 +179,7 @@ class Sink(Service, ABC):
         Args:
             staging: The identifier for the staged data.
             target: The destination production table.
-            partition_by: The column to use for partitioning/replacement.
+            partition_on: The column to use for partitioning/replacement.
             partition_value: The specific partition value topromote.
             expected_count: Verification count for promotion.
         """

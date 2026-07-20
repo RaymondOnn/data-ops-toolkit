@@ -3,33 +3,37 @@
 import traceback
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Generic, Self, TypeVar
 
 import msgspec
 from apps.ingestion.src.core.models.stages.enums import NO_MORE_STAGES, Stage
 from apps.ingestion.src.core.models.task.manifest import ErrorInfo, StagePayload
 from apps.ingestion.src.core.models.task.status import ExecutionStatus
 from apps.ingestion.src.core.system import SystemMonitor
+from apps.ingestion.src.extras.hooks import HookRunner
 from apps.ingestion.src.utils.exceptions import OutOfDiskSpace
 from loguru import logger
-
-LOG = logger
 
 if TYPE_CHECKING:
     from apps.ingestion.src.core.models.task.base import Task
 
+LOG = logger
 
-class ExecutionStage(ABC):
+T = TypeVar("T")
+
+
+class ExecutionStage(ABC, Generic[T]):
     """Base class for all pipeline stages."""
 
     requires_disk_space: bool = True
+    config_attribute: str | None = None  # TaskContext.<attribute>
 
     def __init__(self, stage: Stage):
         self.stage = stage
         if isinstance(stage.value, str):
             self.name: str = stage.value
             self.bitmask = stage.bitmask
-            self._config = None
+            self._config: T | None = None
 
     @classmethod
     def get_disk_free_stages(cls) -> list[type[Self]]:
@@ -50,26 +54,19 @@ class ExecutionStage(ABC):
 
     def _bind_config(self, task: "Task") -> None:
         """Bind stage config from task context."""
-        config_map = {
-            "extract": "extract",
-            "transform": "transform",
-            "write": "load",
-            "publish": "load",
-            "archive": "archive",
-        }
-
-        attr_name = config_map.get(self.name)
-        if not attr_name:
+        # If the stage specifies no configuration attribute, exit early safely
+        if not self.config_attribute:
             return
 
-        self._config = getattr(task.context, attr_name, None)
+        # Dynamically fetch the configured attribute block from task.context
+        self._config = getattr(task.context, self.config_attribute, None)
         if self._config is None:
             raise RuntimeError(
-                f"Stage '{self.name}' requires '{attr_name}' configuration"
+                f"Stage '{self.name}' requires '{self.config_attribute}' configuration"
             )
 
     @property
-    def config(self) -> Any:
+    def config(self) -> T:  # Returns T directly, guaranteed not None
         """Get stage config (validated)."""
         if self._config is None:
             raise RuntimeError(f"Config not bound for stage '{self.name}'")
@@ -77,10 +74,10 @@ class ExecutionStage(ABC):
 
     def _check_disk_space(self, task: "Task") -> None:
         """Verify sufficient disk space before execution."""
-        SystemMonitor(task.exec_ctx.workspace_dir)
+        system = SystemMonitor(task.exec_ctx.workspace_dir)
 
-        if SystemMonitor.is_disk_blocked():
-            health = SystemMonitor.get_last_report()
+        if system.is_disk_blocked():
+            health = system.report
             if not health:
                 raise ValueError("No system health report found!")
             raise OutOfDiskSpace(
@@ -102,15 +99,16 @@ class ExecutionStage(ABC):
         self._bind_config(task)
 
     # @abstractmethod
-    # def execute(self, task: "Task") -> str:
-    #     """Execute stage logic. Returns next stage name."""
-    #     # HookRunner.run_hooks(task, self.name, "pre")
-    #     next_stage = self._execute(task)
-    #     # HookRunner.run_hooks(task, self.name, "post")
-    #     return next_stage
+    def execute(self, task: "Task") -> str:
+        """Execute stage logic. Returns next stage name."""
+        runner = HookRunner(task)
+        runner.run_hooks(self.name, "pre")
+        next_stage = self._execute(task)
+        runner.run_hooks(self.name, "post")
+        return next_stage
 
     @abstractmethod
-    def execute(self, task: "Task") -> str:
+    def _execute(self, task: "Task") -> str:
         """Execute stage logic. Returns next stage name."""
         pass
 

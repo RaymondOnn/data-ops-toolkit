@@ -5,7 +5,7 @@ from typing import Any
 
 import msgspec
 from apps.ingestion.src.core.contexts.execution import ExecutionContext
-from apps.ingestion.src.core.models.task.enums import TaskRef
+from apps.ingestion.src.core.models.task.enums import TaskIdentity
 from apps.ingestion.src.core.orchestrator.enums import (
     TaskRecord,
     TaskUpdate,
@@ -44,7 +44,7 @@ class StateStore:
 
     @property
     def all(self) -> dict[str, TaskRecord]:
-        """Returns a snapshot of all tracked records.
+        """Returns a append of all tracked records.
 
         Returns:
             dict[str, TaskRecord]: A copy of the internal record map.
@@ -67,7 +67,7 @@ class StateStore:
                 LOG.trace("Retrieved record from cache", run_id=run_id)
             return record
 
-    def add(self, task_ref: TaskRef) -> None:
+    def add(self, task_identity: TaskIdentity) -> TaskRecord:
         """Registers a new task instance in the cache.
 
         Args:
@@ -78,33 +78,33 @@ class StateStore:
         registry's view of identity (Job/Dataset/Partition) never drifts
         from the physical workspace hierarchy.
         """
-        run_id = task_ref.identity.run_id
-
+        run_id = task_identity.run_id
         with self._lock:
             if run_id in self.records:
                 LOG.debug("Record already exists, skipping", run_id=run_id)
-                return
+                return self.records[run_id]
 
             now = current_timestamp(
                 timezone=self.exec_ctx.timezone, naive=STRIP_TZ_FOR_DB
             )
 
             record = TaskRecord(
-                JOB_ID=task_ref.identity.job_id,
-                DATASET_ID=task_ref.identity.dataset_id,
-                PARTITION_DATE=task_ref.identity.partition_date,
+                JOB_ID=task_identity.job_id,
+                DATASET_ID=task_identity.dataset_id,
+                PARTITION_DATE=task_identity.partition_date,
                 RUN_ID=run_id,
                 IS_SCHEDULED=0,
-                CURRENT_STAGE=task_ref.stage,
+                # CURRENT_STAGE=task_ref.stage,
                 SCHEDULED_TIMESTAMP_LC=now,
-                JOB_STATUS=task_ref.status.value,
+                # JOB_STATUS=task_ref.status.value,
             )
             self.records[run_id] = record
             LOG.info(
                 "Added record to state cache",
                 run_id=run_id,
-                job_id=task_ref.identity.job_id,
+                job_id=task_identity.job_id,
             )
+        return record
 
     def update(self, run_id: str, updates: TaskUpdate | dict[str, Any]) -> bool:
         """Applies updates to an existing record and returns True if state changed.
@@ -122,11 +122,6 @@ class StateStore:
         accidentally overwriting static metadata like the PARTITION_DATE.
         """
         with self._lock:
-            current = self.records.get(run_id)
-            if not current:
-                LOG.warning("Record not found for update", run_id=run_id)
-                return False
-
             if isinstance(updates, TaskUpdate):
                 update_dict = {
                     k: v
@@ -135,6 +130,16 @@ class StateStore:
                 }
             else:
                 update_dict = updates
+
+            if not (current := self.records.get(run_id)):
+                LOG.warning("Record not found for update. Creating...", run_id=run_id)
+                task_id = TaskIdentity(
+                    job_id=update_dict.get("job_id", ""),
+                    dataset_id=update_dict.get("dataset_id", ""),
+                    partition_date=update_dict.get("partition_date", ""),
+                    run_id=run_id,
+                )
+                current = self.add(task_id)
 
             merged = {
                 **current.to_dict(),

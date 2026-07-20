@@ -27,7 +27,7 @@ transform:
 load:
   sink_type: "clickhouse"
   destination: "analytics.orders_fact"
-  partition_by: "order_date"
+  partition_on: "order_date"
   config:
     host: "clickhouse.internal"
 

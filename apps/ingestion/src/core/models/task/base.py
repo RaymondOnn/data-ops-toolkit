@@ -83,7 +83,7 @@ class Task:
     @property
     def id(self) -> str:
         """Unique task identifier."""
-        return self.task_ref.task_key
+        return self.task_ref.id_key
 
     @classmethod
     def from_path(

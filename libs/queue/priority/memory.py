@@ -4,7 +4,7 @@ import uuid
 from collections.abc import Generator
 from typing import Any
 
-from .base import PriorityQueue, TaskMessage
+from .base import Message, PriorityQueue
 
 
 class MemoryPriorityQueue(PriorityQueue):
@@ -31,7 +31,7 @@ class MemoryPriorityQueue(PriorityQueue):
         )
         self._counter += 1
 
-    def pop(self, visibility_timeout: int = 300) -> TaskMessage | None:
+    def pop(self, visibility_timeout: int = 300) -> Message | None:
         """Pop from heap."""
         if not self._queue:
             return None
@@ -53,7 +53,7 @@ class MemoryPriorityQueue(PriorityQueue):
         # Mark as processing
         self._processing[msg_id] = (data, now + visibility_timeout)
 
-        return TaskMessage(id_=msg_id, data=data, metadata=metadata)
+        return Message(id_=msg_id, data=data, metadata=metadata)
 
     def ack(self, msg_id: str) -> None:
         """Acknowledge completion."""

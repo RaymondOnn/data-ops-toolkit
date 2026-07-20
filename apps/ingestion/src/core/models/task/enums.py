@@ -2,6 +2,7 @@ from enum import StrEnum
 
 import msgspec
 from apps.ingestion.src.core.models.task.status import ExecutionStatus
+from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE
 
 
 class TaskSignal(StrEnum):
@@ -33,7 +34,7 @@ class TaskIdentity(msgspec.Struct, frozen=True):
         return cls(*parts)
 
     @property
-    def task_key(self) -> str:
+    def key(self) -> str:
         """Logical task key (JOB:DATASET:PARTITION)."""
         return f"{self.job_id}:{self.dataset_id}:{self.partition_date}"
 
@@ -44,7 +45,7 @@ class TaskRef(msgspec.Struct, frozen=True):
     identity: TaskIdentity
     status: ExecutionStatus
     stage: str
-    namespace: str = "task"
+    namespace: str = CACHE_TASK_NAMESPACE
 
     @classmethod
     def from_key(cls, key: str) -> "TaskRef":
@@ -61,8 +62,8 @@ class TaskRef(msgspec.Struct, frozen=True):
         )
 
     @property
-    def task_key(self) -> str:
-        return self.identity.task_key
+    def id_key(self) -> str:
+        return self.identity.key
 
     @property
     def run_id(self) -> str:
