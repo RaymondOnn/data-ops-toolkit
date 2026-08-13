@@ -32,9 +32,9 @@ default:
 
     # ---- FILE ----
     glob:
-    header: true # true | false
-    skip_blank_lines:
-    encoding: utf-8
+    # header: true # true | false
+    # skip_blank_lines:
+    # encoding: utf-8
 
   transform:
     type: default

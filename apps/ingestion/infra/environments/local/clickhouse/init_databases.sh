@@ -63,6 +63,7 @@ SQL_FILES=(
     "/sql/definitions/views/meta.current_execution.sql"
     "/sql/definitions/views/meta.execution_history.sql"
     "/sql/definitions/views/meta.error_log.sql"
+    "/sql/definitions/views/meta.daemon_task_poll.sql"
     "/sql/adhoc/seed_metadata.sql"
 )
 

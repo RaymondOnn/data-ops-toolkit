@@ -6,7 +6,7 @@ import msgspec
 from loguru import logger
 
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.contexts.task import TaskContext
+    from src.core.contexts.task import TaskContext
 
 LOG = logger
 

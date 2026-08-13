@@ -6,20 +6,19 @@ from functools import partial
 from typing import Any
 
 import msgspec
-from apps.ingestion.src.core.contexts import TaskContextBuilder
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task, TaskSignal
-from apps.ingestion.src.core.models.task.enums import TaskIdentity
-from apps.ingestion.src.core.orchestrator.enums import TaskRef
-from apps.ingestion.src.core.system import SystemMonitor
-from apps.ingestion.src.services.factory import ServiceFactory
-from apps.ingestion.src.utils.common import short_hash
-from apps.ingestion.src.utils.constants import (
-    CACHE_TASK_NAMESPACE,
-    CONFIG_FILENAME,
-    STRIP_TZ_FOR_DB,
-)
 from libs.utils.dates import current_timestamp
 from loguru import logger
+
+from src.core.contexts import TaskContextBuilder
+from src.core.models.task import ExecutionStatus, Task, TaskSignal
+from src.core.models.task.enums import TaskIdentity
+from src.core.orchestrator.enums import TaskRef
+from src.services.factory import ServiceFactory
+from src.services.health import SystemMonitor
+from src.utils.constants import (
+    CACHE_TASK_NAMESPACE,
+    CONFIG_FILENAME,
+)
 
 from .janitor import Janitor
 from .signals import SignalEvent, SignalScanner
@@ -27,12 +26,6 @@ from .state import StateHub
 from .task import TaskManager
 
 LOG = logger
-
-
-def generate_run_id() -> str:
-    """Generate a unique run ID."""
-    timestamp = current_timestamp(naive=STRIP_TZ_FOR_DB).strftime("%Y%m%d-%H%M%S")
-    return f"{timestamp}-{short_hash(8)}"
 
 
 class Orchestrator:
@@ -175,19 +168,19 @@ class Orchestrator:
             dataset_ids=dataset_id,
             partition_date=partition_date,
             overrides=overrides,
+            run_id=run_id,
         )
 
         for ctx in contexts:
-            run_id = run_id or generate_run_id()
             task_ref = TaskRef(
                 namespace=CACHE_TASK_NAMESPACE,
                 status=ExecutionStatus.PROVISIONED,
-                stage=ctx.from_stage,
+                step_id=ctx.from_step,
                 identity=TaskIdentity(
                     job_id=ctx.job_id,
                     dataset_id=ctx.dataset_id,
                     partition_date=ctx.partition_date,
-                    run_id=run_id,
+                    run_id=ctx.run_id,
                 ),
             )
 
@@ -207,13 +200,13 @@ class Orchestrator:
 
             # Register and provision
             self.state.update_task(
-                run_id=run_id,
+                run_id=ctx.run_id,
                 updates={
                     "JOB_ID": ctx.job_id,
                     "DATASET_ID": ctx.dataset_id,
                     "PARTITION_DATE": ctx.partition_date,
-                    "RUN_ID": run_id,
-                    "CURRENT_STAGE": ctx.from_stage,
+                    "RUN_ID": ctx.run_id,
+                    "CURRENT_STEP": ctx.from_step,
                     "JOB_STATUS": ExecutionStatus.PROVISIONED,
                     "LAST_UPDATED_AT_TS_LC": current_timestamp().isoformat(sep=" "),
                 },
@@ -221,37 +214,42 @@ class Orchestrator:
             task = Task(
                 task_ref=task_ref, worker_id="orchestrator", exec_ctx=self.exec_ctx
             )
-            task.workspace.create(config_path)
+            new_config_path = task.workspace.create(config_path)
             LOG.trace(
                 "[DISPATCH] workspace created",
-                run_id=run_id,
+                run_id=ctx.run_id,
                 path=str(task.workspace.path),
             )
 
             # Queue for execution
-            queued = self.tasks.enqueue(task_ref, str(config_path))
-            if queued:
+            queued_ref = self.tasks.enqueue(
+                task_ref, config_file_path=str(new_config_path)
+            )
+            if queued_ref:
                 LOG.trace(
-                    "[DISPATCH] task queued", run_id=run_id, status=queued.status.value
+                    "[DISPATCH] task queued",
+                    run_id=run_id,
+                    status=queued_ref.status.value,
                 )
                 self.state.update_task(
-                    run_id,
+                    ctx.run_id,
                     {
                         "JOB_ID": ctx.job_id,
                         "DATASET_ID": ctx.dataset_id,
                         "PARTITION_DATE": ctx.partition_date,
-                        "RUN_ID": run_id,
-                        "JOB_STATUS": queued.status.value,
-                        "CURRENT_STAGE": queued.stage,
+                        "RUN_ID": ctx.run_id,
+                        "JOB_STATUS": queued_ref.status.value,
+                        "CURRENT_STEP": queued_ref.step_id,
                         "LAST_UPDATED_AT_TS_LC": current_timestamp().isoformat(sep=" "),
                     },
                 )
 
-            run_ids.add(run_id)
+            run_ids.add(ctx.run_id)
             self.signals.notify()
 
         return run_ids
 
+    # FIXME: Update manifest looks weird
     def abort_job(
         self, task: Task, status: ExecutionStatus, reason: str | None = None
     ) -> None:
@@ -285,9 +283,9 @@ class Orchestrator:
                 error_info = record.ERRORS or {}
                 error_type = error_info.get("error_type", "RuntimeError")
                 message = error_info.get("message", "Unknown Error")
-                stage = error_info.get("stage", record.CURRENT_STAGE or "Unknown")
+                step = error_info.get("step", record.CURRENT_STEP or "Unknown")
                 failures.append(
-                    f"[Run: {run_id} | Stage: {stage} | Status: {status}] {error_type}: {message}"
+                    f"[Run: {run_id} | Step: {step} | Status: {status}] {error_type}: {message}"
                 )
 
         if failures:

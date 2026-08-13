@@ -4,11 +4,12 @@ from pathlib import Path
 from typing import Any
 
 import msgspec
-from apps.ingestion.src.core.contexts import ExecutionContext, TaskContext
-from apps.ingestion.src.core.models.task import TaskManifest
-from apps.ingestion.src.core.orchestrator.enums import TaskUpdate
-from apps.ingestion.src.utils.common import find_path
 from loguru import logger
+
+from src.core.contexts import ExecutionContext, TaskContext
+from src.core.models.task import TaskManifest
+from src.core.orchestrator.enums import TaskUpdate
+from src.utils.common import find_path
 
 from .sink import StateSink
 from .source import StateSource
@@ -48,7 +49,7 @@ class StateHub:
         self.sink = StateSink(db_config, self.workspace_dir)
         self.source = StateSource(self.store, exec_ctx)
 
-        LOG.info("StateHub initialized", workspace=str(self.workspace_dir))
+        LOG.trace("StateHub initialized", workspace=str(self.workspace_dir))
 
     # def add_task(self, task_ref: TaskRef) -> None:
     #     """Registers a new task in both the cache and the log stream.
@@ -159,5 +160,5 @@ class StateHub:
 
     def close(self) -> None:
         """Gracefully shuts down the Hub and closes active streams."""
-        LOG.info("Closing StateHub")
+        LOG.trace("Closing StateHub")
         self.sink.close()

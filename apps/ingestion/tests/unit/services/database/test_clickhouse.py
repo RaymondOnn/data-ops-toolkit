@@ -2,9 +2,10 @@ from unittest.mock import MagicMock, PropertyMock, patch
 
 import polars as pl
 import pytest
-from apps.ingestion.src.services.database.clickhouse import ClickHouseService
 from libs.auth.secret import Secret
 from libs.database.clients.clickhouse import ClickhouseClient
+
+from src.services.database.clickhouse import ClickHouseService
 
 
 class TestClickHouseService:

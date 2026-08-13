@@ -8,8 +8,8 @@ from .enums import HookOnFailure
 from .hooks import HOOK_STRATEGIES
 
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.models.task import Task
-    from apps.ingestion.src.extras.hooks.enums import HookAction
+    from src.core.models.task import Task
+    from src.extras.hooks.enums import HookAction
 
 LOG = logger
 
@@ -80,11 +80,18 @@ class HookRunner:
 
     def run_hooks(
         self,
-        stage_name: str,
+        step_id: str,
         phase: str,  # "pre" or "post"
     ) -> None:
         """Execute all hooks for a given stage and phase."""
-        hooks_config = self.task.context.hooks.get(stage_name)
+        step_config = self.task.context.get_step(step_id)
+        hooks_config = None
+
+        if step_config and step_config.hooks:
+            hooks_config = step_config.hooks
+        else:
+            # 2. Fall back to task.context.hooks keyed by step_id
+            hooks_config = self.task.context.hooks.get(step_id)
         if not hooks_config:
             return
 
@@ -92,7 +99,7 @@ class HookRunner:
         if not actions:
             return
 
-        LOG.info(f"Running {len(actions)} {phase}-hooks for stage '{stage_name}'")
+        LOG.info(f"Running {len(actions)} {phase}-hooks for step '{step_id}'")
         for i, action in enumerate(actions):
             if not self._should_run(action):
                 LOG.info(

@@ -19,8 +19,8 @@ WITH dates AS (
         , END_TIMESTAMP_LC
         , LAST_UPDATED_AT_TS_LC
         , JOB_STATUS
-        , CURRENT_STAGE
-        , JOB_BITMASK
+        , CURRENT_STEP
+        , PROGRESS
         , IS_SCHEDULED
         , RUNTIME_OVERRIDES
         , RETRY_ATTEMPTS
@@ -55,8 +55,8 @@ FROM (
         , NULL AS END_TIMESTAMP_LC
         , LAST_UPDATED_AT_TS_LC
         , 'PENDING' AS JOB_STATUS
-        , NULL AS CURRENT_STAGE
-        , NULL AS JOB_BITMASK
+        , NULL AS CURRENT_STEP
+        , NULL AS PROGRESS
         , 1 AS IS_SCHEDULED
         , NULL AS RUNTIME_OVERRIDES
         , 0 AS RETRY_ATTEMPTS

@@ -5,9 +5,10 @@ from pathlib import Path
 
 import libcst as cst
 import networkx as nx
-from apps.ingestion.src.core.contexts import TaskContextBuilder
-from apps.ingestion.src.utils.constants import APP_CONFIG_ROOT
 from loguru import logger
+
+from src.core.contexts import TaskContextBuilder
+from src.utils.constants import APP_CONFIG_ROOT
 
 # Import the AST extraction and CallGraph structures we built
 from .analyze import ASTFingerprinter, CodeImpactAnalyzer, DatasetTarget, FunctionId

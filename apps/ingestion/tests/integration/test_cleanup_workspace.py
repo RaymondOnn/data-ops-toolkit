@@ -1,7 +1,7 @@
 import time
 from unittest.mock import patch
 
-from apps.ingestion.src.core.models.task import Task
+from src.core.models.task import Task
 
 
 def test_janitor_purges_expired_tasks(runtime, tmp_path):

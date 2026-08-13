@@ -1,6 +1,7 @@
 import msgspec
-from apps.ingestion.src.core.models.task.manifest import ExtractPayload, TaskManifest
-from apps.ingestion.src.core.models.task.status import ExecutionStatus
+
+from src.core.models.task.manifest import ExtractPayload, TaskManifest
+from src.core.models.task.status import ExecutionStatus
 
 
 def test_manifest_is_fully_populated_false():

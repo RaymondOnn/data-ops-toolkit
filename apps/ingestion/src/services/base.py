@@ -3,6 +3,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Generator, Sequence
 from typing import TYPE_CHECKING, Any
 
+from libs.database.sql import SQLContext
+
 if TYPE_CHECKING:
     import polars as pl
 
@@ -13,16 +15,28 @@ class Service(ABC):
     Ensures the decorator can find the 'name' for the Registry.
     """
 
-    def __init__(self, name: str, **config: Any):
+    # name: str
+    # config: dict[str, Any]
+
+    def __init__(self, name: str | None = None, **config: Any):
         """
         Initializes the service with a unique name and configuration.
 
         Args:
-            name: The unique identifier for the service instance.
+            name: Human-readable name or identifier for the service instance.
             **config: Driver-specific configuration parameters.
         """
-        self.name = name
+        self.name = name or config.get("type") or self.__class__.__name__.lower()
         self.config = config
+
+    def probe(self) -> bool:
+        """
+        Health probe interface for the service.
+
+        Returns:
+            bool: True if responsive and healthy, False otherwise.
+        """
+        return True
 
     @abstractmethod
     def count_units(self, target: str, filter_condition: str | None = None) -> int:
@@ -37,21 +51,6 @@ class Service(ABC):
             int: The total number of items or rows found.
         """
         raise NotImplementedError()
-
-    def fetch(self, query: str) -> list[Sequence[Any]]:
-        """
-        Base signature for executing SQL commands.
-
-        Args:
-            query: The SQL query or command to execute.
-
-        Returns:
-            list[Sequence[Any]]: A list of raw result rows.
-
-        Raises:
-            NotImplementedError: If the service does not support raw fetch.
-        """
-        raise NotImplementedError("Service does not support fetch()")
 
     def fetch_df(self, query: str) -> Generator["pl.DataFrame", Any, None]:
         """
@@ -102,10 +101,10 @@ class Source(Service, ABC):
         """
         raise NotImplementedError()
 
-    @abstractmethod
     def parallelize(
         self,
         target: str,
+        sql_context: SQLContext,
         num_workers: int | None = None,
         filter_condition: str | None = None,
         **kwargs: Any,
@@ -121,10 +120,9 @@ class Source(Service, ABC):
         Returns:
             Any: A collection of work unit definitions for Ray workers.
         """
-        pass
+        raise NotImplementedError()
 
-    @abstractmethod
-    def pull(self, unit: Any) -> "pl.DataFrame | pl.LazyFrame":
+    def pull(self, unit: Any, **kwargs: Any) -> "pl.DataFrame | pl.LazyFrame":
         """
         Fetches data for a given work unit.
 
@@ -134,13 +132,12 @@ class Source(Service, ABC):
         Returns:
             pl.DataFrame | pl.LazyFrame: The extracted data.
         """
-        pass
+        raise NotImplementedError()
 
 
 class Sink(Service, ABC):
     """Base class for all data sinks (e.g., data lakes, databases)."""
 
-    @abstractmethod
     def stage(
         self,
         source_dir: Any,
@@ -162,7 +159,7 @@ class Sink(Service, ABC):
         Returns:
             tuple[str, int]: The temporary identifier (path/table) and row count.
         """
-        pass
+        raise NotImplementedError()
 
     @abstractmethod
     def promote(
@@ -183,9 +180,8 @@ class Sink(Service, ABC):
             partition_value: The specific partition value topromote.
             expected_count: Verification count for promotion.
         """
-        pass
+        raise NotImplementedError()
 
-    @abstractmethod
     def is_equal(
         self,
         ref: Any,
@@ -203,9 +199,8 @@ class Sink(Service, ABC):
         Returns:
             bool: True if datasets match, False otherwise.
         """
-        pass
+        raise NotImplementedError()
 
-    @abstractmethod
     def clone(self, source: Any, dest: Any) -> None:
         """
         Clones a dataset structure or data to a new identifier.
@@ -214,9 +209,8 @@ class Sink(Service, ABC):
             source: The source to clone from.
             dest: The destination to create.
         """
-        pass
+        raise NotImplementedError()
 
-    @abstractmethod
     def delete(self, target: str) -> None:
         """
         Drops or deletes a dataset or table.
@@ -224,13 +218,12 @@ class Sink(Service, ABC):
         Args:
             target: The name of the table or object to drop.
         """
-        pass
+        raise NotImplementedError()
 
 
 class Archive(Service, ABC):
     """Base class for archival and backup services."""
 
-    @abstractmethod
     def store(self, source: Any, dest: str) -> None:
         """
         Moves or copies data to a persistent archival destination.
@@ -239,4 +232,4 @@ class Archive(Service, ABC):
             source: The path containing items to archive.
             dest: The destination root or specific identifier.
         """
-        pass
+        raise NotImplementedError()

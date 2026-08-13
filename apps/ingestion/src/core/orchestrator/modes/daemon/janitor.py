@@ -2,12 +2,13 @@
 
 from typing import Any
 
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task, TaskSignal
-from apps.ingestion.src.core.models.task.enums import TaskIdentity
-from apps.ingestion.src.core.orchestrator.common import Janitor
-from apps.ingestion.src.core.orchestrator.enums import TaskRecord, TaskRef
-from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE
 from loguru import logger
+
+from src.core.models.task import ExecutionStatus, Task, TaskSignal
+from src.core.models.task.enums import TaskIdentity
+from src.core.orchestrator.common import Janitor
+from src.core.orchestrator.enums import TaskRecord, TaskRef
+from src.utils.constants import CACHE_TASK_NAMESPACE
 
 from .state import DaemonState
 
@@ -71,7 +72,7 @@ class DaemonJanitor:
             task_ref=TaskRef(
                 namespace=CACHE_TASK_NAMESPACE,
                 status=ExecutionStatus(record.JOB_STATUS),
-                stage=record.CURRENT_STAGE or "UNKNOWN",
+                step_id=record.CURRENT_STEP or "UNKNOWN",
                 identity=identity,
             ),
             worker_id="janitor-expiry",

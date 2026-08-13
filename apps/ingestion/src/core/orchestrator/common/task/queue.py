@@ -2,11 +2,12 @@
 from collections.abc import Generator
 
 import msgspec
-from apps.ingestion.src.core.models.stages.enums import Stage
-from apps.ingestion.src.core.models.task import ExecutionStatus
-from apps.ingestion.src.core.orchestrator.enums import TaskMetadata
-from apps.ingestion.src.services.factory import ServiceFactory
+from libs.queue.priority.factory import QueueFactory
 from loguru import logger
+
+from src.core.models.task import ExecutionStatus
+from src.core.orchestrator.enums import TaskMetadata
+from src.core.stages.enums import Stage
 
 LOG = logger
 
@@ -40,7 +41,7 @@ class TaskQueue:
         Each orchestrator instance uses its own SQLite database for task queuing,
         ensuring isolation and preventing cross-job interference.
         """
-        self.backend = ServiceFactory.get_task_queue(queue_config)
+        self.backend = QueueFactory.create(**queue_config)
 
     def is_empty(self) -> bool:
         """Check if the queue has any pending tasks."""

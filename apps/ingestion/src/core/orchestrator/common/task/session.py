@@ -3,10 +3,11 @@
 # 143 ->
 import time
 
-from apps.ingestion.src.core.contexts import ExecutionContext
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task
-from apps.ingestion.src.core.models.task.enums import TaskRef
 from loguru import logger
+
+from src.core.contexts import ExecutionContext
+from src.core.models.task import ExecutionStatus, Task
+from src.core.models.task.enums import TaskRef
 
 
 class TaskSession:
@@ -61,7 +62,7 @@ class TaskSession:
         self._context_manager = logger.contextualize(
             run_id=run_id,
             job_id=self.task_ref.identity.job_id,
-            stage=self.task_ref.stage,
+            step=self.task_ref.step_id,
         )
         self._context_manager.__enter__()
 
@@ -89,14 +90,14 @@ class TaskSession:
                 exec_ctx=self.exec_ctx,
             )
 
-            # Verify workspace exists[cite: 11]
+            # Verify workspace exists
             if not self.task.workspace.exists():
                 raise FileNotFoundError(
                     f"Task workspace missing: {self.task.workspace.path}"
                 )
 
-            # Initialize[cite: 11]
-            self.task.check_in(self.task_ref.stage)
+            # Initialize
+            self.task.check_in(self.task_ref.step_id)
 
             if (self.task.workspace.path / ".retrying").exists():
                 self.task.update_manifest(
@@ -105,11 +106,11 @@ class TaskSession:
                 self.task.workspace.remove_marker(".retrying")
 
             self.task.workspace.remove_marker(".blocked")
-            self.log.info(f"Stage {self.task_ref.stage.upper()} started")
+            self.log.info(f"Step '{self.task_ref.step_id}' started")
             return self.task
 
         except Exception:
-            # If initialization fails, clean up the handler immediately to prevent leaks[cite: 11]
+            # If initialization fails, clean up the handler immediately to prevent leaks
             if self._handler_id is not None:
                 logger.remove(self._handler_id)
                 self._handler_id = None
@@ -129,10 +130,10 @@ class TaskSession:
 
         # Log completion
         if exc_val:
-            self.log.error(f"Stage {self.task_ref.stage.upper()} failed: {exc_val}")
+            self.log.error(f"Step '{self.task_ref.step_id}' failed: {exc_val}")
         else:
-            self.log.info(
-                f"Stage {self.task_ref.stage.upper()} completed ({duration:.2f}s)"
+            self.log.success(
+                f"Step '{self.task_ref.step_id}' completed ({duration:.2f}s)"
             )
 
         # Cleanup

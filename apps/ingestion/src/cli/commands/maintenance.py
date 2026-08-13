@@ -8,9 +8,10 @@ including TTL-based expiry sweeps and surgical run purges.
 from typing import Annotated
 
 import typer
-from apps.ingestion.src.cli.state import app
-from apps.ingestion.src.core.contexts import TaskContextBuilder
-from apps.ingestion.src.core.orchestrator.factory import assemble_runtime
+
+from src.cli.state import app
+from src.core.contexts import TaskContextBuilder
+from src.core.orchestrator.factory import assemble_runtime
 
 
 @app.command(name="clean")

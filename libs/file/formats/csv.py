@@ -15,14 +15,7 @@ LOG = logging.getLogger(__name__)
 class CSVHandler(FormatHandler):
     """Handler for CSV and delimited text files."""
 
-    @property
-    def splittable(self) -> bool:
-        """Check if CSV files are splittable.
-
-        Returns:
-            bool: True if CSV files are splittable, False otherwise.
-        """
-        return True
+    splittable = True
 
     def discover(self, path: Path | str, pattern: str | None = None) -> set[str]:
         """Discover CSV files.
@@ -57,7 +50,7 @@ class CSVHandler(FormatHandler):
         lfs = []
 
         for f in files:
-            size = self.fs.size(f)
+            size = self.fs.fs.size(f)
             if size and size > 2 * 1024**3 and not self.options.get("force_repair"):
                 # Use scan for large files (>2GB)
                 lf = pl.scan_csv(
@@ -123,7 +116,7 @@ class CSVHandler(FormatHandler):
 
         return io.BytesIO(combined)
 
-    def write_raw(self, data: bytes, path: Path | str) -> None:
+    def write_raw(self, data: bytes, path: str) -> None:
         """Write raw data to path.
 
         Args:

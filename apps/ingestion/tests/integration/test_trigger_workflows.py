@@ -1,8 +1,9 @@
 from datetime import datetime
 
 import pytest
-from apps.ingestion.src.core.orchestrator.enums import TaskRecord
-from apps.ingestion.src.core.orchestrator.modes.daemon.trigger import TriggerManager
+
+from src.core.orchestrator.enums import TaskRecord
+from src.core.orchestrator.modes.daemon.trigger import TriggerManager
 
 
 @pytest.fixture

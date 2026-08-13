@@ -27,31 +27,31 @@ services:
     networks:
       - ch_ntw
 
-  prometheus:
-    image: prom/prometheus:latest
-    volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-      - ./.tmp/prometheus:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-    ports:
-      - "9090:9090"
-    networks:
-      - ch_ntw
+  # prometheus:
+  #   image: prom/prometheus:latest
+  #   volumes:
+  #     - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+  #     - ./.tmp/prometheus:/prometheus
+  #   command:
+  #     - '--config.file=/etc/prometheus/prometheus.yml'
+  #   ports:
+  #     - "9090:9090"
+  #   networks:
+  #     - ch_ntw
 
-  grafana:
-    # image: grafana/grafana:latest
-    build:
-      context: ./grafana
-      dockerfile: Dockerfile
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-    volumes:
-      - ./.tmp/grafana:/var/lib/grafana
-    networks:
-      - ch_ntw
+  # grafana:
+  #   # image: grafana/grafana:latest
+  #   build:
+  #     context: ./grafana
+  #     dockerfile: Dockerfile
+  #   ports:
+  #     - "3000:3000"
+  #   environment:
+  #     - GF_SECURITY_ADMIN_PASSWORD=admin
+  #   volumes:
+  #     - ./.tmp/grafana:/var/lib/grafana
+  #   networks:
+  #     - ch_ntw
 
   localstack:
     image: localstack/localstack:4.4.0

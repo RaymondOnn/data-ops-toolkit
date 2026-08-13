@@ -1,6 +1,6 @@
 from unittest.mock import patch
 
-from apps.ingestion.src.core.models.task import ExecutionStatus
+from src.core.models.task import ExecutionStatus
 
 
 def test_orchestrator_backpressure_holding(runtime):

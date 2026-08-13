@@ -2,16 +2,14 @@ incorporate data retention policies i.e. can keep data for 1 year
 [x] disable self-healing
 error_handling / exception hook /.
 feature flags
-database mode: truncate / incremental (update_key) / snapshot / cdc
+- database mode: truncate / incremental (update_key) / snapshot / cdc
 - primary key field
-refine custom transform logic
 work on CD process.
 - Can't proceed to K8S without this
 - regression testing
 bug: Why constantly evict expired run?
 bug: check updates
-bug: Dynaconf: New version structure different
-qn: merge state cache with task cache?
+qn: change fallback in TaskCache to build from manifest
 qn: daemon mode + overrides
 idea: saving to filesystem -> data lakes
 idea: bash pipe input and output
@@ -19,9 +17,23 @@ idea: using column info in insert using select query
 idea: new stages: download, iterate, parse for ai pipeline
 idea: two extract steps -> merge the two datasets
 idea: dry run mode
+idea: quarantine process (after write / publish)
+  - Write the problematic rows into a qurantine file in jsonl format, saved to the data folder.
+  - {
+    "_quarantine_reason": "INVALID_NULL_PRIMARY_KEY",
+    "_quarantine_step": "normalize_transform",
+    "_quarantine_timestamp": "2026-08-03T18:04:12",
+    "order_id": null,
+    "amount": 150.00
+  }
+  - Have a threshold to decide whether to go ahead with the load process. The threshold is to be discussed with the stakeholder.
+  - The task folder is moved to FAILED/ and either the quarantine file or symlink to the file will be available in the task folder.
 
 
-
+refine custom transform logic.
+rollback
+zomie recovery
+check if metadata folder is removed on success
 
 ### Planned Enhancements & s
 

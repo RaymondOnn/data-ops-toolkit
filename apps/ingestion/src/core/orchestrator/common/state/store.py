@@ -4,16 +4,17 @@ from threading import RLock
 from typing import Any
 
 import msgspec
-from apps.ingestion.src.core.contexts.execution import ExecutionContext
-from apps.ingestion.src.core.models.task.enums import TaskIdentity
-from apps.ingestion.src.core.orchestrator.enums import (
+from libs.utils.dates import current_timestamp
+from loguru import logger
+
+from src.core.contexts.execution import ExecutionContext
+from src.core.models.task.enums import TaskIdentity
+from src.core.orchestrator.enums import (
     TaskRecord,
     TaskUpdate,
     to_ch_datetime,
 )
-from apps.ingestion.src.utils.constants import STRIP_TZ_FOR_DB
-from libs.utils.dates import current_timestamp
-from loguru import logger
+from src.utils.constants import STRIP_TZ_FOR_DB
 
 LOG = logger
 
@@ -40,7 +41,7 @@ class StateStore:
         self.exec_ctx = exec_ctx
         self.records: dict[str, TaskRecord] = {}
         self._lock = RLock()
-        LOG.debug("StateStore initialized")
+        LOG.trace("StateStore initialized")
 
     @property
     def all(self) -> dict[str, TaskRecord]:
@@ -94,7 +95,7 @@ class StateStore:
                 PARTITION_DATE=task_identity.partition_date,
                 RUN_ID=run_id,
                 IS_SCHEDULED=0,
-                # CURRENT_STAGE=task_ref.stage,
+                # CURRENT_STEP=task_ref.step_id,
                 SCHEDULED_TIMESTAMP_LC=now,
                 # JOB_STATUS=task_ref.status.value,
             )

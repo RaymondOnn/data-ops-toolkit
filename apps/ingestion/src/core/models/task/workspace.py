@@ -4,38 +4,21 @@ import os
 import shutil
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import msgspec
-from apps.ingestion.src.core.contexts import ExecutionContext
-from apps.ingestion.src.core.models.stages.enums import Stage
-from apps.ingestion.src.core.models.task.enums import TaskIdentity
-from apps.ingestion.src.core.models.task.manifest import TaskManifest
-from apps.ingestion.src.core.models.task.status import ExecutionStatus
-from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
 from loguru import logger
 
+from src.core.models.task.enums import TaskIdentity
+from src.core.models.task.manifest import TaskManifest
+from src.core.models.task.status import ExecutionStatus
+from src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
+
+if TYPE_CHECKING:
+    from src.core.contexts.execution import ExecutionContext
+
+
 LOG = logger
-
-
-def get_commit_hash() -> str:
-    """
-    Retrieves the short git commit hash for the current HEAD.
-
-    Returns:
-        str: The 7-character commit hash, or 'unknown' if git is unavailable.
-    """
-    import subprocess
-
-    try:
-        # Returns the short hash (e.g., a1b2c3d)
-        return (
-            subprocess.check_output(["git", "rev-parse", "--short", "HEAD"])
-            .decode("ascii")
-            .strip()
-        )
-    except Exception:
-        return "unknown"
 
 
 class TaskWorkspace:
@@ -61,7 +44,7 @@ class TaskWorkspace:
         dataset_id: str,
         partition_date: str,
         run_id: str,
-        exec_ctx: ExecutionContext,
+        exec_ctx: "ExecutionContext",
         category: str = "active",
     ) -> None:
         """
@@ -126,7 +109,7 @@ class TaskWorkspace:
         """Returns the path to the config.json file."""
         return self.path / CONFIG_FILENAME
 
-    def get_data_path(self, stage: str) -> Path:
+    def get_data_path(self, step_id: str) -> Path:
         """
         Constructs the data vault path for a specific pipeline stage.
 
@@ -142,7 +125,7 @@ class TaskWorkspace:
             / self.dataset_id
             / self.partition_date
             / self.run_id
-            / stage
+            / step_id
         )
 
     def exists(self) -> bool:
@@ -154,7 +137,7 @@ class TaskWorkspace:
         """
         return self.path.is_dir()
 
-    def create(self, config_source: str | Path) -> None:
+    def create(self, config_source: str | Path) -> str:
         """
         Provisions the workspace directory and moves the config file into place.
 
@@ -169,7 +152,9 @@ class TaskWorkspace:
             shutil.move(str(src), str(self.config_file))
             LOG.debug(f"Moved config to: {self.config_file}")
 
-    def load_manifest(self) -> TaskManifest:
+        return str(self.config_file)
+
+    def load_manifest(self) -> "TaskManifest":
         """
         Loads the task manifest from disk.
 
@@ -186,7 +171,7 @@ class TaskWorkspace:
                 job_id=self.job_id,
                 run_id=self.run_id,
                 dataset_id=self.dataset_id,
-                current_stage=Stage.START.value,
+                current_step_id="start",
                 bitmask=0,
                 status=ExecutionStatus.UNKNOWN,
             )
@@ -289,22 +274,22 @@ class TaskWorkspace:
         """Write text to a file in workspace."""
         (self.path / filename).write_text(content)
 
-    def create_symlink(self, stage: str, data_path: Path) -> None:
+    def create_symlink(self, folder_name: str, data_path: Path) -> None:
         """Create symlink from workspace to stage data vault."""
-        link = self.path / stage
+        link = self.path / folder_name
 
         if link.exists() or link.is_symlink():
             link.unlink()
 
         rel_target = os.path.relpath(data_path, link.parent)
         link.symlink_to(rel_target, target_is_directory=True)
-        LOG.debug(f"Created stage link: {link} -> {rel_target}")
+        LOG.debug(f"Created symlink: {link} -> {rel_target}")
 
-    def reset_data_dir(self, stage: str) -> Path:
+    def reset_data_dir(self, step_id: str) -> Path:
         """Clear and prepare data vault for a stage."""
-        path = self.get_data_path(stage)
+        path = self.get_data_path(step_id)
         if path.is_dir():
-            LOG.debug(f"Cleaning stage data: {stage}")
+            LOG.debug(f"Emptying data folder: {step_id}")
             shutil.rmtree(path)
         path.mkdir(parents=True, exist_ok=True)
         return path

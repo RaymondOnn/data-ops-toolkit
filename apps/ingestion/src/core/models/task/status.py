@@ -11,7 +11,7 @@ class ExecutionStatus(StrEnum):
     # Initial State
     PENDING = "PENDING"  # Created, waiting for schedule
     PROVISIONED = "PROVISIONED"  # Instructions and folder created on disk
-    WAITING = "WAITING"  # Accepted by TM, but no Ray resources available
+    WAITING = "WAITING"  # Pending dispatch in TaskQueue
     DISPATCHED = "DISPATCHED"  # Submitted to Ray, waiting for worker execution
 
     # Active States

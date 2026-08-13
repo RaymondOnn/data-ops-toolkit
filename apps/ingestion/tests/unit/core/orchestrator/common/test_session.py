@@ -1,9 +1,10 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from apps.ingestion.src.core.models.task.enums import TaskIdentity, TaskRef
-from apps.ingestion.src.core.models.task.status import ExecutionStatus
-from apps.ingestion.src.core.orchestrator.common.session import TaskSession
+
+from src.core.models.task.enums import TaskIdentity, TaskRef
+from src.core.models.task.status import ExecutionStatus
+from src.core.orchestrator.common.session import TaskSession
 
 
 class TestTaskSession:

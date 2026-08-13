@@ -1,10 +1,11 @@
 from typing import Annotated
 
 import typer
-from apps.ingestion.src.cli.state import state
-from apps.ingestion.src.core.contexts import TaskContextBuilder
-from apps.ingestion.src.core.orchestrator.common import StateHub
-from apps.ingestion.src.core.orchestrator.doctor import Doctor
+
+from src.cli.state import state
+from src.core.contexts import TaskContextBuilder
+from src.core.orchestrator.common import StateHub
+from src.core.orchestrator.doctor import Doctor
 
 doctor_app = typer.Typer(help="🩺 Diagnose environment health and configuration.")
 network_app = typer.Typer(help="🌐 Network path and connectivity diagnostics.")

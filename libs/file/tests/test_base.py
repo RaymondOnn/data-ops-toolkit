@@ -111,7 +111,7 @@ class TestFileSystemFactory:
         THEN the factory should return a dynamic class inheriting from both
         WHEN create_fs_client is invoked
         """
-        client = create_fs_client(url="/tmp/data", capabilities={FileSystemSkills.CAS})
+        client = create_fs_client(url="/tmp/data", skills={FileSystemSkills.CAS})
 
         # Verify that the instance has methods from both base and mixin
         # (Using __class__.__name__ to verify ManagedLocalClient structure)

@@ -1,9 +1,10 @@
 import time
 from unittest.mock import MagicMock, patch
 
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task
-from apps.ingestion.src.core.monitor import ServiceMonitor
 from libs.clients.base import ClientCantConnect
+
+from src.core.models.task import ExecutionStatus, Task
+from src.services.health.monitor import ServiceMonitor
 
 
 def test_circuit_breaker_blocks_and_recovers(runtime, tmp_path):

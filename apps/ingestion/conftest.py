@@ -39,7 +39,7 @@ def exec_ctx(tmp_path):
     WHEN a test requires an ExecutionContext
     THEN return a real instance pointing to a temporary workspace
     """
-    from apps.ingestion.src.core.contexts.execution import (
+    from src.core.contexts.execution import (
         ExecutionContext,
         ExecutionMode,
         RayMode,
@@ -83,7 +83,7 @@ def clear_service_singletons():
     THEN clear the ServiceFactory and ServiceMonitor to prevent state leakage
     """
     yield
-    from apps.ingestion.src.services.factory import ServiceFactory
+    from src.services.factory import ServiceFactory
 
     ServiceFactory._INSTANCES.clear()
 
@@ -110,7 +110,7 @@ def mock_source():
     GIVEN a requirement for a Source service
     THEN return a MagicMock adhering to the Source interface.
     """
-    from apps.ingestion.src.services.base import Source
+    from src.services.base import Source
 
     source = MagicMock(spec=Source)
     source.count_units.return_value = 1000
@@ -123,7 +123,7 @@ def mock_sink():
     GIVEN a requirement for a Sink service
     THEN return a MagicMock adhering to the Sink interface.
     """
-    from apps.ingestion.src.services.base import Sink
+    from src.services.base import Sink
 
     sink = MagicMock(spec=Sink)
     sink.count_units.return_value = 1000
@@ -134,7 +134,7 @@ def mock_sink():
 @pytest.fixture
 def mock_archive():
     """Returns a MagicMock adhering to the Archive interface."""
-    from apps.ingestion.src.services.base import Archive
+    from src.services.base import Archive
 
     return MagicMock(spec=Archive)
 
@@ -161,7 +161,7 @@ def ch_service(mock_db_client):
     WHEN the service is instantiated
     THEN return an instance with the 'client' property patched to use mock_db_client.
     """
-    from apps.ingestion.src.services.database.clickhouse import ClickHouseService
+    from src.services.database.clickhouse import ClickHouseService
 
     service = ClickHouseService(
         name="test_clickhouse", host="localhost", database="default"
@@ -182,8 +182,8 @@ def runtime(exec_ctx):
     WHEN the runtime is assembled for testing
     THEN return a TriggerRuntime instance configured for the test workspace.
     """
-    from apps.ingestion.src.core.contexts.builder import TaskContextBuilder
-    from apps.ingestion.src.core.orchestrator.factory import assemble_runtime
+    from src.core.contexts.builder import TaskContextBuilder
+    from src.core.orchestrator.factory import assemble_runtime
 
     builder = TaskContextBuilder()
     return assemble_runtime(exec_ctx, builder)

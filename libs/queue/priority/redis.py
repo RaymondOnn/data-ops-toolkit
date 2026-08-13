@@ -112,8 +112,8 @@ class RedisPriorityQueue(PriorityQueue):
 
                     payload = json.loads(payload_str)
                     yield payload["data"]
-        except Exception as e:
-            LOG.error(f"Failed to scan Redis queue items: {e}")
+        except Exception:
+            LOG.exception("Failed to scan Redis queue items")
 
     def cleanup(self) -> None:
         """Clean up expired processing items."""

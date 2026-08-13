@@ -1,7 +1,8 @@
 import time
 
 import ray
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task
+
+from src.core.models.task import ExecutionStatus, Task
 
 
 def test_zombie_resurrection_on_worker_death(runtime, tmp_path):

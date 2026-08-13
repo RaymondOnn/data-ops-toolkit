@@ -4,7 +4,7 @@ import time
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, cast
 
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task
+from src.core.models.task import ExecutionStatus, Task
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -61,7 +61,7 @@ class WorkflowDriver:
         folder = self.orchestrator.state.find_task_path(run_id)
 
         if not folder or not folder.exists():
-            from apps.ingestion.src.utils.common import find_path
+            from src.utils.common import find_path
 
             folder = find_path(self.exec_ctx.workspace_dir, run_id)
 

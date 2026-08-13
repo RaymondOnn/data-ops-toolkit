@@ -14,23 +14,24 @@ import polars as pl
 import psutil
 import ray
 import typer
-from apps.ingestion.src.core.contexts import TaskContextBuilder
-from apps.ingestion.src.core.models.task import (
+from libs.utils.dates import current_timestamp
+from libs.utils.system import get_disk_usage
+
+from src.core.contexts import TaskContextBuilder
+from src.core.models.task import (
     ExecutionStatus,
     Task,
     TaskManifest,
 )
-from apps.ingestion.src.core.orchestrator.enums import TaskRecord
-from apps.ingestion.src.core.orchestrator.factory import assemble_runtime
-from apps.ingestion.src.core.orchestrator.modes.daemon import DaemonRuntime
-from apps.ingestion.src.core.system import DISK_THRESHOLD_BLOCKED
-from apps.ingestion.src.utils.constants import (
+from src.core.orchestrator.enums import TaskRecord
+from src.core.orchestrator.factory import assemble_runtime
+from src.core.orchestrator.modes.daemon import DaemonRuntime
+from src.services.health.system import DISK_THRESHOLD_BLOCKED
+from src.utils.constants import (
     APP_CONFIG_ROOT,
     CONFIG_FILENAME,
     MANIFEST_FILENAME,
 )
-from libs.utils.dates import current_timestamp
-from libs.utils.system import get_disk_usage
 
 from .harness import ScenarioType
 

@@ -13,11 +13,11 @@ default:
             days: -1
       extract:
         load_mode: "append"
-        service_ref: "file"
+        service_ref: mock_data_folder
         source_params:
           type: file
           file_pattern:
-             archive: "./mock_data/test_large_job.zip"
+             archive: "test_large_job.zip"
              glob: "part_*.parquet"
         schema_file: schema.csv
       transform:

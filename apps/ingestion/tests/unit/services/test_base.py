@@ -1,5 +1,6 @@
 import pytest
-from apps.ingestion.src.services.base import Service
+
+from src.services.base import Service
 
 
 class MockService(Service):

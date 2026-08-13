@@ -1,4 +1,4 @@
-from apps.ingestion.src.utils.exceptions import RollbackRequired, TryAgainLater
+from src.utils.exceptions import RollbackRequired, TryAgainLater
 
 
 class TestAppExceptions:

@@ -26,12 +26,12 @@ SELECT
             'PENDING'
         ), 'LowCardinality(String)'
     ) AS JOB_STATUS
-    , cast(NULL, 'LowCardinality(Nullable(String))') AS CURRENT_STAGE
-    , cast(0, 'UInt16') AS JOB_BITMASK
+    , cast(NULL, 'Nullable(String)') AS CURRENT_STEP
+    , cast(NULL, 'Nullable(String)') AS PROGRESS
     , cast(1, 'UInt8') AS IS_SCHEDULED
     , cast(NULL, 'Nullable(String)') AS RUNTIME_OVERRIDES
     , cast(0, 'UInt8') AS RETRY_ATTEMPTS
-    , cast(NULL, 'Nullable(UInt64)') AS SOURCE_ROW_COUNT
+    , cast(NULL, 'Nullable(String)') AS SOURCE_ROW_COUNT
     , cast(NULL, 'Nullable(UInt64)') AS FINAL_ROW_COUNT
     , cast(NULL, 'Nullable(String)') AS FINAL_MANIFEST
     , cast(NULL, 'Nullable(String)') AS REMARKS

@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from apps.ingestion.src.core.models.stages.enums import Stage
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task
+from src.core.models.task import ExecutionStatus, Task
+from src.core.stages.enums import Stage
 
 
 def test_manual_rewind_recovery(runtime, tmp_path):
@@ -65,7 +65,7 @@ def test_recovery_max_retries_limit(runtime, tmp_path):
     folder = runtime.exec_ctx.failed_path / ident / run_id
     folder.mkdir(parents=True)
 
-    from apps.ingestion.src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
+    from src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
 
     (folder / MANIFEST_FILENAME).write_text("""
         {
@@ -82,7 +82,7 @@ def test_recovery_max_retries_limit(runtime, tmp_path):
 
     # 2. Run daemon recovery sweep
     # We use the DaemonJanitor which wraps the common Janitor with retry logic
-    from apps.ingestion.src.core.orchestrator.modes.daemon.janitor import DaemonJanitor
+    from src.core.orchestrator.modes.daemon.janitor import DaemonJanitor
 
     daemon_janitor = DaemonJanitor(
         runtime.orchestrator.janitor, runtime.orchestrator.state_store

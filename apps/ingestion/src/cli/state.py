@@ -1,7 +1,8 @@
 from typing import Any
 
 import typer
-from apps.ingestion.src.core.contexts import RayMode
+
+from src.core.contexts.execution import RayMode
 
 """
 Global CLI State Management.

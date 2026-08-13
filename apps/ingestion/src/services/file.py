@@ -2,22 +2,28 @@
 
 import time
 from contextlib import suppress
-from functools import cached_property
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import polars as pl
-from apps.ingestion.src.core.monitor import monitor
-from apps.ingestion.src.utils.exceptions import TryAgainLater
 from libs.auth.secret import Secret
 from libs.clients.base import ClientCantConnect
-from libs.file import FileSystemClient, FileSystemSkills, FormatFactory, filter_files
+from libs.database.sql import SQLContext
+from libs.file import (
+    FileSystemConnector,
+    FileSystemSkills,
+    filter_files,
+    get_file_ext,
+)
 from libs.resilience.circuit_breaker import CircuitBreaker
 from libs.utils.dict import find_keys_by_pattern, set_nested_key
 from loguru import logger
+from msgspec import Struct, field
 
-from .base import Archive, Service, Sink, Source
+from src.services.base import Archive, Service, Sink, Source
+from src.services.health.monitor import monitor
+from src.utils.exceptions import TryAgainLater
+
 from .factory import ServiceFactory
 
 LOG = logger
@@ -31,61 +37,65 @@ breaker = CircuitBreaker(
 )
 
 
-class BaseStorage(Service):
+@ServiceFactory.register(source_type="file")
+class FileService(Service):
     """Base storage service with filesystem client."""
 
     def __init__(
         self,
-        name: str,
         url: str,
-        capabilities: set[FileSystemSkills],
-        storage_options: dict[str, Any],
+        skills: set[FileSystemSkills],
+        name: str | None = None,
         **config,
     ):
         # Remove storage_options from config if present to avoid duplication
         config.pop("storage_options", None)
 
-        super().__init__(
-            name,
-            url=url,
-            capabilities=capabilities,
-            storage_options=storage_options,
-            **config,
-        )
+        self.name = name or config.get("type") or self.__class__.__name__.lower()
         self.url = url
-        self.capabilities = capabilities
-        self.options = storage_options
+        self.skills = skills
         self._config = config
 
-    @cached_property
-    def client(self) -> FileSystemClient:
-        """Lazy-initialized filesystem client."""
-        from libs.file.base import create_fs_client
+    def probe(self, target: str | None = None) -> bool:
+        """Health probe for file storage connector.
 
+        Checks existence of specific resource target if provided,
+        or falls back to root or configured URL path.
+        """
+        try:
+            probe_path = target if target else "/"
+            # Fallback to the base URL or provided root if probe_path is root
+            if probe_path == "/" and self.url:
+                probe_path = self.url
+
+            return self.connector.fs.exists(probe_path)
+        except Exception as e:
+            LOG.warning(f"File service health probe failed for {self.name}: {e}")
+            return False
+
+    @property
+    def connector(self) -> FileSystemConnector:
+        """Lazy-initialized filesystem client."""
+        skills = {FileSystemSkills(skill_name) for skill_name in self.skills}
         resolved_config = {}
         for path, value in find_keys_by_pattern(
             self._config, pattern="secret|password", ignore_case=True
         ):
             if isinstance(value, Secret):
                 resolved_config = set_nested_key(
-                    self._config, path, "password", value.resolve(url_encode=True)
+                    self._config, path=path, new_value=value.resolve(url_encode=True)
                 )
 
-        return create_fs_client(
-            url=self.url,
-            capabilities=self.capabilities,
-            **self.options,
-            **resolved_config,
-        )
+        return FileSystemConnector(url=self.url, skills=skills, **resolved_config)
 
     @property
     def fs(self):
-        return self.client.fs
+        return self.connector.fs
 
     def reset(self) -> None:
         """Reset cached client."""
         if "client" in self.__dict__:
-            LOG.warning(f"Resetting client for {self.name}")
+            LOG.warning(f"Resetting client for {self.__class__.__qualname__}")
             self.close()
             del self.__dict__["client"]
 
@@ -98,10 +108,10 @@ class BaseStorage(Service):
         """
         if "client" in self.__dict__:
             with suppress(Exception):
-                self.client.close()
+                self.connector.close()
 
     def exists(self, target: str) -> bool:
-        return self.client.exists(target)
+        return self.connector.fs.exists(target)
 
     @monitor(breaker)
     def count_units(self, target: str, filter_condition: str | None = None) -> int:
@@ -121,16 +131,17 @@ class BaseStorage(Service):
         """
         try:
             # Simple file count without format detection
-            full_path = self.client.resolve(target)
-            if self.client.fs.isfile(full_path):
+            full_path = self.connector.fs.resolve(target)
+            if self.connector.is_file(full_path):
                 return 1
-            all_files = self.client.fs.find(full_path)
-            return len(filter_files(all_files, filter_condition, target))
+            all_files = self.connector.find(full_path)
+            return len(filter_files(list(all_files), filter_condition, target))
         except (FileNotFoundError, RuntimeError):
             return 0
 
 
-class StorageSource(BaseStorage, Source):
+@ServiceFactory.register(source_type="file", role="source")
+class FileSource(FileService, Source):
     """File-based data source."""
 
     def resolve_identity(
@@ -155,6 +166,7 @@ class StorageSource(BaseStorage, Source):
     def parallelize(
         self,
         target: str,
+        sql_context: SQLContext,
         num_workers: int | None = None,
         filter_condition: str | None = None,
         **kwargs,
@@ -170,84 +182,89 @@ class StorageSource(BaseStorage, Source):
         Returns:
             list[dict]: A list of work unit definitions.
         """
-        temp_folder = kwargs.get("temp_folder")
-        cleanup = kwargs.get("cleanup", True)
-        client = self.client
-        temp_dir = None
+        resolved_target = self.connector.resolve(target)
+        # temp_folder = kwargs.get("temp_folder")
+        # cleanup = kwargs.get("cleanup", True)
+        # temp_dir = None
 
-        try:
-            if client.is_archive(target):
-                temp_dir = client.extract_archive(
-                    archive_path=target, target_dir=temp_folder
-                )
-                LOG.info(f"Extracted archive {target} to {temp_dir}")
-                target = temp_dir
+        # try:
+        # 1. Use ArchiveContext classmethod for clean format detection
+        if self.connector.is_supported_archive(resolved_target):
+            # 2. Inspect contents using ArchiveContext as a context manager
+            with self.connector.archive(resolved_target) as archive:
+                archive_files = archive.list_contents()
 
-            # Now process as regular filesystem
-            full_path = self.client.resolve(target)
+            # Construct virtual path pointers
+            files_with_sizes = [
+                (f"zip://{resolved_target}!!{row['filename']}", row["size"])
+                for row in archive_files
+            ]
 
-            if self.client.fs.isfile(full_path):
+            if filter_condition:
+                files_with_sizes = [
+                    (p, s)
+                    for p, s in files_with_sizes
+                    if Path(p.split("!!")[-1]).match(filter_condition)
+                ]
+
+            files = [p for p, _ in files_with_sizes]
+            total_bytes = sum(s for _, s in files_with_sizes)
+        else:
+            if self.fs.fs.isfile(resolved_target):
                 # Single file
-                files = [full_path]
-                LOG.info(f"Single file mode: {full_path}")
+                files = [resolved_target]
+                LOG.info(f"Single file mode: {resolved_target}")
             else:
                 # Directory
-                all_files = self.client.fs.find(full_path)
+                all_files = list(self.connector.find(resolved_target))
                 files = filter_files(all_files, filter_condition, target)
                 LOG.info(f"Directory mode: found {len(files)} files in {target}")
 
-            if not files:
-                raise TryAgainLater(
-                    reason=f"Resource not found: {target} (pattern: {filter_condition})",
-                    service_name=self.name,
-                    wait_seconds=self._config.get("missing_file_retry_sec", 600),
-                )
-
-            # Detect format from first file (for splittable check)
-            ext = Path(files[0]).suffix.lstrip(".").lower()
-            handler = FormatFactory.get(ext, self.client.fs, self.client.options)
-
             # Metadata-driven scaling
-            total_bytes = sum(self.fs.size(f) for f in files)
+            total_bytes = sum(self.fs.fs.size(f) for f in files)
 
-            # Coalesce small files (Setup cost > Processing cost)
-            if total_bytes < MIN_BYTES_PER_WORKER:
-                LOG.info(f"Coalescing small files ({total_bytes/1024:.1f}KB)")
-                units = [{"files": files}]
+        if not files:
+            raise TryAgainLater(
+                reason=f"Resource not found: {target} (pattern: {filter_condition})",
+                service_name=self.name,
+                wait_seconds=self._config.get("missing_file_retry_sec", 600),
+            )
 
-            if not num_workers:
-                num_workers = int(total_bytes // MIN_BYTES_PER_WORKER)
+        # Detect format from first file (for splittable check)
+        # ext = Path(files[0]).suffix.lstrip(".").lower()
+        # handler = FormatFactory.get(ext, self.fs, self.fs.options)
 
-            num_workers = max(1, num_workers)
+        # Coalesce small files (Setup cost > Processing cost)
+        # if total_bytes < MIN_BYTES_PER_WORKER:
+        #     LOG.info(f"Coalescing small files ({total_bytes/1024:.1f}KB)")
+        #     units = [{"files": files}]
 
-            # A few large files vs many workers
-            if len(files) < num_workers and handler.splittable:
-                LOG.debug(f"Intra-file slicing with {num_workers} workers")
-                units = self._slice_files(files, num_workers, handler)
+        num_workers = max(1, num_workers or (total_bytes // MIN_BYTES_PER_WORKER))
 
-            # Default: Greedy File-level sharding
-            active = min(num_workers, len(files))
-            LOG.debug(f"File-level greedy sharding with {active} workers")
-            units = self._balance_workload(files, active)
+        # A few large files vs many workers
+        # if len(files) < num_workers and handler.splittable:
+        #     LOG.debug(f"Intra-file slicing with {num_workers} workers")
+        #     units = self._slice_files(files, num_workers, handler)
 
-            sql_configs = {
-                "select": kwargs.get("select"),
-                "where": kwargs.get("where"),
-                "limit": kwargs.get("limit"),
-                "sql": kwargs.get("sql"),
-                "skip_blank_lines": kwargs.get("skip_blank_lines"),
-                "header": kwargs.get("header"),
-            }
-            for unit in units:
-                unit.update(sql_configs)
+        # Default: Greedy File-level sharding
+        # LOG.debug(f"File-level greedy sharding with {active} workers")
+        return self._balance_workload(files, min(num_workers, len(files)))
 
-            return units
+        # sql_configs = {
+        #     "sql_context": sql_context
+        #     # "skip_blank_lines": kwargs.get("skip_blank_lines"),
+        #     # "header": kwargs.get("header"),
+        # }
+        # for unit in units:
+        #     unit.update(sql_configs)
 
-        finally:
-            if temp_dir and cleanup:
-                import shutil
+        # return units
 
-                shutil.rmtree(temp_dir, ignore_errors=True)
+        # finally:
+        #     if temp_dir and cleanup:
+        #         import shutil
+
+        #         shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _balance_workload(self, files: list[str], num_workers: int) -> list[dict]:
         """Distributes files across workers to balance the total byte-load.
@@ -265,10 +282,8 @@ class StorageSource(BaseStorage, Source):
         Returns:
             list[dict]: Balanced worker units.
         """
-        from dataclasses import dataclass, field
 
-        @dataclass
-        class WorkerBucket:
+        class WorkerBucket(Struct):
             """Worker bucket for greedy file distribution."""
 
             files: list[str] = field(default_factory=list)
@@ -278,7 +293,7 @@ class StorageSource(BaseStorage, Source):
             return []
 
         # Sort files by size descending (largest first)
-        sized = [(f, self.fs.size(f)) for f in files]
+        sized = [(f, self.fs.fs.size(f)) for f in files]
         sized.sort(key=lambda x: x[1], reverse=True)
 
         # Initialize buckets
@@ -293,54 +308,8 @@ class StorageSource(BaseStorage, Source):
         # Return only non-empty buckets
         return [{"files": b.files} for b in buckets if b.files]
 
-    def _slice_files(self, files: list[str], workers: int, handler) -> list[dict]:
-        """Slices large splittable files into row-based work units.
-
-        We treat all files as a single contiguous pool of rows and divide
-        them equally across workers, ensuring even distribution for splittable
-        formats like Parquet.
-
-        Args:
-            files: List of resolved file paths.
-            workers: Number of buckets to create.
-            handler: File format handler.
-
-        Returns:
-            list[dict]: Sliced work units.
-        """
-        metadata = []
-        total = 0
-        for f in files:
-            rows = handler.count_rows(f) if handler.splittable else 0
-            total += rows
-            metadata.append({"path": f, "rows": rows})
-
-        if total == 0:
-            # Fallback: one worker per file
-            return [{"files": [f]} for f in files]
-
-        per_worker = max(1, total // workers)
-        units = []
-
-        for meta in metadata:
-            path, rows = str(meta["path"]), int(meta["rows"])
-            slices = max(1, round(rows / per_worker))
-            slice_size = rows // slices
-
-            for i in range(slices):
-                offset = i * slice_size
-                length = slice_size if i < slices - 1 else rows - offset
-                units.append(
-                    {
-                        "files": [path],
-                        "slice": {"offset": offset, "length": length},
-                    }
-                )
-
-        return units
-
     @monitor(breaker)
-    def pull(self, unit: dict | list | str) -> pl.DataFrame:
+    def pull(self, unit: dict | list | str, **kwargs: Any) -> pl.DataFrame:
         """Fetch data for a work unit."""
         # Normalize incoming unit structures up front
         unit_dict = unit if isinstance(unit, dict) else {}
@@ -349,191 +318,173 @@ class StorageSource(BaseStorage, Source):
             if isinstance(unit, dict)
             else ([unit] if isinstance(unit, str) else unit)
         )
-        slice_conf = unit_dict.get("slice")
-        resolved = [p if "://" in str(p) else self.client.resolve(p) for p in paths]
 
-        ext = Path(resolved[0]).suffix.lstrip(".").lower()
-        handler = FormatFactory.get(ext, self.client.fs, self.client.options)
+        sql_context = kwargs.get("sql_context")
+        temp_folder = (
+            unit_dict.get("temp_folder") if isinstance(unit_dict, dict) else None
+        )
 
-        # Extract file arguments and execution bounds
-        file_kwargs = {
-            "has_header": unit_dict.get("header"),
-            "skip_blank_lines": unit_dict.get("skip_blank_lines"),
-        }
-        local_limit = unit_dict.get("limit")
+        # 2. Delegate path formatting, archive staging, and query evaluation to FileReader
+        lazy_frame = self.connector.data.extract(
+            source=paths,
+            sql_context=sql_context,
+            temp_folder=temp_folder,
+        )
 
-        processed_frames = []
-        rows_accumulated = 0
-
-        for p in resolved:
-            lf = handler.to_df(p, **file_kwargs)
-            lf = lf.lazy() if isinstance(lf, pl.DataFrame) else lf
-
-            if slice_conf:
-                lf = lf.slice(slice_conf["offset"], slice_conf["length"])
-
-            # 1. Check for complete raw SQL replacement override
-            if sql_query := unit_dict.get("sql"):
-                ctx = pl.SQLContext(raw_df=lf)
-                lf = ctx.execute(sql_query, eager=False)
-
-            # 2. Build and run the standard filter/projection/budget pipeline
-            unified_sql = self._build_unified_sql(unit_dict, rows_accumulated)
-            ctx = pl.SQLContext(raw_df=lf)
-            lf = ctx.execute(unified_sql, eager=False)
-
-            df_file = lf.collect()
-            if (rows_in_file := df_file.height) > 0:
-                processed_frames.append(df_file)
-                rows_accumulated += rows_in_file
-
-            # Break early if our global worker limits are fully fulfilled
-            if local_limit is not None and rows_accumulated >= local_limit:
-                break
-
-        return pl.concat(processed_frames) if processed_frames else pl.DataFrame()
-
-    @staticmethod
-    def _build_unified_sql(unit_dict: dict[str, Any], rows_accumulated: int) -> str:
-        """Generates a combined projection, filter, and budget limit SQL query."""
-        select_cols = unit_dict.get("select")
-        if isinstance(select_cols, np.ndarray):
-            select_cols = select_cols.tolist()
-
-        projection = "*"
-        if select_cols:
-            clean_cols = [col.rstrip(",").strip() for col in select_cols]
-            projection = ", ".join(clean_cols)
-
-        query_parts = [f"SELECT {projection} FROM raw_df"]
-
-        if where_cond := unit_dict.get("where"):
-            query_parts.append(f"WHERE {where_cond}")
-
-        if local_limit := unit_dict.get("limit"):
-            remaining_needed = max(0, local_limit - rows_accumulated)
-            query_parts.append(f"LIMIT {remaining_needed}")
-
-        return " ".join(query_parts)
+        # 3. Materialize final collected result into an eager Polars DataFrame
+        return lazy_frame.collect()
 
 
-class StorageSink(BaseStorage, Sink):
+@ServiceFactory.register(source_type="file", role="sink")
+class FileSink(FileService, Sink):
     """File-based data sink."""
 
     @monitor(breaker)
-    def stage(self, source: Path, target: str, ext: str = "parquet") -> tuple[str, int]:
-        """Copy data to staging area."""
-        staging = f"tmp/staging/{target}_{int(time.time())}"
-        self.client.cp(str(source), staging)
+    def stage(
+        self,
+        source_dir: Path,
+        target: str,
+        expected_count: int,
+        file_ext: str = "parquet",
+        audit_values: dict[str, Any] | None = None,
+        **kwargs,
+    ) -> tuple[str, int]:
+        """Phase 1: Write dataset into a temporary staging location."""
+        staging_dir = f"tmp/staging/{target.rstrip('/')}_{int(time.time())}"
+        resolved_source = self.connector.resolve(source_dir)
+        resolved_staging = self.connector.resolve(staging_dir)
 
-        full = self.client.resolve(staging)
-        count = len(self.fs.find(full))
-        LOG.info(f"Staged {count} files to {staging}")
-        return staging, count
+        LOG.info(
+            f"Phase 1: Staging data from {resolved_source} -> {resolved_staging} (Target Format: {file_ext})"
+        )
+
+        # 1. Discover source files
+        source_files = self.connector.find(resolved_source)
+        if not source_files:
+            raise FileNotFoundError(f"No source files found at {resolved_source}")
+
+        # Detect source format dynamically from the first file
+        src_format = get_file_ext(source_files[0])
+        tgt_format = file_ext.lower().lstrip(".")
+
+        # 2. Same Format: Perform direct storage copy (Zero-copy pass-through)
+        if src_format == tgt_format:
+            LOG.info(
+                f"Source format matches target format ({src_format}). Performing direct copy."
+            )
+            self.connector.cp(resolved_source, resolved_staging, recursive=True)
+
+        # 3. Format Mismatch: Convert formats using FileReader skill
+        else:
+            LOG.info(
+                f"Format mismatch detected ({src_format} -> {tgt_format}). Executing DuckDB format conversion."
+            )
+            file_reader = self.connector.skills[FileSystemSkills.FILE]
+
+            # Destination path inside staging directory
+            dst_file = f"{resolved_staging}/data_0.{tgt_format}"
+
+            file_reader._convert_format(
+                source_path=resolved_source,
+                target_path=dst_file,
+                source_format=src_format,
+                target_format=tgt_format,
+                partition_cols=kwargs.get("partition_cols"),
+            )
+
+        # 4. Validate Staged Output File Count
+        staged_files = self.connector.find(resolved_staging)
+        file_count = len(staged_files)
+
+        if expected_count > 0 and file_count < expected_count:
+            raise RuntimeError(
+                f"Staging validation failed for {staging_dir}: "
+                f"Expected at least {expected_count} file(s), found {file_count}."
+            )
+
+        LOG.info(f"Phase 1 Complete: Staged {file_count} file(s) at {staging_dir}")
+        return staging_dir, file_count
 
     @monitor(breaker)
     def promote(
         self,
         staging: str,
         target: str,
-        partition_on: str,
-        partition_value: str,
         expected_count: int,
+        partition_on: str | None = None,
+        partition_value: str | None = None,
     ) -> None:
-        """Move staged data to production."""
-        final = f"{target}/{partition_on}={partition_value}"
+        """Phase 2: Promote staged directory contents into production location atomically."""
+        resolved_staging = self.connector.resolve(staging)
 
-        if self.client.exists(final):
-            self.client.rm(final, recursive=True)
+        # 1. Resolve Target Destination & Hive Partition Pathing
+        if partition_on and partition_value:
+            final_target_path = f"{target.rstrip('/')}/{partition_on}={partition_value}"
+        else:
+            final_target_path = target
 
-        self.client.mv(staging, final)
-        LOG.info(f"Promoted to {final}")
+        resolved_target = self.connector.resolve(final_target_path)
+
+        LOG.info(
+            f"Phase 2: Promoting data from {resolved_staging} -> {resolved_target}"
+        )
+
+        # 2. Pre-Promotion Validation
+        staged_files = self.connector.find(resolved_staging)
+        staged_count = len(staged_files)
+
+        if staged_count == 0:
+            raise RuntimeError(
+                f"Promotion failed: Staging location '{resolved_staging}' is empty."
+            )
+
+        if expected_count > 0 and staged_count < expected_count:
+            raise RuntimeError(
+                f"Promotion validation failed for {resolved_staging}: "
+                f"Expected at least {expected_count} file(s), but found {staged_count}."
+            )
+
+        try:
+            # 3. Destination Preparation & Target Cleanup (Atomic Overwrite)
+            if self.connector.exists(resolved_target):
+                LOG.info(
+                    f"Target destination exists. Cleaning target location prior to swap: {resolved_target}"
+                )
+                self.connector.rm(resolved_target, recursive=True)
+
+            # 4. Atomic Move / Copy Step
+            # Performs atomic directory rename on local/POSIX or multi-part move/copy on cloud stores
+            self.connector.mv(resolved_staging, resolved_target, recursive=True)
+            LOG.info(
+                f"Phase 2 Complete: Promoted {staged_count} file(s) to {resolved_target}"
+            )
+
+        finally:
+            # 5. Guaranteed Staging Cleanup
+            if self.connector.exists(resolved_staging):
+                LOG.debug(f"Cleaning residual staging path: {resolved_staging}")
+                self.connector.rm(resolved_staging, recursive=True)
 
     @monitor(breaker)
     def clone(self, source: str, dest: str) -> None:
         """Copy directory or file."""
-        self.client.cp(source, dest)
+        self.connector.cp(source, dest)
 
     @monitor(breaker)
     def delete(self, target: str) -> None:
         """Delete a path."""
-        if self.client.exists(target):
-            self.client.rm(target, recursive=True)
+        if self.connector.exists(target):
+            self.connector.rm(target, recursive=True)
             LOG.info(f"Dropped: {target}")
 
 
-class StorageArchive(BaseStorage, Archive):
+@ServiceFactory.register(source_type="file", role="archive")
+class FileArchive(FileService, Archive):
     """Data archival service."""
 
     @monitor(breaker)
     def store(self, source: Path, dest: str) -> None:
         """Archive data to destination."""
-        bucket = self.client.url
+        bucket = self.fs.url
         final_path = dest if "://" in dest else f"{bucket}/{dest}"
-        self.client.cp(str(source), final_path, recursive=True)
-
-
-# Service registrations
-@ServiceFactory.register("flat_file")
-class FlatFileService(StorageSource):
-    def __init__(self, name: str, **config):
-        # Extract storage_options from config
-        storage_options = config.pop("storage_options", {})
-        url = config.pop("url", "")
-
-        super().__init__(
-            name=name,
-            url=url,
-            capabilities={FileSystemSkills.FILE},
-            storage_options=storage_options,
-            **config,
-        )
-
-
-@ServiceFactory.register("standard_archive")
-class StandardArchive(StorageArchive):
-    def __init__(self, name: str, **config):
-        storage_options = config.pop("storage_options", {})
-        url = config.pop("url", "")
-
-        super().__init__(
-            name=name,
-            url=url,
-            capabilities={FileSystemSkills.ARCHIVE},
-            storage_options=storage_options,
-            **config,
-        )
-
-
-@ServiceFactory.register("cas_archive")
-class CASArchive(StorageArchive):
-    """Content Addressable Storage for immutable records."""
-
-    def __init__(self, name: str, **config) -> None:
-        url = config.pop("url", "s3://cas-vault")
-        storage_options = config.pop("storage_options", {"s3_storage_class": "GLACIER"})
-
-        # Vaults often use specific storage classes (e.g., Glacier or WORM)
-        super().__init__(
-            name=name,
-            url=url,
-            capabilities={FileSystemSkills.CAS},
-            storage_options=storage_options,
-            **config,
-        )
-
-
-@ServiceFactory.register("data_lake")
-class DataLake(StorageSource, StorageSink):
-    def __init__(self, name: str, **config):
-        # Extract storage_options from config
-        storage_options = config.pop("storage_options", {})
-        url = config.pop("url", "")
-
-        super().__init__(
-            name=name,
-            url=url,
-            capabilities={FileSystemSkills.FILE},
-            storage_options=storage_options,
-            **config,
-        )
+        self.connector.cp(str(source), final_path, recursive=True)

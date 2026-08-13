@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import polars as pl
+import pyarrow.dataset as ds
 
 from .base import FormatHandler
 
@@ -47,7 +48,7 @@ class JSONHandler(FormatHandler):
         Returns:
             pl.LazyFrame: The LazyFrame containing the JSON data.
         """
-        files = self.discover(path)
+        files = sorted(self.discover(path))
         if not files:
             return pl.LazyFrame()
 
@@ -55,26 +56,48 @@ class JSONHandler(FormatHandler):
         first_file = next(iter(files))
         is_ndjson = self._is_ndjson(first_file)
         skip_blank_lines = kwargs.get("skip_blank_lines", False)
+        infer_schema_length = kwargs.get("infer_schema_length", 1000)
+        ignore_errors = kwargs.get("ignore_errors", True)
 
         if is_ndjson:
             lf = pl.scan_ndjson(
-                list(files), storage_options=self.options, ignore_errors=True
+                source=files,
+                storage_options=self.options,
+                infer_schema_length=infer_schema_length,
+                ignore_errors=ignore_errors,
             )
             if skip_blank_lines:
                 lf = lf.filter(pl.all_horizontal().is_not_null())
             return lf
 
-        # Standard JSON - read and repair
-        lfs = []
-        for f in files:
-            size = self.fs.size(f)
-            if size and size > 1.5 * 1024**3:
-                LOG.warning(f"Large JSON file may cause OOM: {f}")
+        # Standard JSON
+        try:
+            resolved = [self.fs.resolve(f) for f in files]
+            dataset = ds.dataset(
+                resolved,
+                format="json",
+                filesystem=self.fs.fs,
+            )
+            lf = pl.from_arrow(dataset.to_table()).lazy()
+            if skip_blank_lines:
+                lf = lf.filter(pl.any_horizontal(pl.all().is_not_null()))
+            return lf
+        except Exception as err:
+            LOG.warning(
+                f"PyArrow JSON parse failed ({err}). Falling back to native reader."
+            )
 
-            buffer = self.read_raw(f, **kwargs)
-            lfs.append(pl.read_json(buffer).lazy())
+            # Fallback option: read and repair
+            lfs = []
+            for f in files:
+                size = self.fs.fs.size(f)
+                if size and size > 1.5 * 1024**3:
+                    LOG.warning(f"Large JSON file may cause OOM: {f}")
 
-        return pl.concat(lfs) if lfs else pl.LazyFrame()
+                buffer = self.read_raw(f, **kwargs)
+                lfs.append(pl.read_json(buffer).lazy())
+
+            return pl.concat(lfs) if lfs else pl.LazyFrame()
 
     def from_df(self, df: pl.LazyFrame | pl.DataFrame, path: Path | str) -> None:
         """Write LazyFrame to JSON files.
@@ -120,7 +143,7 @@ class JSONHandler(FormatHandler):
 
         return io.BytesIO(combined)
 
-    def write_raw(self, data: bytes, path: Path | str) -> None:
+    def write_raw(self, data: bytes, path: str) -> None:
         """Write raw data to path.
 
         Args:
@@ -145,8 +168,12 @@ class JSONHandler(FormatHandler):
         # Peek at first non-whitespace character
         try:
             with self.fs.open(path, "rb") as f:
-                chunk = f.read(1024).strip()
-                return chunk and chunk[0:1] == b"{"
+                # Read initial chunk to inspect structural character
+                chunk = f.read(2048).strip()
+                if not chunk:
+                    return False
+                # If first character is '{', it's almost certainly NDJSON record-stream
+                # Standard JSON arrays start with '['
+                return chunk.startswith(b"{")
         except (OSError, UnicodeError):
-            # File access or decoding issues - assume not NDJSON
             return False

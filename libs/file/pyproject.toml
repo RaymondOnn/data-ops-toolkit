@@ -6,7 +6,7 @@ dependencies = [
     "fsspec",
     "polars",
     "charset-normalizer",
-    "xmltodict",
+    "lxml",
     "s3fs",
     "adlfs",
     "gcsfs",

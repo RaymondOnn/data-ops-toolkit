@@ -58,7 +58,7 @@ project-excludes = [
     "**/.venv/**",
 ]
 search-path = [
-    "apps/ingestion/src",
+    "apps/ingestion",
     "libs",
 ]
 python-version = "3.11.0"
@@ -95,8 +95,8 @@ pythonVersion = "3.11"
 
 # This ensures Ty knows where the root of your code is
 executionEnvironments = [
-  { root = "apps/ingestion/src" }, # Maps 'src.core' -> 'apps/ingestion/src/core'
-  { root = "libs" }                # Maps 'file.client' -> 'libs/file/client'
+  { root = "apps/ingestion" }, # Maps 'src.core' -> 'apps/ingestion/src/core'
+  { root = "libs" }           # Maps 'file.client' -> 'libs/file/client'
 ]
 
 # ***** RUFF *****
@@ -111,7 +111,7 @@ extend-exclude = [
     "doc/",
 ]
 show-fixes = true
-src = ["apps/ingestion/src", "libs"]
+src = ["apps/ingestion", "libs"]
 
 [tool.ruff.format]
 indent-style = "space"
@@ -182,7 +182,7 @@ convention = "google"
 
 [tool.pytest.ini_options]
 minversion = "7.0"                              # Minimum pytest version
-pythonpath = ["apps/ingestion/src", "libs"]     # Add current directory to Python path
+pythonpath = ["apps/ingestion", "libs"]     # Add current directory to Python path
 addoptions = [
     "-ra",                                      # Show summary of all tests
     "-q",                                       # Quiet mode
@@ -194,4 +194,17 @@ addoptions = [
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::PendingDeprecationWarning",
+]
+
+
+# ***** MYPY *****
+
+[tool.mypy]
+mypy_path = ["apps/ingestion", "libs"]
+python_version = "3.11"
+ignore_missing_imports = false
+follow_imports = "normal"
+exclude = [
+    "tests/",
+    "\\.venv/",
 ]

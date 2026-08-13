@@ -1,6 +1,6 @@
 from unittest.mock import patch
 
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task
+from src.core.models.task import ExecutionStatus, Task
 
 
 def test_statestore_flushes_manifest_to_db(runtime, tmp_path, mock_db_client):

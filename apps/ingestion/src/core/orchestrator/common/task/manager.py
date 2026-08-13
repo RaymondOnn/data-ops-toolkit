@@ -3,35 +3,35 @@ import time
 from pathlib import Path
 
 import ray
-from apps.ingestion.src.core.contexts import ExecutionContext
-from apps.ingestion.src.core.models.stages.base import DISK_FREE_STAGES
-from apps.ingestion.src.core.models.stages.enums import Stage
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task
-from apps.ingestion.src.core.models.task.enums import TaskIdentity, TaskRef
-from apps.ingestion.src.core.monitor import ServiceMonitor
-from apps.ingestion.src.core.orchestrator.common.state import StateHub
-from apps.ingestion.src.core.orchestrator.common.task.compute import Compute
-from apps.ingestion.src.core.orchestrator.common.task.executor import process_stage_task
-from apps.ingestion.src.core.orchestrator.common.task.queue import TaskQueue
-from apps.ingestion.src.core.orchestrator.common.timeout import TimeoutMonitor
-from apps.ingestion.src.core.orchestrator.contracts.policies import (
+from filelock import FileLock
+from libs.utils.dates import seconds_diff
+from loguru import logger
+
+from src.core.contexts import ExecutionContext
+from src.core.models.task import ExecutionStatus, Task
+from src.core.models.task.enums import TaskIdentity, TaskRef
+from src.core.orchestrator.common.state import StateHub
+from src.core.orchestrator.common.task.compute import Compute
+from src.core.orchestrator.common.task.executor import process_stage_task
+from src.core.orchestrator.common.task.queue import TaskQueue
+from src.core.orchestrator.common.timeout import TimeoutMonitor
+from src.core.orchestrator.contracts.policies import (
     AdmissionPolicy,
     MaintenancePolicy,
 )
-from apps.ingestion.src.core.orchestrator.enums import TaskMetadata
-from apps.ingestion.src.core.system import SystemMonitor
-from apps.ingestion.src.services.factory import ServiceFactory
-from apps.ingestion.src.utils.common import short_hash
-from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE
-from apps.ingestion.src.utils.dates import end_of_day_timestamp
-from apps.ingestion.src.utils.exceptions import (
+from src.core.orchestrator.enums import TaskMetadata
+from src.core.stages.contracts.stage import DISK_FREE_STAGES
+from src.core.stages.enums import Stage
+from src.services.factory import ServiceFactory
+from src.services.health import ServiceMonitor, SystemMonitor
+from src.utils.common import short_hash
+from src.utils.constants import CACHE_TASK_NAMESPACE
+from src.utils.dates import end_of_day_timestamp
+from src.utils.exceptions import (
     OutOfDiskSpace,
     RollbackRequired,
     TryAgainLater,
 )
-from filelock import FileLock
-from libs.utils.dates import seconds_diff
-from loguru import logger
 
 from .cache import TaskCache
 from .outcome import (
@@ -181,10 +181,12 @@ class TaskManager:
             TaskRef | None: The queued reference, or None if admission failed.
         """
         if task_ref.status != ExecutionStatus.WAITING:
-            task_ref = task_ref.with_updates(status=ExecutionStatus.WAITING)
+            task_ref = task_ref.with_updates(
+                status=ExecutionStatus.WAITING,
+            )
 
         # Load task context
-        is_append = "append" in task_ref.identity.job_id.lower()
+        is_snapshot = "append" in task_ref.identity.job_id.lower()
 
         # Create timeout state
         timeout_state = self.timeout.create_timeout_state(task_ref=task_ref)
@@ -192,14 +194,16 @@ class TaskManager:
         meta = TaskMetadata.from_ref(
             task_ref,
             config_file_path,
-            expires_at=end_of_day_timestamp() if is_append else None,
+            expires_at=end_of_day_timestamp() if is_snapshot else None,
         )
         meta.scheduled_at = time.time()
         meta.timeout_state = timeout_state
 
         if self.admission_policy.admit(self.cache, self.lock, meta):
             LOG.info(
-                "Queued Task", run_id=task_ref.identity.run_id, stage=task_ref.stage
+                "Queued Task",
+                run_id=task_ref.identity.run_id,
+                step_id=task_ref.step_id,
             )
 
             # Push to queue with priority and group (concurrency control per job)
@@ -248,7 +252,7 @@ class TaskManager:
                 LOG.info(
                     "Task is not ready for dispatch",
                     run_id=metadata.run_id,
-                    stage=metadata.current_stage,
+                    stage=metadata.current_step_id,
                 )
                 continue
 
@@ -256,7 +260,7 @@ class TaskManager:
             stage_enum = Stage(metadata.current_stage)
             if not self.compute.has_capacity(stage_enum):
                 LOG.trace(
-                    f"Compute saturation reached. Pausing scheduling ring at stage: {metadata.current_stage}"
+                    f"Compute saturation reached. Pausing scheduling ring at step: {metadata.current_step_id}"
                 )
                 break
 
@@ -287,15 +291,16 @@ class TaskManager:
 
         # SCHEDULE_TO_START warning (not failure)
         elapsed = now_ts - task_meta.scheduled_at
-        threshold = self.timeout.get_schedule_warning_threshold(task_meta.current_stage)
+        threshold = self.timeout.get_schedule_warning_threshold(
+            task_meta.current_step_id
+        )
         if elapsed > threshold:
-            print(f"{elapsed=} {threshold=} {elapsed>threshold=}")
             # cache_key = TaskMetadata.generate_cache_key()
             # if cache_key not in self._schedule_warning_logged:
             LOG.warning(
                 "Task exceeded SCHEDULE_TO_START threshold",
                 run_id=task_meta.run_id,
-                stage=task_meta.current_stage,
+                step=task_meta.current_step_id,
                 waited_seconds=elapsed,
                 threshold_seconds=threshold,
             )
@@ -336,7 +341,7 @@ class TaskManager:
         LOG.trace(
             "[DISPATCH] attempting",
             run_id=task_meta.run_id,
-            stage=task_meta.current_stage,
+            step=task_meta.current_step_id,
         )
 
         # Update the registry / cache with the UPDATED metadata
@@ -350,7 +355,7 @@ class TaskManager:
 
         # Submit to ray cluster
         ref = process_stage_task.remote(
-            f"{task_meta.current_stage}_{short_hash(8)}",
+            f"{task_meta.current_step_id}_{short_hash(8)}",
             self.exec_ctx,
             task_meta.generate_cache_key(),
         )
@@ -408,7 +413,7 @@ class TaskManager:
                     )
                     # Reconstruct a generic Task to trigger the FailedOutcome handler
                     fallback_ref = TaskRef(
-                        stage=Stage.START.value,  # Default safe stage fallback
+                        step_id="start",
                         status=ExecutionStatus.RUNNING,
                         identity=TaskIdentity(
                             job_id="unknown_job",
@@ -443,8 +448,8 @@ class TaskManager:
                 else:
                     self._conclude_task(task, runtime_exception=result["error"])
 
-            except Exception as e:
-                LOG.error(f"Error reconciling completed worker run {run_id}: {e}")
+            except Exception:
+                LOG.exception(f"Error reconciling completed worker run {run_id}")
 
     def _conclude_task(
         self, task: Task, runtime_exception: Exception | None = None
@@ -493,16 +498,36 @@ class TaskManager:
         # Native helper logic acting as an external ping hook wrapper
         def _ping() -> bool:
             try:
-                # TODO: Supply connection config
-                svc = ServiceFactory.get(svc_name)
-                if ServiceFactory.is_file_source(svc_name):
-                    from apps.ingestion.src.core.contexts.task import load_context
+                from src.core.contexts.task import load_context
 
-                    ctx = load_context(Path(metadata.config_file).parent)
-                    if ctx and ctx.extract and ctx.extract.resource:
-                        return svc.exists(ctx.extract.resource)
-                return svc.exists("/")
-            except Exception:
+                ctx = load_context(Path(metadata.config_file).parent)
+                if not ctx:
+                    return False
+
+                # 1. Resolve connection configuration
+                config = metadata.current_step.config
+
+                conn_config = {}
+                if config and config.connection:
+                    conn_config = config.connection
+
+                # 2. Retrieve target resource path (if any)
+                target_resource = config.resource if config else None
+
+                # 3. Instantiate Service
+                if conn_config:
+                    svc = ServiceFactory.get(**conn_config)
+                else:
+                    svc = ServiceFactory.get(type=svc_name)
+
+                # 4. Delegate target probe logic directly to instance check
+                if ServiceFactory.is_file_source(svc):
+                    return svc.probe(target=target_resource)
+
+                return svc.probe()
+
+            except Exception as e:
+                LOG.debug(f"Probe execution error for {svc_name}: {e}")
                 return False
 
         return ServiceMonitor.probe(svc_name, _ping)

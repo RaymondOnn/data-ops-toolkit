@@ -1,6 +1,6 @@
 import os
 
-from apps.ingestion.src.core.contexts.builder import (
+from src.core.contexts.builder import (
     expand_env_vars,
     parse_cli_overrides,
 )

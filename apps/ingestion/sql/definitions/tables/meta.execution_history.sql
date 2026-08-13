@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS META.EXECUTION_HISTORY (
     , END_TIMESTAMP_LC         DateTime64(3)
     , LAST_UPDATED_AT_TS_LC    DateTime64(3)
     , JOB_STATUS            LowCardinality(String)
-    , SOURCE_ROW_COUNT      UInt64
+    , SOURCE_ROW_COUNT      Nullable(String)
     , FINAL_ROW_COUNT       UInt64
     , FINAL_MANIFEST        String
     , REMARKS               Nullable(String)

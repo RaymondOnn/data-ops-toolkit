@@ -4,20 +4,20 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 
 import msgspec
-from apps.ingestion.src.core.models.stages.enums import Stage
-from apps.ingestion.src.core.models.stages.utils import get_stage_class
-from apps.ingestion.src.core.models.task.enums import TaskIdentity, TaskRef, TaskSignal
-from apps.ingestion.src.core.models.task.status import ExecutionStatus
 from libs.utils.dict import deep_merge
 from loguru import logger
+
+from src.core.contexts.step import StepConfig
+from src.core.models.task.enums import TaskIdentity, TaskRef, TaskSignal
+from src.core.models.task.status import ExecutionStatus
 
 from .manifest import TaskManifest
 from .workspace import TaskWorkspace
 
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.contexts.execution import ExecutionContext
-    from apps.ingestion.src.core.contexts.task import TaskContext
-    from apps.ingestion.src.core.models.stages.base import ExecutionStage
+    from src.core.contexts.execution import ExecutionContext
+    from src.core.contexts.task import TaskContext
+    from src.core.stages.contracts.stage import ExecutionStage
 
 LOG = logger
 
@@ -47,7 +47,7 @@ class Task:
         self.dataset_id = task_ref.identity.dataset_id
         self.run_id = task_ref.identity.run_id
         self.partition_date = task_ref.identity.partition_date
-        self.target_stage = task_ref.stage
+        self.target_step_id = task_ref.step_id
 
         # Workspace management
         self.workspace = workspace or TaskWorkspace(
@@ -58,15 +58,33 @@ class Task:
             exec_ctx=self.exec_ctx,
         )
 
-        # Lazy-loaded stage
+        # Lazy-loaded attributes
+        self._context: TaskContext | None = None
         self._stage: ExecutionStage | None = None
 
     @property
     def stage(self) -> "ExecutionStage":
-        """Get the current execution stage."""
+        """Get the current execution stage initialized with StepConfig."""
+        from src.core.stages.contracts.stage import ExecutionStageRegistry
+
         if not self._stage:
-            self._stage = get_stage_class(self.target_stage)
+            step = self.step_config
+            stage_cls = ExecutionStageRegistry.get(step.stage)
+            self._stage = stage_cls(step)
         return self._stage
+
+    @property
+    def step_config(self) -> "StepConfig":
+        """Resolve current StepConfig object."""
+        if self.target_step_id == "start":
+            return StepConfig(id="start", stage="start")
+
+        step = self.context.get_step(self.target_step_id)
+        if not step:
+            raise ValueError(
+                f"Step '{self.target_step_id}' not found in TaskContext configuration."
+            )
+        return step
 
     @property
     def manifest(self) -> TaskManifest:
@@ -76,9 +94,11 @@ class Task:
     @property
     def context(self) -> "TaskContext":
         """Load task context from config file."""
-        from apps.ingestion.src.core.contexts.task import load_context
+        if self._context is None:
+            from src.core.contexts.task import load_context
 
-        return load_context(self.workspace.path)
+            self._context = load_context(self.workspace.path)
+        return self._context
 
     @property
     def id(self) -> str:
@@ -90,7 +110,7 @@ class Task:
         cls,
         folder: Path,
         exec_ctx: "ExecutionContext",
-        target_stage: str | None = None,
+        target_step_id: str | None = None,
     ) -> Self:
         """Rehydrate task from workspace folder."""
         run_id = folder.name
@@ -114,16 +134,17 @@ class Task:
         )
 
         manifest = workspace.load_manifest()
-        current = manifest.current_stage or target_stage or Stage.START.value
+        # current = manifest.current_stage or target_stage or Stage.START.value
+        current = manifest.current_step_id or target_step_id or "start"
 
         task_ref = TaskRef(
             namespace="task",
             status=ExecutionStatus.UNKNOWN,
-            stage=current,
+            step_id=current,
             identity=identity,
         )
 
-        LOG.debug(f"Rehydrated task {run_id} at stage {current}")
+        LOG.debug(f"Rehydrated task {run_id} at step {current}")
         return cls(task_ref, RECOVERY_WORKER, exec_ctx, workspace)
 
     def update_manifest(self, updates: dict[str, Any]) -> None:
@@ -132,10 +153,10 @@ class Task:
         merged = deep_merge(data, updates)
         self.workspace.save_manifest(merged)
 
-    def check_in(self, stage: str) -> None:
-        """Mark stage start in manifest."""
+    def check_in(self, step_id: str) -> None:
+        """Mark step start in manifest."""
         updates: dict[str, Any] = {
-            "current_stage": stage,
+            "current_step": step_id,
             "status": ExecutionStatus.RUNNING.value,
         }
 
@@ -150,7 +171,7 @@ class Task:
             )
 
         self.update_manifest(updates)
-        LOG.debug(f"Checked into stage: {stage} (run_id: {self.run_id})")
+        LOG.debug(f"Checked into step: {step_id} (run_id: {self.run_id})")
 
     def move_to(self, folder: str) -> None:
         """Move workspace to another folder (e.g., FAILED)."""
@@ -162,12 +183,12 @@ class Task:
         filename = self.exec_ctx.get_signal_name(self.task_ref.identity, ext)
         self.workspace.send_signal(filename)
 
-        if signal == "retry":
+        if signal == TaskSignal.RETRY or getattr(signal, "value", None) == "retry":
             self.workspace.create_marker(RETRY_MARKER)
 
     def execute(self) -> str:
         """Execute current stage."""
-        LOG.info(f"Executing stage: {self.stage.name}")
+        LOG.info(f"Executing stage: {self.stage.step_id}")
 
         try:
             next_stage = self.stage.execute(self)
@@ -182,7 +203,7 @@ class Task:
             return next_stage
 
         except Exception:
-            LOG.exception(f"Stage {self.stage.name} failed")
+            LOG.exception(f"Stage {self.stage.step_id} failed")
             raise
 
     def purge(self) -> None:
@@ -201,7 +222,7 @@ class Task:
         """
         path = f"{self.job_id}/{self.partition_date}/{self.run_id}"
         if base_path:
-            f"{base_path.rstrip('/')}/{path}"
+            path = f"{base_path.rstrip('/')}/{path}"
         if suffix:
             path = f"{path}/{suffix.lstrip('/')}"
         return path

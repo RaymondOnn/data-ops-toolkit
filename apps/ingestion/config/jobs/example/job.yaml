@@ -1,4 +1,3 @@
-
 # JOB-LEVEL CONFIG (Applies to all datasets in this job)
 job:
   name: daily_ingestion_sync # job_id
@@ -6,110 +5,137 @@ job:
     num_workers: 16
   archive:
     enable_archival: true
-    service_ref: "s3_archive"  # archive_type
+    service_ref: "s3_archive" # archive_type
 
 datasets:
   # DATASET 1: Standard 50M row import
   orders: # dataset_id
-    mode: delta # Loading Strategy: delta (update_key) | append | truncate | cdc
+    mode: delta # Loading Strategy: delta (update_key) | append | truncate | cdc | backfill
     partition_on:
+    steps:
+      - id: extract_orders_data
+        stage: extract
+        resource: # table name / file name /
+          object: "s3://bucket/path/orders_{{partition_date}}.csv"
+          service_ref: "some_folder" # for credential lookup
+
+          # ---- FILE ----
+          glob: "s3://bucket/path/orders_{{partition_date}}.csv"
+          header: # true | false
+          skip_blank_lines:
+          encoding:
+
+          # ---- API ----
+          endpoint:
+          headers:
+          params:
+            include_deleted: false
+            region: "EMEA"
+
+        sql:
+        select: []
+        where: "status = 'COMPLETED' AND updated_at >= {{partition_date}}"
+        limit:
+        batch_size: 100000
+        null_if:
+        flatten:
+        columns: # schema override
+          col1: dtype1
+          col2: dtype2
+
+        hooks:
+          pre:
+            - id: archive file
+              type: copy
+              from:
+                service_ref:
+                path:
+              to:
+                service_ref:
+                path:
+              on_failure: # abort | warn | skip
+              timeout_secs:
+          post:
+            - id: cleanup
+              if: archive_file.success()
+              type: delete
+              location:
+              recursive: true
+              on_failure:
 
 
-    extract:
-      object: # table name / file name /
-        name: "s3://bucket/path/orders_{{partition_date}}.csv"
-        service_ref: "postgres" # for credential lookup
+        file_pattern: "s3://bucket/path/orders_{{partition_date}}.csv"
 
-        # ---- FILE ----
-        glob:
-        header: # true | false
-        skip_blank_lines:
-        encoding:
+      - id: normalize
+        stage: transform
+        steps:
+          # Sub-step 1: SQL transform referencing Extract Step 1
+          - id: clean_orders
+            type: sql
+            sources:
+              raw_orders: extract_orders
+            cte:
+              - name: formatted_orders
+                sql:
+                from: raw_orders
+                select: ["order_id", "user_id", "amount"]
 
-        # ---- API ----
-        endpoint:
-        headers:
-        params:
-          include_deleted: false
-          region: "EMEA"
+          # Sub-step 2: Custom Python transform referencing Extract Step 2
+          - id: enrich_users
+            type: custom
+            sources:
+              raw_users: extract_users
+            module_path: "my_project.processors.users.clean_user_data"
+            params:
+              filter_inactive: true
 
-      hooks:
-        pre: []
+          # Sub-step 3: SQL transform joining the outputs of Sub-step 1 and Sub-step 2
+          - id: join_orders_and_users
+            type: sql
+            sources:
+              # References internal intermediate outputs from previous sub-steps!
+              clean_orders_data: clean_orders
+              enrich_users_data: enrich_users
+            cte:
+              - name: final_dataset
+                from: clean_orders_data
+                join:
+                  table: enrich_users_data
+                  on: "clean_orders_data.user_id = enrich_users_data.id"
+                  type: inner
+                select: ["*"]
 
-        post:
-          - id: archive file
-            typw: copy
-            from:
-              service_ref:
-              path:
-            to:
-              service_ref:
-              path:
-            on_failure: # abort | warn | skip
-            timeout_secs:
-
-          - id: cleanup
-            if: archive_file.success()
-            type: delete
-            location:
-            recursive: true
-            on_failure:
-
-
-      sql:
-      select: []
-      where: "status = 'COMPLETED' AND updated_at >= {{partition_date}}"
-      limit:
-      columns: # schema override
-        col1: dtype1
-        col2: dtype2
-      batch_size: 100000
-      null_if:
-      flatten:
-
-      file_pattern: "s3://bucket/path/orders_{{partition_date}}.csv"
-
-    # Note: defaults to DefaultTransformer if type is not specified
-    transform:
-      # Example for bitmask transformer
-      type: bitmask
-      params:
-        column_bitmasks:
-          - "order_id": 1
-          - "customer_id": 2
-          - "order_date": 4
-          - "total_amount": 8
-          - "status": 16
-
-      # Example for custom transformer
-      type: custom
-      params:
-        # Lazy-loaded custom Python logic
-        script: "src.workflows.finance.currency_conversion"
-        # add more params here
-
-      # Example for no transformer
-      type: none
-      params:
-
-    load:
-      object: "TEST.ORDERS" # file: "s3://bucket/processed/orders/"
-      service_ref: "clickhouse"
-      add_new_columns: # true / false
-
-      hooks:
-        pre:
-
-        post:
+      - id: load
+        stage: load
+        object: "TEST.ORDERS" # file: "s3://bucket/processed/orders/"
+        service_ref: "clickhouse"
+        add_new_columns: # true / false
+        hooks:
+          pre:
+            - id: ensure_table_exists
+              type: copy
+              from:
+                service_ref: mock_data_folder
+                location: sample_orders.csv
 
 
+      - id: publish
+        stage: publish
+        object:
+        primary_key: []
+        delete_missing: # hard | soft
+        hooks:
+          post:
+            - id: notify_team
+              type: notify
+              channels:
+                - email: "team@example.com"
 
-
-    publish:
-      object:
-      primary_key: []
-      delete_missing: # hard | soft
-
+            - id: cleanup_files
+              type: delete
+              location:
+              recursive: true
+              on_failure: warn
 
 
     # audit:
@@ -121,67 +147,3 @@ datasets:
     #     - "order_date <= today()"
     #   # Action on failure
     #   on_failure: "quarantine" # options: abort | warn | quarantine
-
-  # DATASET 2: Sensitive Financials (Requires CAS Vault)
-  ledger_entries:
-    partitions:
-      column: updated_at
-      units: days
-      offset: -2
-      format: "YYYY-MM-DD"
-      wrap_quotes: true
-    raw:
-      source_type: "api"
-      resource: "/v1/ledger"
-      load_mode: append
-      params:
-        query_params:
-          include_deleted: false
-          region: "EMEA"
-      schema_file: "ledger.csv"
-
-    transform:
-      type: custom
-      params:
-        script: "src.workflows.finance.currency_conversion"
-
-    load:
-      type: clickhouse
-      destination: "ledger_entries"
-      params:
-
-    # OVERRIDE: Specific archival for this dataset
-    archive:
-      archive_type: "cas_archive"
-      retention_days: 3650 # 10 years for finance
-
-  # DATASET 3: Temporary Log data (No Archival)
-  internal_logs:
-    partitions:
-      column: updated_at
-      units: days
-      offset: -2
-      format: "YYYY-MM-DD"
-      wrap_quotes: true
-    raw:
-      source_type: "api"
-      resource: "/v1/logs"
-      load_mode: append
-      params:
-        query_params:
-          include_deleted: false
-          region: "EMEA"
-      schema_file: "logs.csv"
-
-    transform:
-      type: custom
-      params:
-        script: "src.workflows.finance.currency_conversion"
-
-    load:
-      type: clickhouse
-      destination: "internal_logs"
-      params:
-
-    archive:
-      enable_archival: false

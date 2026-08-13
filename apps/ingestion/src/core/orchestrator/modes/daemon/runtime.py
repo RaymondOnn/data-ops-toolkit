@@ -16,18 +16,19 @@ from zoneinfo import ZoneInfo
 import msgspec
 import pendulum
 import ray
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task
 from apscheduler.events import EVENT_JOB_ERROR, JobExecutionEvent
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 from libs.resilience.heartbeat import Heartbeat
 from loguru import logger
 
+from src.core.models.task import ExecutionStatus, Task
+
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.orchestrator.common.orchestrator import (
+    from src.core.orchestrator.common.orchestrator import (
         Orchestrator,
     )
-    from apps.ingestion.src.core.orchestrator.enums import TaskMetadata
+    from src.core.orchestrator.enums import TaskMetadata
 
     from .commands import CommandProcessor
     from .janitor import DaemonJanitor
@@ -47,7 +48,7 @@ class ResumeRequest(msgspec.Struct):
     """Request to resume a failed task."""
 
     run_id: str
-    from_stage: str | None = None
+    from_step: str | None = None
     overrides: dict[str, Any] = {}
 
 
@@ -233,28 +234,28 @@ class DaemonRuntime:
             metadata: TaskMetadata = self.tasks.cache.get(key)
 
             # Determine target resume stage
-            resume_stage = request.from_stage or metadata.current_stage
+            resume_step_id = request.from_step or metadata.current_step_id
 
             # Package extra state overrides to pass directly to transition_cache mutations
             # We enforce WAITING status so the scheduling ring immediately picks it up
             self.tasks.cache.transition_state(
                 metadata=metadata,
                 next_status=ExecutionStatus.WAITING,
-                next_stage=resume_stage,
+                next_step_id=resume_step_id,
                 rewind_history={},  # Clears rewind history via mutations kwargs
                 retry_count=0,  # Resets retry count via mutations kwargs
-                remarks=f"Manual Resume requested. Target stage: {resume_stage}.",
+                remarks=f"Manual Resume requested. Target stage: {resume_step_id}.",
             )
 
         # Update manifest
         task = Task.from_path(folder, self.exec_ctx)
-        if request.from_stage:
-            task.update_manifest({"current_stage": request.from_stage})
+        if request.from_step:
+            task.update_manifest({"current_step_id": request.from_step})
 
         LOG.info(
-            f"Resuming task {request.run_id} -> stage={request.from_stage or 'last'}"
+            f"Resuming task {request.run_id} -> stage={request.from_step or 'last'}"
         )
-        self.janitor.janitor.recover_task(folder)
+        self.janitor.janitor.recover_task(folder_path=folder)
 
     def _control_loop(self) -> None:
         """Main engine dispatch loop."""
@@ -298,7 +299,6 @@ class DaemonRuntime:
 
         active_runs = self.state.refresh()
         decisions = self.trigger.evaluate(list(active_runs.values()))
-
         needs_wake = False
         for decision in decisions:
             if decision.action == "purge":

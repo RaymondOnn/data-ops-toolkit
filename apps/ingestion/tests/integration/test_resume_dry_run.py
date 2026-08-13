@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from apps.ingestion.src.core.models.stages.enums import Stage
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task
+from src.core.models.task import ExecutionStatus, Task
+from src.core.stages.enums import Stage
 
 
 def test_janitor_recovery_dry_run(runtime, tmp_path, caplog):

@@ -4,10 +4,12 @@ import io
 import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
-import fsspec
 import polars as pl
+
+if TYPE_CHECKING:
+    from libs.file.base import FileSystemClient
 
 LOG = logging.getLogger(__name__)
 
@@ -17,10 +19,10 @@ class FormatHandler(ABC):
 
     def __init__(
         self,
-        fs: fsspec.AbstractFileSystem | None = None,
+        fs: "FileSystemClient",
         options: dict[str, Any] | None = None,
     ) -> None:
-        self.fs = fs or fsspec.filesystem("file")
+        self.fs = fs
         self.options = options or {}
 
     @property
@@ -44,7 +46,7 @@ class FormatHandler(ABC):
         if (
             "*" not in search_path
             and not pattern
-            and not self.fs.isfile(self.fs._strip_protocol(search_path))
+            and not self.fs.fs.isfile(self.fs.fs._strip_protocol(search_path))
         ):
             pattern = default_glob
 
@@ -58,13 +60,15 @@ class FormatHandler(ABC):
             else search_path
         )
 
-        if "*" not in search and self.fs.isfile(self.fs._strip_protocol(search)):
-            return {str(self.fs.unstrip_protocol(self.fs._strip_protocol(search)))}
+        if "*" not in search and self.fs.fs.isfile(self.fs.fs._strip_protocol(search)):
+            return {
+                str(self.fs.fs.unstrip_protocol(self.fs.fs._strip_protocol(search)))
+            }
 
         return {
-            str(self.fs.unstrip_protocol(p))
+            str(self.fs.fs.unstrip_protocol(p))
             for p in self.fs.glob(search)
-            if self.fs.isfile(p)
+            if self.fs.fs.isfile(p)
         }
 
     @abstractmethod
@@ -88,7 +92,7 @@ class FormatHandler(ABC):
         pass
 
     @abstractmethod
-    def write_raw(self, data: bytes, path: Path | str) -> None:
+    def write_raw(self, data: bytes, path: str) -> None:
         """Write raw bytes."""
         pass
 

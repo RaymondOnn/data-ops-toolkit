@@ -17,7 +17,7 @@
 #     from libs.file.base import FileSystemSkills, create_fs_client
 
 #     client = create_fs_client(
-#         url=path, capabilities={FileSystemSkills.FILE}, options={}
+#         url=path, skills={FileSystemSkills.FILE}, options={}
 #     )
 
 #     if hasattr(client, "get_handler"):

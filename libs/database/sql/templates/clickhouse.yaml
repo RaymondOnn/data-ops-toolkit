@@ -6,25 +6,106 @@
 #   If a source database has NULL values, the columns in ClickHouse must be
 #   wrapped in Nullable(...) modifiers.
 
-core:
-  drop_table: "drop table if exists {table}"
 
+identifiers:
+  quote_open: "'"
+  quote_close: "'"
+  expected_parts: 2,
+  naming_structure: "[SCHEMA.]TABLE" # Can resolve default database
+  allowed_depths: [1, 2, 3]
+
+# -----------------------------------------------------------------------------
+# 1. CORE OPERATIONAL SQL (DDL & DML)
+# -----------------------------------------------------------------------------
+core:
+  create_schema: "create or replace database {schema}"
   # ClickHouse requires an ENGINE. Sling defaults to MergeTree ordered by a dummy tuple
   # unless primary keys are explicitly specified in the config.
-  create_table: "create table if not exists {table} ({col_types}) engine = MergeTree() order by tuple()"
+  create_table: "create or replace table {table} ({col_types}) engine = MergeTree() order by tuple()"
 
   truncate: "truncate table {table}"
+
   insert: "insert into {table} ({fields}) values ({values})"
+  update: "alter table {table} update {set_values} where {join_cond}"
+
+  drop_table: "drop table if exists {table}"
+  drop_view: "drop view if exists {schema}.{view}"
+  drop_schema: "drop database if exists {schema}"
+
+  describe_table: "describe table {table}"
+  like_table: create or replace {tgt_table} as {src_table}
+  clone_table: create or replace {tgt_table} clone as {src_table}
+
+# -----------------------------------------------------------------------------
+# 2. MERGE STRATEGIES
+# -----------------------------------------------------------------------------
+merge:
+  merge_upsert: |
+    alter table {tgt_table} delete where {join_cond};
+    insert into {tgt_table} ({insert_fields})
+    select {src_fields}
+    from {src_table}
+
+  merge_insert: |
+    insert into {tgt_table} ({insert_fields})
+    select {src_fields}
+    from {src_table}
+
+  merge_delete: |
+    delete from {tgt_table}
+    {where_cond}
+
 
 metadata:
+  table_exists: |
+    select count(*)
+    from system.tables
+    where database = '{schema}' and name = '{table}'
+
+    # exists({table})
+
   tables: |
     select name
     from system.tables
-    where database = '{database}'
+    where database = '{schema}' and is_temporary = 0
+    order by name
+
   columns: |
-    select name, type
+    select
+      name as column_name,
+      type as data_type,
+      0 as character_maximum_length,
+      numeric_precision,
+      numeric_scale,
+      startsWith(type, 'Nullable(') as is_nullable
     from system.columns
-    where database = '{database}' and table = '{table}'
+    where database = '{schema}' and table = '{table}'
+    order by position
+
+  primary_keys: |
+    select primary_key
+    from system.tables
+    where database = '{schema}' and name = '{table}'
+
+# -----------------------------------------------------------------------------
+# 4. DATA PROFILING & CHECKS
+# -----------------------------------------------------------------------------
+analysis:
+  count: "select count(*) as cnt from {table}"
+  select: "select {fields} from {table} where {where_cond}"
+  sample: "select {fields} from {table} limit {n}"
+  minus: "select {fields} from {ref_table} except select {fields} from {other_table}"
+
+# -----------------------------------------------------------------------------
+# 5. IN-FLIGHT TRANSFORM FUNCTION WRAPPER TEMPLATES
+# -----------------------------------------------------------------------------
+function:
+  cast_to_date: "toDate({val})"
+  cast_to_string: "toString({val})"
+  md5: "hex(MD5({val}))"
+  coalesce: "coalesce({val}, {default})"
+  hash_agg: "hex(groupBitXor(cityHash64({fields})))"
+  hash: "cityHash64({fields})"
 
 # -------------------------------------------------------------------------
 # ClickHouse General Type Map (Leverages Nullable wraps to prevent sync crashes)
@@ -36,3 +117,24 @@ general_type_map:
   boolean: "Nullable(Bool)"
   datetime: "Nullable(DateTime64(6, 'UTC'))"
   json: "Nullable(String)" # Maps nested JSON payloads as raw strings in Clickhouse
+  float: "Nullable(Float64)"
+  date: "Nullable(Date)"
+  time: "Nullable(String)"
+  binary: "Nullable(String)"
+
+native_type_map:
+  String: "string"
+  FixedString: "string"
+  Int64: "integer"
+  Int32: "integer"
+  UInt64: "integer"
+  UInt32: "integer"
+  Decimal: "decimal"
+  Float64: "float"
+  Float32: "float"
+  Bool: "boolean"
+  Date: "date"
+  Date32: "date"
+  DateTime: "datetime"
+  DateTime64: "datetime"
+  JSON: "json"

@@ -3,16 +3,17 @@
 from typing import TYPE_CHECKING, Literal
 
 import msgspec
-from apps.ingestion.src.core.contexts.task import TaskContext, load_context
-from apps.ingestion.src.core.models.states import ExpiredState
-from apps.ingestion.src.core.models.task import ExecutionStatus
-from apps.ingestion.src.core.models.task.enums import TaskIdentity
-from apps.ingestion.src.utils.constants import CONFIG_FILENAME, STRIP_TZ_FOR_DB
 from libs.utils.dates import current_timestamp, parse_timestamp
 from loguru import logger
 
+from src.core.contexts.task import TaskContext, load_context
+from src.core.models.states import ExpiredState
+from src.core.models.task import ExecutionStatus
+from src.core.models.task.enums import TaskIdentity
+from src.utils.constants import CONFIG_FILENAME, STRIP_TZ_FOR_DB
+
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.orchestrator.enums import TaskRecord
+    from src.core.orchestrator.enums import TaskRecord
 
 LOG = logger
 

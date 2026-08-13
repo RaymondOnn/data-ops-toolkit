@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import IO, Any, cast
 
 import polars as pl
-import xmltodict
+from lxml import etree
 
 from .base import FormatHandler
 
@@ -29,6 +29,32 @@ class XMLHandler(FormatHandler):
         """
         return self._glob_files(path, pattern, "**/*.xml")
 
+    def _parse_xml_stream(
+        self, buffer: io.BytesIO, row_tag: str
+    ) -> list[dict[str, str]]:
+        """
+        Streams XML using C-level lxml.etree.iterparse.
+        Clears element trees dynamically to keep RAM usage near 0 MB.
+        """
+        records = []
+        # Fast C-level streaming parser
+        context = etree.iterparse(buffer, events=("end",), tag=row_tag)
+
+        for _, elem in context:
+            record = {}
+            for child in elem:
+                if child.text:
+                    record[child.tag] = child.text.strip()
+            if record:
+                records.append(record)
+
+            # CRITICAL: Clear C memory allocations as we stream
+            elem.clear()
+            while elem.getprevious() is not None:
+                del elem.getparent()[0]
+
+        return records
+
     def to_df(self, path: Path | str, **kwargs: Any) -> pl.LazyFrame:
         """Convert XML files to Polars LazyFrame.
 
@@ -39,17 +65,21 @@ class XMLHandler(FormatHandler):
         Returns:
             pl.LazyFrame: The LazyFrame containing the XML data.
         """
+
         files = self.discover(path)
         if not files:
             return pl.LazyFrame()
 
-        lfs = []
+        row_tag = kwargs.get("row_tag", "record")  # Specify parent node name
+        dfs = []
+
         for f in files:
             buffer = self.read_raw(f)
-            data = xmltodict.parse(buffer.read())
-            lfs.append(pl.DataFrame(data).lazy())
+            records = self._parse_xml_stream(buffer, row_tag=row_tag)
+            if records:
+                dfs.append(pl.DataFrame(records))
 
-        return pl.concat(lfs) if lfs else pl.LazyFrame()
+        return pl.concat([df.lazy() for df in dfs]) if dfs else pl.LazyFrame()
 
     def from_df(self, df: pl.LazyFrame | pl.DataFrame, path: Path | str) -> None:
         raise NotImplementedError("XML write not supported")
@@ -81,6 +111,6 @@ class XMLHandler(FormatHandler):
 
         return io.BytesIO(combined)
 
-    def write_raw(self, data: bytes, path: Path | str) -> None:
+    def write_raw(self, data: bytes, path: str) -> None:
         with self.fs.open(path, "wb") as f:
             cast("IO[bytes]", f).write(data)

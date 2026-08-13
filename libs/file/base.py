@@ -1,4 +1,5 @@
 import logging
+import shutil
 from abc import ABC, abstractmethod
 from collections.abc import Generator
 from contextlib import suppress
@@ -11,6 +12,7 @@ import fsspec
 from upath import UPath
 
 from libs.clients.base import BaseIOClient
+from libs.file.utils import extract_archive
 
 LOG = logging.getLogger(__name__)
 
@@ -230,84 +232,139 @@ class FileSystemClient(BaseIOClient, ABC):
 
     def is_archive(self, path: str) -> bool:
         """Check if path points to an archive file."""
-        archive_extensions = {".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz"}
-        return any(path.lower().endswith(ext) for ext in archive_extensions)
+        return (
+            any(
+                path.lower().endswith(ext)
+                for ext in (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz")
+            )
+            or "archive://" in path.lower()
+        )
 
-    def extract_archive(
+    def is_zip(self, path: str) -> bool:
+        return path.lower().endswith(".zip") or "zip://" in path.lower()
+
+    def split_by_size(
         self,
-        archive_path: str,
-        target_dir: str | None = None,
-    ) -> str:
-        """
-        Extract archive to a directory.
+        path: str,
+        pattern: str | None = None,
+        batch_size_bytes: int = 1 * 1024**3,  # 1GB default
+    ) -> list[list[str]]:
+        """Split files into batches of approximately batch_size_bytes.
 
         Args:
-            archive_path: Path to the archive file
-            target_dir: Optional target directory (creates temp if not provided)
+            path: The directory or archive path to scan
+            pattern: Optional glob pattern to filter files
+            batch_size_bytes: Target size per batch in bytes (default 1GB)
 
         Returns:
-            Path to the extraction directory
+            list[list[str]]: List of file batches
         """
-        import gzip
-        import tarfile
-        import tempfile
-        import zipfile
+        temp_dir = None
+        try:
+            # Extract archive if needed
+            if self.is_archive(path):
+                temp_dir = extract_archive(path)
+                path = temp_dir
 
-        target_dir = tempfile.mkdtemp(dir=target_dir, prefix="archive_extract_")
+            # Get files with sizes
+            files: list[tuple[str, int]] = [
+                (f, self.fs.size(f))
+                for f in self.fs.find(path)
+                if not pattern or (Path(f).match(pattern) and self.fs.size(f) > 0)
+            ]
+            files.sort(key=lambda x: x[1], reverse=True)
 
-        resolved_path = self.resolve(archive_path)
+            # Pack batches
+            batches: list[list[str]] = []
+            batch: list[str] = []
+            size: int = 0
+            for f, s in files:
+                if s > batch_size_bytes and not batch:
+                    batches.append([f])
+                elif size + s > batch_size_bytes and batch:
+                    batches.append(batch)
+                    batch, size = [], 0
+                    batch.append(f)
+                    size = s
+                else:
+                    batch.append(f)
+                    size += s
+            if batch:
+                batches.append(batch)
 
-        LOG.info(f"Extracting {archive_path} to {target_dir}")
+            return batches
+        finally:
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
-        # Extract based on archive type
-        if resolved_path.lower().endswith(".zip"):
-            with zipfile.ZipFile(resolved_path, "r") as zf:
-                zf.extractall(target_dir)
-        elif resolved_path.lower().endswith(".tar"):
-            with tarfile.open(resolved_path, "r") as tf:
-                tf.extractall(target_dir)
-        elif resolved_path.lower().endswith(
-            ".tar.gz"
-        ) or resolved_path.lower().endswith(".tgz"):
-            with tarfile.open(resolved_path, "r:gz") as tf:
-                tf.extractall(target_dir)
-        elif resolved_path.lower().endswith(".gz"):
-            # Single .gz file
-            output_path = Path(target_dir) / Path(resolved_path).stem
-            with gzip.open(resolved_path, "rb") as f:
-                output_path.write_bytes(f.read())
-        else:
-            raise ValueError(f"Unsupported archive format: {archive_path}")
+    def is_readable(self, path: str) -> bool:
+        """Check if file exists and is non-empty.
 
-        return target_dir
+        Args:
+            fs: The filesystem.
+            path: The path to the file.
+
+        Returns:
+            bool: True if the file exists and is non-empty, False otherwise.
+        """
+        if not self.fs.exists(path):
+            LOG.error(f"Missing file: {path}")
+            return False
+
+        size = self.fs.size(path)
+        if size == 0:
+            LOG.error(f"Zero-byte file: {path}")
+            return False
+
+        if size > 5 * 1024**3:
+            LOG.warning(f"Large file (>5GB): {path}")
+        return True
 
 
 class FileSystemSkills(Enum):
-    """Mixin registry for filesystem capabilities."""
+    """Mixin registry for filesystem skills."""
 
-    FILE = "libs.file.mixins.data.FileMixin"
-    CAS = "libs.file.mixins.cas.CASArchiveMixin"
-    ARCHIVE = "libs.file.mixins.archive.StandardArchiveMixin"
+    FILE = "file"
+    CAS = "cas"
+    ARCHIVE = "archive"
 
     @cached_property
     def mixin_class(self):
         import importlib
 
-        mod, cls = self.value.rsplit(".", 1)
+        mod, cls = self.import_path.rsplit(".", 1)
         return getattr(importlib.import_module(mod), cls)
+
+    @property
+    def import_path(self) -> str:
+        paths = {
+            FileSystemSkills.FILE: "libs.file.mixins.data.FileMixin",
+            FileSystemSkills.CAS: "libs.file.mixins.cas.CASArchiveMixin",
+            FileSystemSkills.ARCHIVE: "libs.file.mixins.archive.StandardArchiveMixin",
+        }
+        return paths[self]
+
+    @classmethod
+    def _missing_(cls, value: object) -> Any:
+        if isinstance(value, str):
+            val_lower = value.lower()
+            for member in cls:
+                if member.value == val_lower or member.name.lower() == val_lower:
+                    return member
+        return super()._missing_(value)
 
 
 def create_fs_client(
     url: str,
-    capabilities: set[FileSystemSkills],
+    skills: set[FileSystemSkills],
     **options: Any,
 ) -> "FileSystemClient":
     """
-    Create a filesystem client with dynamic mixin capabilities.
+    Create a filesystem client with dynamic mixin skills.
 
     Args:
         url: Root URL (e.g., 's3://bucket', '/tmp/data')
-        capabilities: Set of mixins to inject
+        skills: Set of mixins to inject
         options: Storage connection options
     """
     from .clients.azure import AzureClient
@@ -328,7 +385,7 @@ def create_fs_client(
     )
 
     # Build MRO: mixins first, then base
-    mixins = [cap.mixin_class for cap in capabilities]
+    mixins = [cap.mixin_class for cap in skills]
 
     # Create dynamic class
     cls = type(f"Managed{base.__name__}", (base, *mixins), {})

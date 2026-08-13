@@ -8,21 +8,21 @@ from pathlib import Path
 from typing import Any
 
 import pendulum
-from apps.ingestion.src.core.contexts import ExecutionContext
-from apps.ingestion.src.core.contexts.task import load_context
-from apps.ingestion.src.core.models.stages.enums import Stage
-from apps.ingestion.src.core.models.task import (
+from loguru import logger
+
+from src.core.contexts import ExecutionContext
+from src.core.contexts.task import load_context
+from src.core.models.task import (
     ExecutionStatus,
     Task,
     TaskRef,
     TaskSignal,
 )
-from apps.ingestion.src.utils.constants import (
+from src.utils.constants import (
     CONFIG_FILENAME,
     MANIFEST_FILENAME,
 )
-from apps.ingestion.src.utils.decorators import log_dry_run
-from loguru import logger
+from src.utils.decorators import log_dry_run
 
 LOG = logger
 
@@ -76,36 +76,34 @@ class Janitor:
             LOG.exception(f"Quarantine failed for {folder_path}")
 
     # TO-DO: Duplicate cache update?
-    def recover_task(self, resume_stage: str, folder_path: Path) -> None:
+    def recover_task(self, folder_path: Path) -> None:
         """Recover a quarantined / failed task and re-queue it."""
         try:
             task = Task.from_path(folder_path, self.exec_ctx)
-            resume_stage = task.manifest.current_stage
+            resume_step_id = task.manifest.current_step_id
 
             LOG.info(
-                f"Recovering {task.run_id} from quarantine, resuming at {resume_stage}"
+                f"Recovering {task.run_id} from quarantine, resuming at {resume_step_id}"
             )
 
             # Reset task state
             updates = {
                 "status": ExecutionStatus.PENDING,
-                "current_stage": resume_stage,
+                "current_step_id": resume_step_id,
                 "error": None,
                 "retry_count": 0,
             }
 
             # Clear bitmask for resume stage and onward
-            new_mask = task.manifest.bitmask
-            found = False
-            for stage in Stage:
-                if stage.value == resume_stage:
-                    found = True
-                if found:
-                    new_mask &= ~stage.bitmask
-                    updates[stage.value] = None
-                    task.workspace.remove_marker(stage.value)
+            # found = False
+            # for stage in Stage:
+            #     if stage.value == resume_stage:
+            #         found = True
+            #     if found:
+            #         updates[stage.value] = None
+            #         task.workspace.remove_marker(stage.value)
 
-            updates["bitmask"] = new_mask
+            task.workspace.remove_marker(resume_step_id)
             task.update_manifest(updates)
             task.move_to("active")
 
@@ -114,7 +112,7 @@ class Janitor:
                 identity=task.task_ref.identity,
                 namespace=task.task_ref.namespace,
                 status=ExecutionStatus.PENDING,
-                stage=resume_stage,
+                step_id=resume_step_id,
             )
 
             self._enqueue(updated_ref, str(task.workspace.path / CONFIG_FILENAME))
@@ -144,7 +142,7 @@ class Janitor:
             # task.purge_data_vaults()
 
         # External source cleanup
-        self._cleanup_external_sources(task)
+        # self._cleanup_external_sources(task)
 
         # Metadata cleanup - must be LAST (removes config/manifest needed above)
         LOG.debug("Purging workspace metadata", run_id=task.run_id)
@@ -153,34 +151,34 @@ class Janitor:
 
         self.remove_orphaned_config(task.id, task.run_id)
 
-    def _cleanup_external_sources(self, task: "Task") -> None:
-        """Clean up external source files/directories after successful ingestion."""
+    # def _cleanup_external_sources(self, task: "Task") -> None:
+    #     """Clean up external source files/directories after successful ingestion."""
 
-        # Skip conditions
-        if self.exec_ctx.is_test:
-            return
+    #     # Skip conditions
+    #     if self.exec_ctx.is_test:
+    #         return
 
-        extract_ctx = task.context.extract
-        if not extract_ctx:
-            return
+    #     extract_ctx = task.context.extract
+    #     if not extract_ctx:
+    #         return
 
-        params = extract_ctx.params
-        source_path = extract_ctx.resource
+    #     params = extract_ctx.params
+    #     source_path = extract_ctx.resource
 
-        # Check if cleanup is needed
-        if params.get("type") != "file":
-            return
+    #     # Check if cleanup is needed
+    #     if params.get("type") != "file":
+    #         return
 
-        cleanup = params.get("remove_after", {})
-        if (
-            not cleanup.get("enabled")
-            or not source_path
-            or not Path(source_path).exists()
-        ):
-            return
+    #     cleanup = params.get("remove_after", {})
+    #     if (
+    #         not cleanup.get("enabled")
+    #         or not source_path
+    #         or not Path(source_path).exists()
+    #     ):
+    #         return
 
-        # Perform cleanup
-        self._execute_source_cleanup(Path(source_path), cleanup.get("mode", "file"))
+    #     # Perform cleanup
+    #     self._execute_source_cleanup(Path(source_path), cleanup.get("mode", "file"))
 
     def _execute_source_cleanup(self, path: Path, mode: str) -> None:
         """Execute the actual source cleanup based on mode."""

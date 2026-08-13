@@ -1,6 +1,8 @@
 from unittest.mock import MagicMock
 
-from apps.ingestion.src.core.models.states import (
+from libs.utils.exceptions import TransientError
+
+from src.core.models.states import (
     ExpiredState,
     FailureOutcome,
     ProgressOutcome,
@@ -8,9 +10,8 @@ from apps.ingestion.src.core.models.states import (
     SuccessOutcome,
     ZombieState,
 )
-from apps.ingestion.src.core.models.task import ExecutionStatus
-from apps.ingestion.src.utils.exceptions import TryAgainLater
-from libs.utils.exceptions import TransientError
+from src.core.models.task import ExecutionStatus
+from src.utils.exceptions import TryAgainLater
 
 
 def test_success_state_applicability(mock_task):

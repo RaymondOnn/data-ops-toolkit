@@ -1,4 +1,4 @@
-from apps.ingestion.src.core.models.task import TaskSignal
+from src.core.models.task import TaskSignal
 
 
 def test_signal_detection_and_coalescing(runtime, tmp_path):

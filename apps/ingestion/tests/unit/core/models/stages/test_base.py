@@ -1,8 +1,9 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from apps.ingestion.src.core.models.stages.base import ExecutionStage
-from apps.ingestion.src.core.models.stages.enums import Stage
+
+from src.core.stages.contracts.stage import ExecutionStage
+from src.core.stages.enums import Stage
 
 
 class MockStage(ExecutionStage):

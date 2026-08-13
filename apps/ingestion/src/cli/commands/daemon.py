@@ -10,12 +10,13 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from apps.ingestion.src.cli.state import app, configure_runtime, state
-from apps.ingestion.src.cli.utils import _write_signal_file
-from apps.ingestion.src.core.contexts import TaskContextBuilder
-from apps.ingestion.src.core.orchestrator.factory import assemble_runtime
-from apps.ingestion.src.core.orchestrator.modes.daemon import DaemonRuntime
-from apps.ingestion.src.utils.common import setup_logger
+
+from src.cli.state import app, configure_runtime, state
+from src.cli.utils import _write_signal_file
+from src.core.contexts import TaskContextBuilder
+from src.core.orchestrator.factory import assemble_runtime
+from src.core.orchestrator.modes.daemon import DaemonRuntime
+from src.utils.common import setup_logger
 
 
 @app.command(name="start")

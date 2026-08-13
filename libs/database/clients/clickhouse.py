@@ -2,18 +2,20 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Generator, Sequence
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
-import polars as pl
+import pyarrow as pa
 from clickhouse_connect.driver.client import Client
 from clickhouse_connect.driver.exceptions import DatabaseError, OperationalError
+
 from libs.database.pool.base import ConnectionPool
 from libs.database.pool.queue import QueueConnectionPool
 from libs.utils.exceptions import AuthFailure, HostUnreachable
 
 from .base import DBClient
+from .factory import DatabaseFactory
 
 LOG = logging.getLogger(__name__)
 
@@ -32,6 +34,7 @@ def get_error_code(exception):
     return int(match.group(1)) if match else None
 
 
+@DatabaseFactory.register
 class ClickhouseClient(DBClient):
     """
     High-performance client for ClickHouse using clickhouse-connect.
@@ -40,14 +43,11 @@ class ClickhouseClient(DBClient):
     via temporary staging tables.
     """
 
+    type: str = "clickhouse"
+
     def __init__(self, **config: Any):
         """Initializes the ClickhouseClient with provided config."""
         super().__init__(**config)
-
-    @property
-    def type(self) -> str:
-        """Returns the database type identifier."""
-        return "clickhouse"
 
     def _init_pool(self) -> ConnectionPool:
         """
@@ -58,7 +58,7 @@ class ClickhouseClient(DBClient):
         """
         pool_size = self.config.get("pool_size", 0)
         if pool_size > 1:
-            LOG.info("Initializing ClickHouse Queue Pool", extra={"size": pool_size})
+            LOG.info("Initializing Pool", extra={"size": pool_size})
             return QueueConnectionPool(connector=self.connect, size=pool_size)
         return super()._init_pool()
 
@@ -74,6 +74,7 @@ class ClickhouseClient(DBClient):
         """
         # Import inside so that Ray workers can import
         import clickhouse_connect
+
         from libs.clients.base import ClientCantConnect
 
         try:
@@ -105,7 +106,24 @@ class ClickhouseClient(DBClient):
         """Verifies connection health."""
         conn.ping()
 
-    def copy_from_file(
+    def command(self, sql: str, params: Any = None) -> None:
+        with self.get_connection() as conn:
+            conn.command(sql, parameters=params)
+
+    def query(
+        self, sql: str, params: Any = None
+    ) -> Generator[pa.RecordBatch, None, None]:
+        """Streams query results as Polars DataFrames via Apache Arrow."""
+        LOG.debug("Executing streaming Arrow query", extra={"query": sql})
+        parameters = params if isinstance(params, dict) else None
+
+        with self.get_connection() as conn:
+            # Yields native Apache Arrow streams directly from ClickHouse
+            result = conn.query_arrow_stream(sql, parameters=parameters)
+            with result:
+                yield from result
+
+    def copy(
         self,
         table: str,
         source_dir: str,
@@ -113,156 +131,221 @@ class ClickhouseClient(DBClient):
         audit_values: dict[str, Any] | None = None,
     ) -> None:
         """
-        Performs a multi-stage bulk load from local files into ClickHouse.
-
-        Args:
-            table: Destination table name.
-            source_dir: Directory containing files to load.
-            file_ext: Format of the source files.
-            audit_values: Constants to inject during promotion to target table.
+        Multi-stage staging bulk load into ClickHouse:
+        1. Creates a temporary table with the schema matching the target.
+        2. Streams binary Parquet files into the staging table via raw_insert().
+        3. Promotes staged data into target while injecting audit constants.
         """
         audit_values = audit_values or {}
         files = list(Path(source_dir).glob(f"*.{file_ext}"))
 
         if not files:
-            LOG.warning(
-                "No files found for staging",
-                extra={"source_dir": source_dir, "file_ext": file_ext},
-            )
+            LOG.warning(f"No {file_ext} files found in {source_dir}")
             return
 
-        schema_info = self.sql(f"DESCRIBE TABLE {table}")
-        all_columns = [
-            row[0].decode("utf-8") if isinstance(row[0], bytes) else str(row[0])
-            for row in schema_info
-        ]
-        # Filter columns to match the staging table (excluding audit columns)
-        column_names = [c for c in all_columns if c not in audit_values]
-
-        # 1. Create a Temporary Table with the same structure as the Parquet
-        # 'AS target_location' copies the schema; 'EXCEPT' omits the audit columns
-        unique_id = str(uuid.uuid4())[:8]
-        tmp_table = f"tmp_stage_{int(time.time())}_{unique_id}"
-        except_clause = (
-            f"EXCEPT ({', '.join(audit_values.keys())})" if audit_values else ""
-        )
-
+        # Fetch columns from system layout to match target schema
         with self.get_connection() as conn:
+            schema_info = conn.query(f"DESCRIBE TABLE {table}").result_rows
+            all_columns = [str(row[0]) for row in schema_info]
+            column_names = [c for c in all_columns if c not in audit_values]
+
+            # 1. Create Temporary Table
+            unique_id = str(uuid.uuid4())[:8]
+            tmp_table = f"tmp_stage_{int(time.time())}_{unique_id}"
+            except_clause = (
+                f"EXCEPT ({', '.join(audit_values.keys())})" if audit_values else ""
+            )
+
             conn.command(f"""
                 CREATE TEMPORARY TABLE {tmp_table}
-                ENGINE = MergeTree()
-                ORDER BY tuple()
-                AS
-                SELECT * {except_clause}
-                FROM {table}
-                LIMIT 0
+                ENGINE = MergeTree() ORDER BY tuple()
+                AS SELECT * {except_clause} FROM {table} LIMIT 0
             """)
 
-            # 2. Bulk load the files into the Temp Table
-            for file in files:
-                with file.open("rb") as f:
-                    # Streams the binary data directly
+            # 2. Bulk Insert Parquet Streams
+            for file_path in files:
+                with file_path.open("rb") as f:
                     conn.raw_insert(
                         table=tmp_table,
                         insert_block=f,
                         column_names=column_names,
-                        fmt=file.suffix.lstrip(".").title(),
+                        fmt=file_ext.capitalize(),
                     )
 
-            # 3. Move to the Target Table with Audit Constants
-            select_clause = "*"
+            # 3. Promote to Target Table with Audit Injectors
+            audit_sql = ""
             if audit_values:
-                audit_sql = ", ".join(
+                audit_sql = ", " + ", ".join(
                     [f"'{v}' AS {k}" for k, v in audit_values.items()]
                 )
-                select_clause = f"*, {audit_sql}"
 
-            LOG.debug(
-                "Promoting from temp stage to target",
-                extra={"table": table, "select": select_clause},
-            )
             conn.command(f"""
                 INSERT INTO {table}
-                SELECT {select_clause}
-                FROM {tmp_table}
+                SELECT * {audit_sql} FROM {tmp_table}
             """)
+
             LOG.info(
-                "Successfully staged files to ClickHouse",
-                extra={"table": table, "count": len(files)},
+                f"Successfully loaded {len(files)} file(s) into ClickHouse table '{table}'"
             )
 
-    def sql(self, query: str) -> list[Sequence[Any]]:
-        """
-        Executes a query and returns results as raw tuples.
+    # def copy_from_file(
+    #     self,
+    #     table: str,
+    #     source_dir: str,
+    #     file_ext: str = "parquet",
+    #     audit_values: dict[str, Any] | None = None,
+    # ) -> None:
+    #     """
+    #     Performs a multi-stage bulk load from local files into ClickHouse.
 
-        Args:
-            query: The SQL query string.
+    #     Args:
+    #         table: Destination table name.
+    #         source_dir: Directory containing files to load.
+    #         file_ext: Format of the source files.
+    #         audit_values: Constants to inject during promotion to target table.
+    #     """
+    #     audit_values = audit_values or {}
+    #     files = list(Path(source_dir).glob(f"*.{file_ext}"))
 
-        Returns:
-            list[Sequence[Any]]: Result rows.
-        """
-        LOG.debug("Executing SQL query", extra={"query": query})
-        with self.get_connection() as conn:
-            result = conn.query(query)
-            return list(result.result_rows)
+    #     if not files:
+    #         LOG.warning(
+    #             "No files found for staging",
+    #             extra={"source_dir": source_dir, "file_ext": file_ext},
+    #         )
+    #         return
 
-    def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
-        """
-        Executes a query and yields Polars DataFrames using native streaming.
+    #     schema_info = self.sql(f"DESCRIBE TABLE {table}")
+    #     all_columns = [
+    #         row[0].decode("utf-8") if isinstance(row[0], bytes) else str(row[0])
+    #         for row in schema_info
+    #     ]
+    #     # Filter columns to match the staging table (excluding audit columns)
+    #     column_names = [c for c in all_columns if c not in audit_values]
 
-        Args:
-            query: The SQL query string.
+    #     # 1. Create a Temporary Table with the same structure as the Parquet
+    #     # 'AS target_location' copies the schema; 'EXCEPT' omits the audit columns
+    #     unique_id = str(uuid.uuid4())[:8]
+    #     tmp_table = f"tmp_stage_{int(time.time())}_{unique_id}"
+    #     except_clause = (
+    #         f"EXCEPT ({', '.join(audit_values.keys())})" if audit_values else ""
+    #     )
 
-        Yields:
-            pl.DataFrame: A batch of query results.
-        """
-        LOG.debug("Executing SQL query", extra={"query": query})
-        with self.get_connection() as conn:
-            result = conn.query_df_stream(query, settings={"max_block_size": 100_000})
-            with result:
-                for pandas_df in result:
-                    yield pl.from_pandas(pandas_df)
+    #     with self.get_connection() as conn:
+    #         conn.command(f"""
+    #             CREATE TEMPORARY TABLE {tmp_table}
+    #             ENGINE = MergeTree()
+    #             ORDER BY tuple()
+    #             AS
+    #             SELECT * {except_clause}
+    #             FROM {table}
+    #             LIMIT 0
+    #         """)
 
-    def get_schema(self, fq_table: str) -> pl.DataFrame:
-        """
-        Retrieves physical schema information from system.columns.
+    #         # 2. Bulk load the files into the Temp Table
+    #         for file in files:
+    #             with file.open("rb") as f:
+    #                 # Streams the binary data directly
+    #                 conn.raw_insert(
+    #                     table=tmp_table,
+    #                     insert_block=f,
+    #                     column_names=column_names,
+    #                     fmt=file.suffix.lstrip(".").title(),
+    #                 )
 
-        Args:
-            fq_table: Fully qualified table name.
+    #         # 3. Move to the Target Table with Audit Constants
+    #         select_clause = "*"
+    #         if audit_values:
+    #             audit_sql = ", ".join(
+    #                 [f"'{v}' AS {k}" for k, v in audit_values.items()]
+    #             )
+    #             select_clause = f"*, {audit_sql}"
 
-        Returns:
-            pl.DataFrame: Schema metadata report.
-        """
-        database, table_name = fq_table.split(".")
-        query = f"""
-            SELECT
-                name AS column_name,
-                type AS data_type,
-                is_in_primary_key,
-                -- ClickHouse doesn't use precision/scale for all types,
-                -- but it's available for Decimal types
-                numeric_precision,
-                numeric_scale
-            FROM system.columns
-            WHERE database = '{database}'
-            AND table = '{table_name}'
-            ORDER BY position
-        """
-        return pl.concat(self.fetch_df(query), how="vertical")
+    #         LOG.debug(
+    #             "Promoting from temp stage to target",
+    #             extra={"table": table, "select": select_clause},
+    #         )
+    #         conn.command(f"""
+    #             INSERT INTO {table}
+    #             SELECT {select_clause}
+    #             FROM {tmp_table}
+    #         """)
+    #         LOG.info(
+    #             "Successfully staged files to ClickHouse",
+    #             extra={"table": table, "count": len(files)},
+    #         )
 
-    def exists(self, fq_table: str) -> bool:
-        """
-        Checks for table existence using ClickHouse native command.
+    # def sql(self, query: str) -> list[Sequence[Any]]:
+    #     """
+    #     Executes a query and returns results as raw tuples.
 
-        Args:
-            fq_table: Table name to check.
+    #     Args:
+    #         query: The SQL query string.
 
-        Returns:
-            bool: True if it exists, False otherwise.
-        """
-        database, table = (
-            fq_table.split(".") if "." in fq_table else ("default", fq_table)
-        )
-        # EXISTS TABLE returns 1 or 0
-        res = self.sql(f"EXISTS TABLE {database}.{table}")
-        return bool(res[0][0]) if res else False
+    #     Returns:
+    #         list[Sequence[Any]]: Result rows.
+    #     """
+    #     LOG.debug("Executing SQL query", extra={"query": query})
+    #     with self.get_connection() as conn:
+    #         result = conn.query(query)
+    #         return list(result.result_rows)
+
+    # def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
+    #     """
+    #     Executes a query and yields Polars DataFrames using native streaming.
+
+    #     Args:
+    #         query: The SQL query string.
+
+    #     Yields:
+    #         pl.DataFrame: A batch of query results.
+    #     """
+    #     LOG.debug("Executing SQL query", extra={"query": query})
+    #     with self.get_connection() as conn:
+    #         result = conn.query_df_stream(query, settings={"max_block_size": 100_000})
+    #         with result:
+    #             for pandas_df in result:
+    #                 yield pl.from_pandas(pandas_df)
+
+    # def get_schema(self, fq_table: str) -> pl.DataFrame:
+    #     """
+    #     Retrieves physical schema information from system.columns.
+
+    #     Args:
+    #         fq_table: Fully qualified table name.
+
+    #     Returns:
+    #         pl.DataFrame: Schema metadata report.
+    #     """
+    #     database, table_name = fq_table.split(".")
+    #     query = f"""
+    #         SELECT
+    #             name AS column_name,
+    #             type AS data_type,
+    #             is_in_primary_key,
+    #             -- ClickHouse doesn't use precision/scale for all types,
+    #             -- but it's available for Decimal types
+    #             numeric_precision,
+    #             numeric_scale
+    #         FROM system.columns
+    #         WHERE database = '{database}'
+    #         AND table = '{table_name}'
+    #         ORDER BY position
+    #     """
+    #     return pl.concat(self.fetch_df(query), how="vertical")
+
+    # def exists(self, fq_table: str) -> bool:
+    #     """
+    #     Checks for table existence using ClickHouse native command.
+
+    #     Args:
+    #         fq_table: Table name to check.
+
+    #     Returns:
+    #         bool: True if it exists, False otherwise.
+    #     """
+    #     database, table = (
+    #         fq_table.split(".") if "." in fq_table else ("default", fq_table)
+    #     )
+    #     # EXISTS TABLE returns 1 or 0
+    #     res = self.sql(f"EXISTS TABLE {database}.{table}")
+    #     return bool(res[0][0]) if res else False

@@ -1,7 +1,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from apps.ingestion.src.utils.common import (
+from src.utils.common import (
     deep_merge,
     find_path,
     setup_logger,

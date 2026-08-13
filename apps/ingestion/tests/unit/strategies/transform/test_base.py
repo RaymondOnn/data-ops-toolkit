@@ -2,7 +2,8 @@ from typing import cast
 from unittest.mock import MagicMock
 
 import polars as pl
-from apps.ingestion.src.core.strategies.transform.base import (
+
+from src.core.strategies.transform.base import (
     TransformContext,
     Transformer,
 )

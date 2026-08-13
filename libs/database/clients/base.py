@@ -1,10 +1,9 @@
 import threading
 from abc import ABC, abstractmethod
-from collections.abc import Generator, Sequence
+from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any
 
-import polars as pl
 from libs.database.pool.base import ConnectionPool, LockPool
 
 
@@ -15,6 +14,8 @@ class DBClient(ABC):
     Provides a standardized interface for connection leasing, pooling,
     and data frame operations across various database engines.
     """
+
+    type: str
 
     def __init__(self, **config: Any) -> None:
         """
@@ -72,16 +73,6 @@ class DBClient(ABC):
         """
         return LockPool(connector=self.connect)
 
-    @property
-    def type(self) -> str:
-        """
-        Returns a string identifier for the database type.
-
-        Returns:
-            str: Identifier (e.g., 'clickhouse', 'oracle').
-        """
-        raise NotImplementedError("Subclasses must implement this property")
-
     @contextmanager
     def get_connection(self) -> Generator[Any, None, None]:
         """
@@ -134,89 +125,25 @@ class DBClient(ABC):
         # Connection will re-initialize lazily on next lease
 
     @abstractmethod
-    def sql(self, query: str) -> list[Sequence[Any]]:
-        """
-        Executes a query and returns results as raw tuples.
-
-        Args:
-            query: The SQL query string.
-
-        Returns:
-            list[Sequence[Any]]: A list of row tuples.
-        """
-        raise NotImplementedError("Subclasses must implement this method")
+    def command(self, sql: str, params: Any = None) -> None:
+        """Executes non-query SQL (DDL, INSERT, UPDATE, DELETE). No returns."""
+        raise NotImplementedError()
 
     @abstractmethod
-    def fetch_df(self, query: str) -> Generator[pl.DataFrame, Any, None]:
+    def query(self, sql: str, params: Any = None) -> Generator[Any, None, None]:
         """
-        Executes a query and yields results as Polars DataFrames.
-
-        Args:
-            query: The SQL query string.
-
-        Yields:
-            pl.DataFrame: A batch of query results.
-        """
-        raise NotImplementedError("Subclasses must implement this method")
-
-    def fetch_lazy(self, query: str) -> pl.LazyFrame:
-        """
-        Executes a query and returns a concatenated Polars LazyFrame.
-
-        Args:
-            query: The SQL query string.
-
-        Returns:
-            pl.LazyFrame: The combined lazy representation of results.
-
-        Notes:
-        - We wrap the stream in a LazyFrame to allow Polars to perform
-        predicate pushdown and projection pushdown, which is vital for
-        staying under the 2GB RAM ceiling when handling 50M rows.
-        """
-        return pl.concat(self.fetch_df(query), how="vertical").lazy()
-
-    @abstractmethod
-    def get_schema(self, fq_table: str) -> pl.DataFrame:
-        """
-        Retrieves the physical schema from the database system tables.
-
-        Args:
-            fq_table: Fully qualified table name.
-
-        Returns:
-            pl.DataFrame: Metadata report including columns and types.
+        Executes a SELECT query and yields data blocks.
+        Yields PyArrow RecordBatches or raw row tuple sequences for memory safety.
         """
         raise NotImplementedError()
 
     @abstractmethod
-    def exists(self, fq_table: str) -> bool:
-        """
-        Checks for the existence of a database artifact.
-
-        Args:
-            fq_table: Fully qualified name of the artifact.
-
-        Returns:
-            bool: True if it exists, False otherwise.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def copy_from_file(
+    def copy(
         self,
         table: str,
         source_dir: str,
         file_ext: str = "parquet",
         audit_values: dict[str, Any] | None = None,
     ) -> None:
-        """
-        Performs a bulk load from files into the target table.
-
-        Args:
-            table: Destination table name.
-            source_dir: Directory containing files to load.
-            file_ext: Format of the source files.
-            audit_values: Constants to inject during loading.
-        """
-        raise NotImplementedError("Subclasses must implement this method")
+        """High-throughput file ingestion directly into target tables."""
+        raise NotImplementedError()

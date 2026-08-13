@@ -1,4 +1,4 @@
-from apps.ingestion.src.core.models.task.status import ExecutionStatus
+from src.core.models.task.status import ExecutionStatus
 
 
 def test_status_terminal_properties():

@@ -2,9 +2,10 @@ from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pytest
-from apps.ingestion.src.core.models.stages.enums import Stage
-from apps.ingestion.src.core.models.stages.transform import TransformStage
-from apps.ingestion.src.utils.exceptions import RollbackRequired
+
+from src.core.models.stages.transform import TransformStage
+from src.core.stages.enums import Stage
+from src.utils.exceptions import RollbackRequired
 
 
 @pytest.fixture

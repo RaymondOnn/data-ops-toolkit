@@ -2,11 +2,11 @@
 
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
-from apps.ingestion.src.core.models.task import ExecutionStatus, TaskSignal
+from src.core.models.task import ExecutionStatus, TaskSignal
 
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.models.task import Task
-    from apps.ingestion.src.core.orchestrator.enums import TaskRecord
+    from src.core.models.task import Task
+    from src.core.orchestrator.enums import TaskRecord
 
 
 @runtime_checkable

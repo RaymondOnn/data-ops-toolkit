@@ -4,13 +4,14 @@ from unittest.mock import MagicMock
 
 import polars as pl
 import pytest
-from apps.ingestion.src.services.database.base import (
+from libs.database.clients.base import DBClient
+from libs.resilience.circuit_breaker import CircuitOpen
+
+from src.services.database.base import (
     DatabaseService,
     DatabaseSink,
     DatabaseSource,
 )
-from libs.database.clients.base import DBClient
-from libs.resilience.circuit_breaker import CircuitOpen
 
 
 # Mock DBClient for testing DatabaseService

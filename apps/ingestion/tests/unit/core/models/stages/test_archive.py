@@ -1,8 +1,9 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from apps.ingestion.src.core.models.stages.archive import ArchiveStage
-from apps.ingestion.src.core.models.stages.enums import Stage
+
+from src.core.models.stages.archive import ArchiveStage
+from src.core.stages.enums import Stage
 
 
 @pytest.fixture

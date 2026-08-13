@@ -1,129 +1,250 @@
 import logging
 import re
-from dataclasses import dataclass, field
-from typing import Any
+from collections.abc import Sequence
+from enum import StrEnum
+from pathlib import Path
+from typing import Any, TypeVar, Union
 
-import yaml
+import msgspec
+from msgspec import Struct, field
+
+from libs.utils.dict import deep_merge
+
+from .enums import JoinConfig, SelectQueryContext, SQLContext
+from .exceptions import ConfigurationValidationError, SQLCompilationError
+from .operations.base import COMPILE_FUNCTIONS, SQLOperation
 
 LOG = logging.getLogger(__name__)
+DB_TEMPLATE_DIR = Path(__file__).parent / "templates"
+
+T = TypeVar("T")
+Predicate = Union[  # noqa
+    str,
+    dict[str, Any],
+    tuple[str, str, Any],
+    tuple[str, Sequence[Any]],
+    tuple[str, str],
+]
 
 
-class SQLCompilationError(Exception):
-    """Raised when compilation fails due to mismatched syntax, missing keys, or type errors."""
-
-    pass
-
-
-class ConfigurationValidationError(Exception): ...
-
-
-@dataclass
-class DialectConfig:
-    name: str
-    quote_char: str = '"'
-    core: dict[str, str] = field(default_factory=dict)
-    types: dict[str, str] = field(default_factory=dict)
+class Dialect(StrEnum):
+    DEFAULT = "ansi"
+    CLICKHOUSE = "clickhouse"
+    POSTGRES = "postgres"
+    DUCKDB = "duckdb"
+    ORACLE = "oracle"
+    SNOWFLAKE = "snowflake"
 
 
-BASE_DIALECT_TEMPLATE: dict[str, Any] = {
-    "quote_char": '"',
-    "core": {
-        "drop_table": "DROP TABLE IF EXISTS {table};",
-        "create_table": "CREATE TABLE IF NOT EXISTS {table} ({col_types});",
-        "truncate": "TRUNCATE TABLE {table};",
-        "insert": "INSERT INTO {table} ({fields}) VALUES ({values});",
-    },
-    "types": {
-        "integer": "INT",
-        "string": "VARCHAR(255)",
-        "boolean": "BOOLEAN",
-        "datetime": "TIMESTAMP",
-        "decimal": "DECIMAL(38,9)",
-        "json": "TEXT",
-    },
-}
+class DialectTemplate(Struct):
+    identifiers: dict[str, Any] = field(default_factory=dict)
+    core: dict[str, Any] = field(default_factory=dict)
+    merge: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    analysis: dict[str, Any] = field(default_factory=dict)
+    function: dict[str, Any] = field(default_factory=dict)
+    general_type_map: dict[str, Any] = field(default_factory=dict)
+    native_type_map: dict[str, Any] = field(default_factory=dict)
 
-DIALECT_OVERLAYS = {
-    "postgres": {
-        "quote_char": '"',
-        "core": {
-            "upsert": "INSERT INTO {table} ({fields}) VALUES ({values}) ON CONFLICT ({pk}) DO UPDATE SET {set_values};"
-        },
-        "types": {
-            "integer": "BIGINT",
-            "json": "JSONB",
-            "datetime": "TIMESTAMP WITH TIME ZONE",
-        },
-    },
-    "snowflake": {
-        "quote_char": '"',
-        "core": {
-            "upsert": """MERGE INTO {table} AS tgt
-USING staging_{table} AS src
-ON tgt.{pk} = src.{pk}
-WHEN MATCHED THEN
-  UPDATE SET {set_values}
-WHEN NOT MATCHED THEN
-  INSERT ({fields}) VALUES ({src_fields});"""
-        },
-        "types": {
-            "integer": "NUMBER(38,0)",
-            "string": "VARCHAR(16777216)",
-            "datetime": "TIMESTAMP_TZ",
-            "json": "VARIANT",
-        },
-    },
-    "clickhouse": {
-        "quote_char": "`",
-        "core": {
-            "create_table": "CREATE TABLE IF NOT EXISTS {table} ({col_types}) ENGINE = MergeTree() ORDER BY tuple();",
-        },
-        "types": {
-            "integer": "Nullable(Int64)",
-            "string": "Nullable(String)",
-            "datetime": "Nullable(DateTime64(6, 'UTC'))",
-            "json": "Nullable(String)",
-        },
-    },
-}
+    @staticmethod
+    def read_yaml(path: str, type_: type[T] = dict) -> T:  # type: ignore
+        with Path(path).open("rb") as f:
+            return msgspec.yaml.decode(f.read(), type=type_)
+
+    @classmethod
+    def build(cls, dialect: Dialect, overrides: dict[str, Any] | None = None):
+        template_path = DB_TEMPLATE_DIR / f"{dialect.value}.yaml"
+        template_dict: dict[str, Any] = cls.read_yaml(path=str(template_path))
+        overrides = overrides or {}
+
+        if overrides:
+            LOG.info("Applying custom structural execution overrides.")
+            # Use deep_merge(base, updates) from source 5 to merge overrides over template_dict
+            resolved_dict = deep_merge(template_dict, overrides)
+        else:
+            resolved_dict = template_dict
+
+        return msgspec.convert(resolved_dict, cls)
 
 
-class SlingSQLCompiler:
+class SQLCompiler:
     def __init__(self, dialect: str, user_override: dict[str, Any] | None = None):
-        self.dialect_name = dialect.lower()
-        self.dialect = self._build_dialect(self.dialect_name, user_override)
-        LOG.info(f"Initialized compiler for dialect: '{self.dialect_name}'")
-
-    def _build_dialect(
-        self, dialect: str, user_override: dict[str, Any] | None
-    ) -> DialectConfig:
-        """Loads, merges, and overrides configuration layers down into a final DialectConfig."""
-        # 1. Base initialization
-        merged_core = BASE_DIALECT_TEMPLATE["core"].copy()
-        merged_types = BASE_DIALECT_TEMPLATE["types"].copy()
-        quote_char = BASE_DIALECT_TEMPLATE["quote_char"]
-
-        # 2. Layer Dialect Overrides
-        overlay = DIALECT_OVERLAYS.get(dialect)
-        if not overlay:
+        self.dialect = dialect
+        try:
+            self.dialect_enum = Dialect(dialect.casefold())
+        except Exception:
             LOG.warning(
                 f"Dialect '{dialect}' not officially registered. Using ANSI defaults."
             )
-            overlay = {}
+            self.dialect_enum = Dialect.DEFAULT
 
-        quote_char = overlay.get("quote_char", quote_char)
-        merged_core.update(overlay.get("core", {}))
-        merged_types.update(overlay.get("types", {}))
+        self.template = DialectTemplate.build(self.dialect_enum, user_override)
+        LOG.debug(f"Initialized compiler for dialect: '{self.dialect}'")
 
-        # 3. Layer Custom User-Supplied Run overrides
-        if user_override:
-            LOG.info("Applying custom structural execution overrides.")
-            quote_char = user_override.get("quote_char", quote_char)
-            merged_core.update(user_override.get("core", {}))
-            merged_types.update(user_override.get("types", {}))
+    def compile(self, operation: SQLOperation | str, **ops_kwargs: Any) -> str:
+        """Single entry-point that dispatches compilation to registered decorator handlers."""
+        compile_func = COMPILE_FUNCTIONS.get(operation)
+        if not compile_func:
+            raise SQLCompilationError(
+                f"Unsupported SQL operation '{operation}' for dialect '{self.dialect}'"
+            )
 
-        return DialectConfig(
-            name=dialect, quote_char=quote_char, core=merged_core, types=merged_types
+        LOG.debug(f"Compiling '{operation}' for dialect '{self.dialect}'")
+        return compile_func(compiler=self, **ops_kwargs)
+
+    def compile_expr(self, func_name: str, **kwargs: Any) -> str:
+        """
+        Parses and formats in-flight transformation function templates defined in YAML.
+
+        Example:
+            compiler.compile_expression("cast_to_date", val="created_at")
+            # Returns: "toDate('created_at')" (quoted per dialect rules)
+
+            compiler.compile_expression("hash_agg", fields=["id", "name"])
+            # Returns: "hex(groupBitXor(cityHash64('id', 'name')))"
+        """
+        expr_template = self.template.function.get(func_name)
+        if not expr_template:
+            raise SQLCompilationError(
+                f"Function template '{func_name}' is not defined for dialect '{self.dialect}'."
+            )
+
+        formatted_kwargs = {}
+        for key, val in kwargs.items():
+            if isinstance(val, list | tuple | set):
+                # Quote all items in column lists and join with commas
+                quoted_cols = [self.quote_identifier(str(col)) for col in val]
+                formatted_kwargs[key] = ", ".join(quoted_cols)
+            elif isinstance(val, str):
+                # Quote single column or field identifiers
+                formatted_kwargs[key] = self.quote_identifier(val)
+            else:
+                # Retain raw literals (e.g. integers, floats, standard defaults)
+                formatted_kwargs[key] = str(val)
+
+        try:
+            return expr_template.format(**formatted_kwargs)
+        except KeyError as e:
+            raise SQLCompilationError(
+                f"Missing required parameter {e} for function template '{func_name}' in dialect '{self.dialect}'"
+            ) from e
+
+    def _format_operand(self, val: Any) -> str:
+        """
+        Formats column identifiers or raw expressions for left-hand side operands.
+        Quotes standard column names while leaving raw functions/expressions intact.
+        """
+
+        def _is_raw_expr(expr: str) -> bool:
+            """Determines if a string is a raw SQL expression/function rather than a plain column name."""
+            return bool(re.search(r"[\(\)\%\+\-\/\*]|\s", expr))
+
+        if isinstance(val, str) and not _is_raw_expr(val):
+            return self.quote_identifier(val)
+        return str(val)
+
+    def compile_conditions(
+        self, conditions: Predicate | list[Predicate] | None, clause: str = "WHERE"
+    ) -> str:
+        """
+        Generic WHERE clause generator using Python structural pattern matching.
+        """
+        if not conditions:
+            return ""
+
+        if not isinstance(conditions, list):
+            conditions = [conditions]
+
+        compiled_fragments = []
+
+        for cond in conditions:
+            if not cond:
+                continue
+
+            match cond:
+                # 1. Raw SQL String
+                case str(raw_sql):
+                    compiled_fragments.append(raw_sql.strip())
+
+                # 2. Dictionary Conditions (Key-Value map or Raw Expression map)
+                case dict(mapping):
+                    eq_terms = []
+                    for k, v in mapping.items():
+                        lhs = self._format_operand(k)
+                        rhs = f"'{v}'" if isinstance(v, str) else str(v)
+                        eq_terms.append(f"{lhs} = {rhs}")
+                    compiled_fragments.append(" AND ".join(eq_terms))
+
+                # 3. Unary / Subquery Existential Predicates: ("NOT EXISTS", "SELECT ...")
+                case (str(op), str(subquery)) if op.upper().strip() in (
+                    "EXISTS",
+                    "NOT EXISTS",
+                ):
+                    inner_sql = subquery.strip().rstrip(";")
+                    compiled_fragments.append(f"{op.upper().strip()} ({inner_sql})")
+
+                # 4. Set / List IN / NOT IN Predicates: ("role", "IN", ["admin", "editor"])
+                case (
+                    col,
+                    str(op),
+                    (list() | tuple() | set()) as values,
+                ) if op.upper().strip() in ("IN", "NOT IN"):
+                    lhs = self._format_operand(col)
+                    formatted_vals = ", ".join(
+                        [f"'{v}'" if isinstance(v, str) else str(v) for v in values]
+                    )
+                    compiled_fragments.append(
+                        f"{lhs} {op.upper().strip()} ({formatted_vals})"
+                    )
+
+                # 5. Subquery IN / NOT IN Predicates: ("gender", "NOT IN", "SELECT ...")
+                case (col, str(op), str(subquery)) if op.upper().strip() in (
+                    "IN",
+                    "NOT IN",
+                ):
+                    lhs = self._format_operand(col)
+                    inner_sql = subquery.strip().rstrip(";")
+                    if not (inner_sql.startswith("(") and inner_sql.endswith(")")):
+                        inner_sql = f"({inner_sql})"
+                    compiled_fragments.append(f"{lhs} {op.upper().strip()} {inner_sql}")
+
+                # 6. Generic Binary Operators: ("age", ">=", 21) or ("status", "=", "ACTIVE")
+                case (col, str(op), val):
+                    lhs = self._format_operand(col)
+                    rhs = f"'{val}'" if isinstance(val, str) else str(val)
+                    compiled_fragments.append(f"{lhs} {op.upper().strip()} {rhs}")
+
+                case _:
+                    raise SQLCompilationError(
+                        f"Unsupported predicate structure in compile_conditions: {cond}"
+                    )
+
+        if not compiled_fragments:
+            return ""
+
+        joined = " AND ".join([f"({f})" for f in compiled_fragments])
+        return f"{clause} {joined}"
+
+    def _build_list_clause(self, keyword: str, items: list[str] | None) -> str:
+        """Formats list-based clauses like GROUP BY and ORDER BY."""
+        if not items:
+            return ""
+        formatted = [
+            (
+                item
+                if item.isdigit() or "(" in item or " " in item
+                else self.quote_identifier(item)
+            )
+            for item in items
+        ]
+        return f"{keyword} {', '.join(formatted)}"
+
+    def _build_joins(self, joins: list[JoinConfig] | None) -> str:
+        if not joins:
+            return ""
+        return "\n".join(
+            f"{j.type.value.upper()} JOIN {self.quote_identifier(j.to_table)} ON {j.on}"
+            for j in joins
         )
 
     def quote_identifier(self, identifier: str) -> str:
@@ -133,17 +254,63 @@ class SlingSQLCompiler:
         if not identifier:
             return ""
 
+        if identifier.strip() == "*":
+            return "*"
+
         # Regex check to avoid double-wrapping already quoted fields
-        q = self.dialect.quote_char
+        q_open = self.template.identifiers.get("quote_open")
+        q_close = self.template.identifiers.get("quote_close")
         parts = identifier.split(".")
         quoted_parts = []
         for part in parts:
             cleaned_part = part.strip()
-            if cleaned_part.startswith(q) and cleaned_part.endswith(q):
+            if cleaned_part.startswith(q_open) and cleaned_part.endswith(q_close):
                 quoted_parts.append(cleaned_part)
             else:
-                quoted_parts.append(f"{q}{cleaned_part}{q}")
+                quoted_parts.append(f"{q_open}{cleaned_part}{q_close}")
         return ".".join(quoted_parts)
+
+    def validate_identifier(self, identifier: str) -> dict[str, Any] | None:
+        """
+        Parses and validates table identifiers based on target platform rules.
+        Handles escaping and quotes dynamically.
+        """
+        rule = self.template.identifiers
+
+        # Regex split by dots while ignoring dots inside quotes (e.g., "PROD.DB"."SCHEMA"."TABLE")
+        parts = re.split(r'\.(?=(?:[^"]*"[^"]*")*[^"]*$)', identifier)
+
+        # parts = next(csv.reader([identifier], delimiter='.'))
+        part_count = len(parts)
+
+        if part_count not in rule["allowed_depths"]:
+            raise ConfigurationValidationError(
+                f"Invalid target object name '{identifier}' for {self.dialect.upper()}. "
+                f"Expected format: '{rule['naming_structure']}' ({rule['expected_parts']} parts), "
+                f"but found {part_count} parts instead."
+            )
+
+        # Base structure matching the database hierarchy order
+        keys = ["database", "schema", "table"]
+
+        if self.dialect == "oracle":
+            # Oracle strictly expects: SCHEMA.TABLE (pad with None if missing elements)
+            padded_parts = ([*parts, None, None])[:2]
+            return {
+                "database": None,
+                "schema": padded_parts[0],
+                "table": padded_parts[1],
+            }
+
+        # For other databases, slice keys from the right based on how many parts we have
+        # e.g., if len is 1 -> ['table'], if len is 2 -> ['schema', 'table']
+        active_keys = keys[-len(parts) :] if len(parts) <= 3 else keys
+
+        # Zip them together into a dictionary, defaulting missing keys to None
+        components = dict.fromkeys(keys)
+        components.update(zip(active_keys, parts[-3:], strict=False))
+
+        return components
 
     def _map_generic_type(self, raw_type: str) -> str:
         """Maps an generic pipeline data type configuration to its physical target counterpart."""
@@ -152,7 +319,7 @@ class SlingSQLCompiler:
             raise SQLCompilationError("Encountered empty column type declaration.")
 
         generic_base = tokens[0].lower()
-        native_type = self.dialect.types.get(generic_base)
+        native_type = self.template.types.get(generic_base)
 
         if not native_type:
             LOG.warning(
@@ -164,7 +331,7 @@ class SlingSQLCompiler:
         modifiers = []
         full_declaration = " ".join(tokens[1:]).lower()
 
-        if "primary key" in full_declaration and self.dialect_name in [
+        if "primary key" in full_declaration and self.dialect in [
             "postgres",
             "snowflake",
         ]:
@@ -176,225 +343,123 @@ class SlingSQLCompiler:
 
         return f"{native_type} {' '.join(modifiers)}".strip()
 
-    def compile_create_table(
-        self, table_name: str, schema_columns: dict[str, str]
-    ) -> str:
-        """Constructs a clean DDL CREATE TABLE statement based on schema definitions."""
-        if not schema_columns:
+    # def validate_replication(self) -> list[str]:
+    #     """Validates all configured streams in the loaded YAML definition."""
+    #     errors = []
+    #     streams = self.config.get("streams", {})
+
+    #     logger_target = self.target_type.upper()
+    #     print(
+    #         f"Executing Stream Validation Suite for Target Engine: {logger_target}\n"
+    #         + "-" * 50
+    #     )
+
+    #     for stream_name, stream_config in streams.items():
+    #         target_object = stream_config.get("object")
+    #         if not target_object:
+    #             continue
+
+    #         try:
+    #             parsed_metadata = self.validate_identifier(target_object)
+    #             print(
+    #                 f"✓ '{stream_name}' -> '{target_object}' is VALID for {logger_target}."
+    #             )
+    #             print(f"   Parsed Hierarchy: {parsed_metadata}")
+    #         except ConfigurationValidationError as e:
+    #             errors.append(str(e))
+    #             print(f"✗ VALIDATION FAILURE: {e}")
+
+    #     return errors
+
+    def compile_select_block(self, block: SelectQueryContext) -> str:
+        """
+        Compiles a single SelectQueryContext into a valid SQL SELECT statement.
+
+        If `sql` is provided alongside other clause fields (e.g. select, where, group_by),
+        the `sql` block is wrapped as a FROM subquery.
+        """
+        # 0. Validation: Ensure a source (from_table or sql) is provided
+        if not block.from_table and not block.sql:
+            block_identifier = (
+                f"CTE '{block.name}'" if block.name else "Main query block"
+            )
             raise SQLCompilationError(
-                "Cannot compile CREATE TABLE without column fields."
+                f"{block_identifier} must specify either 'from_table' or 'sql'."
             )
 
-        quoted_table = self.quote_identifier(table_name)
-        col_declarations = []
+        # 1. Pure raw SQL override (no additional clauses or from_table specified)
+        if block.sql and not block.has_clauses and not block.from_table:
+            return block.sql.strip().rstrip(";")
 
-        for column, type_expr in schema_columns.items():
-            quoted_col = self.quote_identifier(column)
-            native_type_declaration = self._map_generic_type(type_expr)
-            col_declarations.append(f"{quoted_col} {native_type_declaration}")
-
-        col_types_str = ", ".join(col_declarations)
-
-        template = self.dialect.core.get("create_table")
-        if not template:
-            raise SQLCompilationError(
-                f"No CREATE TABLE template configured for dialect '{self.dialect_name}'"
+        # 2. SELECT & FROM definitions
+        cols = (
+            ", ".join(
+                c if "(" in c or " " in c else self.quote_identifier(c)
+                for c in block.select
             )
-
-        return template.format(table=quoted_table, col_types=col_types_str)
-
-    def compile_upsert(
-        self, table_name: str, schema_columns: dict[str, str], primary_key: str
-    ) -> str:
-        """Constructs highly-optimized target upsert routines based on dialect syntax rules."""
-        if primary_key not in schema_columns:
-            raise SQLCompilationError(
-                f"Specified primary key '{primary_key}' must exist in columns schema map."
-            )
-
-        quoted_table = self.quote_identifier(table_name)
-        quoted_pk = self.quote_identifier(primary_key)
-
-        fields = [self.quote_identifier(col) for col in schema_columns]
-        fields_str = ", ".join(fields)
-
-        # Build parameterized placeholder bindings (e.g., :column_name)
-        value_bindings = [f":{col}" for col in schema_columns]
-        values_str = ", ".join(value_bindings)
-
-        # Build set allocations
-        set_statements = []
-        for col in schema_columns:
-            if col == primary_key:
-                continue
-            quoted_col = self.quote_identifier(col)
-            if self.dialect_name == "snowflake":
-                set_statements.append(f"tgt.{quoted_col} = src.{quoted_col}")
-            else:
-                set_statements.append(f"{quoted_col} = EXCLUDED.{quoted_col}")
-
-        set_values_str = ", ".join(set_statements)
-        src_fields_str = ", ".join([f"src.{f}" for f in fields])
-
-        template = self.dialect.core.get("upsert")
-        if not template:
-            raise SQLCompilationError(
-                f"Upsert routine is not supported dynamically on '{self.dialect_name}' driver."
-            )
-
-        # Clean formatting interpolation
-        return template.format(
-            table=quoted_table,
-            fields=fields_str,
-            values=values_str,
-            src_fields=src_fields_str,
-            pk=quoted_pk,
-            set_values=set_values_str,
+            if block.select
+            else "*"
         )
 
-
-DB_HIERARCHY_RULES = {
-    "oracle": {
-        "expected_parts": 2,
-        "naming_structure": "SCHEMA.TABLE",
-        "allowed_depths": [2],  # Oracle ignores "database" in qualified paths
-    },
-    "mysql": {
-        "expected_parts": 2,
-        "naming_structure": "DATABASE.TABLE",  # MySQL uses database and schema interchangeably
-        "allowed_depths": [2],
-    },
-    "postgres": {
-        "expected_parts": 2,
-        "naming_structure": "[SCHEMA.]TABLE",  # Can resolve default database
-        "allowed_depths": [1, 2, 3],
-    },
-    "snowflake": {
-        "expected_parts": 3,
-        "naming_structure": "[DATABASE.][SCHEMA.]TABLE",
-        "allowed_depths": [1, 2, 3],
-    },
-}
-
-
-class ConfigValidator:
-    def __init__(self, raw_yaml_config: str):
-        self.config = yaml.safe_load(raw_yaml_config)
-        self.target_type = self._resolve_target_type()
-
-    def _resolve_target_type(self) -> str:
-        """Looks up target connection rules to discover the system type (e.g., oracle)."""
-        connections = self.config.get("connections", {})
-        # Let's assume we target the first connection for replication target validation
-        for _, conn_details in connections.items():
-            if "type" in conn_details:
-                return conn_details["type"].lower()
-        return "postgres"  # Standard default fallback
-
-    def validate_identifier(self, identifier: str) -> dict[str, str]:
-        """
-        Parses and validates table identifiers based on target platform rules.
-        Handles escaping and quotes dynamically.
-        """
-        rule = DB_HIERARCHY_RULES.get(self.target_type)
-        if not rule:
-            # Fallback to standard ANSI defaults if database driver isn't registered
-            rule = {
-                "expected_parts": 2,
-                "allowed_depths": [1, 2, 3],
-                "naming_structure": "SCHEMA.TABLE",
-            }
-
-        # Regex split by dots while ignoring dots inside quotes (e.g., "PROD.DB"."SCHEMA"."TABLE")
-        parts = re.split(r'\.(?=(?:[^"]*"[^"]*")*[^"]*$)', identifier)
-        part_count = len(parts)
-
-        if part_count not in rule["allowed_depths"]:
-            raise ConfigurationValidationError(
-                f"Invalid target object name '{identifier}' for {self.target_type.upper()}. "
-                f"Expected format: '{rule['naming_structure']}' ({rule['expected_parts']} parts), "
-                f"but found {part_count} parts instead."
+        if block.sql:
+            alias = (
+                self.quote_identifier(block.from_table)
+                if block.from_table
+                else "_subquery"
             )
-
-        # Map components cleanly based on found depth
-        components = {"database": None, "schema": None, "table": None}
-
-        if self.target_type == "oracle":
-            # Oracle strictly expects: SCHEMA.TABLE
-            components["schema"] = parts[0]
-            components["table"] = parts[1]
-        elif part_count == 3:
-            components["database"] = parts[0]
-            components["schema"] = parts[1]
-            components["table"] = parts[2]
-        elif part_count == 2:
-            components["schema"] = parts[0]
-            components["table"] = parts[1]
+            from_clause = f"FROM ({block.sql.strip().rstrip(';')}) AS {alias}"
+        elif block.from_table:
+            from_clause = f"FROM {self.quote_identifier(block.from_table)}"
         else:
-            components["table"] = parts[0]
+            from_clause = ""
 
-        return components
+        # 3. Declarative rendering pipeline
+        pipeline = [
+            f"SELECT {cols}",
+            from_clause,
+            self._build_joins(block.joins),
+            self.compile_conditions(block.where, clause="WHERE"),
+            self._build_list_clause("GROUP BY", block.group_by),
+            self.compile_conditions(block.having, clause="HAVING"),
+            self.compile_conditions(block.qualify, clause="QUALIFY"),
+            self._build_list_clause("ORDER BY", block.order_by),
+            f"LIMIT {block.limit}" if block.limit is not None else "",
+        ]
 
-    def validate_replication(self) -> list[str]:
-        """Validates all configured streams in the loaded YAML definition."""
-        errors = []
-        streams = self.config.get("streams", {})
+        # Join non-empty string fragments
+        return "\n".join(part for part in pipeline if part)
 
-        logger_target = self.target_type.upper()
-        print(
-            f"Executing Stream Validation Suite for Target Engine: {logger_target}\n"
-            + "-" * 50
-        )
+    def compile_context(self, ctx: SQLContext) -> str:
+        """Compiles a complete SQLContext (including CTEs and main query) into a final SQL string."""
+        # 1. Top-level raw SQL override
+        if ctx.sql:
+            return ctx.sql.strip().rstrip(";")
 
-        for stream_name, stream_config in streams.items():
-            target_object = stream_config.get("object")
-            if not target_object:
-                continue
-
-            try:
-                parsed_metadata = self.validate_identifier(target_object)
-                print(
-                    f"✓ '{stream_name}' -> '{target_object}' is VALID for {logger_target}."
+        # 2. Compile CTEs
+        cte_sql_parts = []
+        for cte in ctx.ctes:
+            if not cte.name:
+                raise SQLCompilationError(
+                    "Every CTE block in 'ctes' must specify a 'name'."
                 )
-                print(f"   Parsed Hierarchy: {parsed_metadata}")
-            except ConfigurationValidationError as e:
-                errors.append(str(e))
-                print(f"✗ VALIDATION FAILURE: {e}")
+            block_sql = self.compile_select_block(cte)
+            cte_sql_parts.append(
+                f"{self.quote_identifier(cte.name)} AS (\n{block_sql}\n)"
+            )
 
-        return errors
+        with_clause = ""
+        if cte_sql_parts:
+            with_clause = "WITH " + ",\n".join(cte_sql_parts) + "\n"
 
+        # 3. Compile Main Query Block
+        if ctx.main:
+            main_sql = self.compile_select_block(ctx.main)
+        elif ctx.ctes and (last_cte_name := ctx.ctes[-1].name):
+            # Default main query to selecting everything from the last CTE
+            main_sql = f"SELECT * FROM {self.quote_identifier(last_cte_name)}"
+        else:
+            raise SQLCompilationError(
+                "SQLContext must contain either 'ctes', 'main', or 'sql'."
+            )
 
-def validate_fully_qualified_table(object_name: str, expected_parts: int = 3) -> dict:
-    """
-    Validates if a table name is fully qualified.
-    expected_parts = 2 for 'schema.table'
-    expected_parts = 3 for 'database.schema.table'
-    """
-    # Split by dot, ignoring escaped dots (e.g., "my.database"."my.schema"."table")
-    parts = re.split(r'\.(?=(?:[^"]*"[^"]*")*[^"]*$)', object_name)
-
-    if len(parts) < expected_parts:
-        raise ValueError(
-            f"Table name '{object_name}' is not fully qualified. "
-            f"Expected {expected_parts} parts, but got {len(parts)}."
-        )
-
-    return {
-        "database": parts[0] if len(parts) == 3 else None,
-        "schema": parts[1] if len(parts) == 3 else parts[0],
-        "table": parts[-1],
-    }
-
-
-# Example Usage:
-try:
-    # Will pass for 3-part target
-    parsed = validate_fully_qualified_table(
-        "dw_prod.analytics.orders", expected_parts=3
-    )
-    print("Valid:", parsed)
-
-    # Will raise ValueError
-    validate_fully_qualified_table("orders", expected_parts=2)
-except ValueError as e:
-    print("Validation Failed:", e)
+        return f"{with_clause}{main_sql}"

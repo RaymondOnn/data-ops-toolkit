@@ -2,11 +2,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import ray
-from apps.ingestion.src.core.models.task import ExecutionStatus, TaskSignal
-from apps.ingestion.src.core.orchestrator.contracts.policies.manager import (
+
+from src.core.models.task import ExecutionStatus, TaskSignal
+from src.core.orchestrator.contracts.policies.manager import (
     MaintenancePolicy,
 )
-from apps.ingestion.src.core.orchestrator.enums import TaskMetadata
+from src.core.orchestrator.enums import TaskMetadata
 
 
 class MockMaintenancePolicy(MaintenancePolicy):
@@ -83,7 +84,7 @@ class TestMaintenancePolicy:
 
         # Setup Task
         mock_task = mock_task_cls.return_value
-        mock_task.context.from_stage = "EXTRACT"
+        mock_task.context.from_step = "EXTRACT"
 
         # Execute
         policy._recover_task(key, cache, lock, active_tasks, compute, exec_ctx)

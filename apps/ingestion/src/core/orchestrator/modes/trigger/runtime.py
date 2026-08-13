@@ -4,13 +4,14 @@ import contextlib
 import time
 from typing import TYPE_CHECKING, Any
 
-from apps.ingestion.src.core.contexts.execution import ExecutionContext
-from apps.ingestion.src.core.models.task import ExecutionStatus
-from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE
 from loguru import logger
 
+from src.core.contexts.execution import ExecutionContext
+from src.core.models.task import ExecutionStatus
+from src.utils.constants import CACHE_TASK_NAMESPACE
+
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.orchestrator.common.orchestrator import Orchestrator
+    from src.core.orchestrator.common.orchestrator import Orchestrator
 
 LOG = logger
 
@@ -102,8 +103,8 @@ class TriggerRuntime:
         2. Database registry (final state)
         3. Default to SUCCESS (cleanup)
         """
-        from apps.ingestion.src.core.models.task.enums import TaskIdentity
-        from apps.ingestion.src.core.orchestrator.enums import TaskRef
+        from src.core.models.task.enums import TaskIdentity
+        from src.core.orchestrator.enums import TaskRef
 
         identity = TaskIdentity(
             job_id=job_id,

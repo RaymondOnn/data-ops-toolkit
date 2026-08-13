@@ -4,16 +4,17 @@ import time
 from typing import TYPE_CHECKING, Any
 
 import ray
-from apps.ingestion.src.core.models.task.status import ExecutionStatus
-from apps.ingestion.src.utils.common import find_path
-from apps.ingestion.src.utils.constants import MANIFEST_FILENAME, STRIP_TZ_FOR_DB
 from libs.utils.dates import current_timestamp, parse_timestamp
 from loguru import logger
+
+from src.core.models.task.status import ExecutionStatus
+from src.utils.common import find_path
+from src.utils.constants import MANIFEST_FILENAME, STRIP_TZ_FOR_DB
 
 from .base import DetectedState
 
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.orchestrator.enums import TaskRecord
+    from src.core.orchestrator.enums import TaskRecord
 
 LOG = logger
 

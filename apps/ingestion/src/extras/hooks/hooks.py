@@ -1,9 +1,10 @@
 import shutil
 from typing import TYPE_CHECKING, Any
 
-from apps.ingestion.src.services.factory import ServiceFactory
 from loguru import logger
 from upath import UPath
+
+from src.services.factory import ServiceFactory
 
 from .enums import HookAction, HookType
 
@@ -26,7 +27,7 @@ def resolve_src_paths(src_raw: str, active_src: Any | None) -> list[str]:
             return active_src.glob(src_raw, recursive=True)
 
         resolved_src = active_src.resolve(src_raw)
-        if active_src.fs.isfile(resolved_src):
+        if active_src.is_file(resolved_src):
             return [src_raw]
         if active_src.fs.isdir(resolved_src):
             return active_src.glob(f"{src_raw.rstrip('/')}/**/*", recursive=True)
@@ -85,7 +86,7 @@ def _run_http(runner: "HookRunner", action: "HookAction", **kwargs):
     payload = {
         "job_id": runner.task.job_id,
         "run_id": runner.task.run_id,
-        "stage": runner.task.target_stage,
+        "step": runner.task.target_step_id,
         "partition_date": runner.task.partition_date,
     }
     resp = niquests.post(action.url, json=payload, timeout=action.timeout_seconds)
@@ -134,12 +135,12 @@ def _run_copy(runner: "HookRunner", action: "HookAction", **kwargs):
     dst_raw = action.to_path.format(**runner._template_vars)
 
     src_client = (
-        ServiceFactory.get(**action.from_connection).client
+        ServiceFactory.get(**action.from_connection).connector
         if action.from_connection
         else None
     )
     dst_client = (
-        ServiceFactory.get(**action.to_connection).client
+        ServiceFactory.get(**action.to_connection).connector
         if action.to_connection
         else None
     )
@@ -161,7 +162,7 @@ def _run_copy(runner: "HookRunner", action: "HookAction", **kwargs):
             src_item_upath = UPath(src_path)
 
             is_file = (
-                active_src.fs.isfile(active_src.resolve(src_path))
+                active_src.is_file(active_src.resolve(src_path))
                 if active_src
                 else src_item_upath.is_file()
             )
@@ -187,8 +188,10 @@ def _run_copy(runner: "HookRunner", action: "HookAction", **kwargs):
                     shutil.copytree(
                         str(src_item_upath), str(local_dst), dirs_exist_ok=True
                     )
-
-        LOG.success(f"Copied {len(src_paths)} item(s) → '{dst_raw}'")
+        if len(src_paths) == 1:
+            LOG.success(f"Copied '{src_paths}' → '{dst_raw}'")
+        else:
+            LOG.success(f"Copied {len(src_paths)} item(s) → '{dst_raw}'")
     except Exception:
         LOG.exception(f"Failed to copy files from: {src_raw} -> {dst_raw}")
         raise
@@ -239,7 +242,7 @@ def _run_delete(runner: "HookRunner", action: "HookAction", **kwargs):
 
     loc_raw = action.location.format(**runner._template_vars)
     client = (
-        ServiceFactory.get(**action.connection).client if action.connection else None
+        ServiceFactory.get(**action.connection).connector if action.connection else None
     )
 
     is_directory_target = loc_raw.endswith("/") or (

@@ -1,11 +1,12 @@
 from typing import Any, Protocol, runtime_checkable
 
 import ray
-from apps.ingestion.src.core.contexts.execution import ExecutionContext
-from apps.ingestion.src.core.orchestrator.common.task.cache import TaskCache
-from apps.ingestion.src.core.orchestrator.common.task.compute import Compute
-from apps.ingestion.src.core.orchestrator.enums import TaskMetadata
 from loguru import logger
+
+from src.core.contexts.execution import ExecutionContext
+from src.core.orchestrator.common.task.cache import TaskCache
+from src.core.orchestrator.common.task.compute import Compute
+from src.core.orchestrator.enums import TaskMetadata
 
 LOG = logger
 

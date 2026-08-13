@@ -7,13 +7,14 @@ from typing import Any
 
 import msgspec
 import ray
-from apps.ingestion.src.core.contexts.execution import ExecutionContext
-from apps.ingestion.src.services.database import DatabaseSink
-from apps.ingestion.src.services.factory import ServiceFactory
-from apps.ingestion.src.utils.constants import APP_CONFIG_ROOT
 from libs.network import NetworkDoctor
 from libs.utils.system import get_disk_usage
 from loguru import logger
+
+from src.core.contexts.execution import ExecutionContext
+from src.services.database import DatabaseSink
+from src.services.factory import ServiceFactory
+from src.utils.constants import APP_CONFIG_ROOT
 
 LOG = logger
 

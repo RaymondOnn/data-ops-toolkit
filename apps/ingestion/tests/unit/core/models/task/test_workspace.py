@@ -1,8 +1,9 @@
 from pathlib import Path
 
 import pytest
-from apps.ingestion.src.core.models.task.status import ExecutionStatus
-from apps.ingestion.src.core.models.task.workspace import TaskWorkspace
+
+from src.core.models.task.status import ExecutionStatus
+from src.core.models.task.workspace import TaskWorkspace
 
 
 @pytest.fixture

@@ -6,20 +6,21 @@ import os
 import subprocess
 
 import ray
-from apps.ingestion.src.core.contexts import ExecutionContext
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task
-from apps.ingestion.src.core.monitor import ServiceMonitor
-from apps.ingestion.src.core.orchestrator.common.timeout import (
-    TimeoutContext,
-    TimeoutMonitor,
-)
-from apps.ingestion.src.core.orchestrator.enums import TaskMetadata, TaskRef
-from apps.ingestion.src.services.factory import ServiceFactory
-from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE
 from libs.utils.exceptions import (
     install_exception_hooks,
 )
 from loguru import logger
+
+from src.core.contexts import ExecutionContext
+from src.core.models.task import ExecutionStatus, Task
+from src.core.orchestrator.common.timeout import (
+    TimeoutContext,
+    TimeoutMonitor,
+)
+from src.core.orchestrator.enums import TaskMetadata, TaskRef
+from src.services.factory import ServiceFactory
+from src.services.health.monitor import ServiceMonitor
+from src.utils.constants import CACHE_TASK_NAMESPACE
 
 from .cache import TaskCache
 from .queue import TaskQueue
@@ -91,7 +92,7 @@ class Executor:
         LOG.trace(
             "[DISPATCH] execute start",
             run_id=task_ref.identity.run_id,
-            stage=task_ref.stage,
+            step_id=task_ref.step_id,
             cache_key=cache_key,
         )
         metadata = self.cache.get(cache_key)
@@ -125,21 +126,21 @@ class Executor:
                     )
                     self._run_via_pex(task, metadata, t_ctx)
                 else:
-                    LOG.trace("[DISPATCH] execute direct", stage=task_ref.stage)
+                    LOG.trace("[DISPATCH] execute direct", step=task_ref.step_id)
                     task.stage.pre_flight(task)
                     task.execute()
 
                 LOG.trace(
                     "[DISPATCH] execute stage completed",
                     run_id=task_ref.identity.run_id,
-                    stage=task_ref.stage,
+                    step=task_ref.step_id,
                 )
 
         except Exception:
             LOG.exception(
                 "Failed to execute stage",
                 run_id=task_ref.identity.run_id,
-                stage=task_ref.stage,
+                step=task_ref.step_id,
             )
             raise
         finally:
@@ -191,14 +192,14 @@ class Executor:
             metadata.job_id,
             "--dataset",
             metadata.dataset_id,
-            "--stage",
-            task.task_ref.stage,
+            "--step-id",
+            task.task_ref.step_id,
         ]
 
         timeout_secs = timeout_context.get_remaining() if timeout_context else None
 
         try:
-            # FIX: Capture stdout and stderr to stream them through our logging session[cite: 10]
+            # Capture stdout and stderr to stream them through our logging session
             process = subprocess.Popen(
                 cmd,
                 env=env,
@@ -211,6 +212,9 @@ class Executor:
             # Read streams concurrently without blocking
             # (In production, a select loop or thread reader is preferred to avoid deadlocks)
             while True:
+                if process.stdout is None:
+                    break
+
                 output = process.stdout.readline()
                 if output == "" and process.poll() is not None:
                     break
@@ -219,8 +223,9 @@ class Executor:
 
             rc = process.wait(timeout=timeout_secs)
             if rc != 0:
-                stderr_err = process.stderr.read()
-                LOG.error(f"[PEX-STDERR] {stderr_err.strip()}")
+                if process.stderr:
+                    stderr_err = process.stderr.read()
+                    LOG.error(f"[PEX-STDERR] {stderr_err.strip()}")
                 raise subprocess.CalledProcessError(
                     rc, cmd, output=output, stderr=stderr_err
                 )

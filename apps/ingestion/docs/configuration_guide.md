@@ -9,7 +9,7 @@ job_id: "sales_sync"
 dataset_id: "daily_orders"
 
 # Optional: Stop execution after a specific stage (e.g., stop after 'write')
-# to_stage: "write"
+# to_step: "write"
 
 extract:
   type: "s3"

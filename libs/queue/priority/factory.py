@@ -66,6 +66,6 @@ class QueueFactory:
         for queue in cls._queues.values():
             try:
                 queue.cleanup()
-            except Exception as e:
-                LOG.error(f"Error cleaning up queue: {e}")
+            except Exception:
+                LOG.exception("Error cleaning up queue")
         cls._queues.clear()

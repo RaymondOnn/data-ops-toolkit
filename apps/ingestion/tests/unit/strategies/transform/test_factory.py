@@ -1,5 +1,6 @@
 import pytest
-from apps.ingestion.src.core.strategies.transform.factory import TransformFactory
+
+from src.core.strategies.transform.factory import TransformFactory
 
 
 def test_factory_get_transformer_success():

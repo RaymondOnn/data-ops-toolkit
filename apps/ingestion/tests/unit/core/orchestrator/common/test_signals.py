@@ -1,8 +1,9 @@
 from unittest.mock import MagicMock
 
 import pytest
-from apps.ingestion.src.core.models.task.enums import TaskIdentity
-from apps.ingestion.src.core.orchestrator.common.signals import (
+
+from src.core.models.task.enums import TaskIdentity
+from src.core.orchestrator.common.signals import (
     SignalEvent,
     SignalProcessor,
 )

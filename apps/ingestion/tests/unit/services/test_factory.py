@@ -1,9 +1,10 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from apps.ingestion.src.services.base import Source
-from apps.ingestion.src.services.factory import ServiceFactory, ServiceNotFound
 from libs.auth.secret import Secret
+
+from src.services.base import Source
+from src.services.factory import ServiceFactory, ServiceNotFound
 
 
 class TestServiceFactory:

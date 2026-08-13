@@ -2,18 +2,21 @@
 
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Self
 
 import msgspec
-from apps.ingestion.src.core.models.task.enums import TaskRef
-from apps.ingestion.src.core.models.task.status import ExecutionStatus
-from apps.ingestion.src.core.orchestrator.common.timeout import TimeoutState
-from apps.ingestion.src.utils.constants import (
+from libs.utils.dates import parse_timestamp
+from loguru import logger
+
+from src.core.models.task.enums import TaskRef
+from src.core.models.task.status import ExecutionStatus
+from src.core.orchestrator.common.timeout import TimeoutState
+from src.core.stages.enums import Stage
+from src.utils.constants import (
     CACHE_TASK_NAMESPACE,
     STRIP_TZ_FOR_DB,
 )
-from libs.utils.dates import parse_timestamp
-from loguru import logger
 
 LOG = logger
 
@@ -57,7 +60,7 @@ class TaskMetadata(msgspec.Struct):
     dataset_id: str
     partition_date: str
     config_file: str
-    current_stage: str
+    current_step_id: str
     status: str = "WAITING"
     last_hb: float = msgspec.field(default_factory=time.time)
     next_attempt_ts: str | None = None
@@ -80,19 +83,19 @@ class TaskMetadata(msgspec.Struct):
             partition_date=ref.identity.partition_date,
             status=ref.status.value,
             config_file=config_file,
-            current_stage=ref.stage,
+            current_step_id=ref.step_id,
             last_hb=time.time(),
             expires_at=expires_at,
         )
 
     def to_ref(self) -> TaskRef:
         """Convert back to TaskRef."""
-        from apps.ingestion.src.core.models.task.enums import TaskIdentity
+        from src.core.models.task.enums import TaskIdentity
 
         return TaskRef(
             namespace=CACHE_TASK_NAMESPACE,
             status=ExecutionStatus(self.status),
-            stage=self.current_stage,
+            step_id=self.current_step_id,
             identity=TaskIdentity(
                 job_id=self.job_id,
                 dataset_id=self.dataset_id,
@@ -104,7 +107,7 @@ class TaskMetadata(msgspec.Struct):
     def generate_cache_key(self, status_override: ExecutionStatus | None = None) -> str:
         """Centralizes key construction logic so it never leaks into business loops."""
         status_val = status_override.value if status_override else self.status
-        return self.to_ref().build(status=status_val, stage=self.current_stage)
+        return self.to_ref().build(status=status_val, step_id=self.current_step_id)
 
     @classmethod
     def from_raw_cache(cls, raw_data: Any) -> Self:
@@ -112,6 +115,26 @@ class TaskMetadata(msgspec.Struct):
         if isinstance(raw_data, dict):
             return msgspec.convert(raw_data, type=cls)
         return msgspec.json.decode(raw_data, type=cls)
+
+    def _get_task_context(self):
+        from src.core.contexts.task import load_context
+
+        return load_context(Path(self.config_file).parent)
+
+    @property
+    def current_step(self):
+        ctx = self._get_task_context()
+        return ctx.get_step(self.current_step_id)
+
+    @property
+    def current_stage(self) -> str:
+        """Helper to resolve stage on-the-fly."""
+        if self.current_step_id == "start":
+            return Stage.START.value
+        if context := self._get_task_context():
+            return context.resolve_stage(self.current_step_id)
+        # Fallback if context isn't loaded yet
+        return Stage.START.value
 
 
 # =============================================================================
@@ -131,13 +154,13 @@ class TaskUpdate(msgspec.Struct, kw_only=True):
     SCHEDULED_TIMESTAMP_LC: str | None = None
     START_TIMESTAMP_LC: str | None = None
     END_TIMESTAMP_LC: str | None = None
-    CURRENT_STAGE: str | None = None
-    JOB_BITMASK: str | None = None
+    CURRENT_STEP: str | None = None
+    PROGRESS: str | None = None
     IS_SCHEDULED: int = 1
     ERRORS: dict[str, str] | None = None
     RUNTIME_OVERRIDES: dict[str, Any] | None = None
     RETRY_ATTEMPTS: int = 0
-    SOURCE_ROW_COUNT: int | None = None
+    SOURCE_ROW_COUNT: str | None = None
     FINAL_ROW_COUNT: int | None = None
     FINAL_MANIFEST: str | None = None
     REMARKS: str | None = None
@@ -145,8 +168,8 @@ class TaskUpdate(msgspec.Struct, kw_only=True):
     def __post_init__(self) -> None:
         """Normalize timestamps and stage names."""
         # Normalize stage
-        if self.CURRENT_STAGE:
-            super().__setattr__("CURRENT_STAGE", self.CURRENT_STAGE.upper())
+        if self.CURRENT_STEP:
+            super().__setattr__("CURRENT_STEP", self.CURRENT_STEP.upper())
 
         # Normalize timestamp fields
         for field in self.__struct_fields__:
@@ -187,7 +210,7 @@ class TaskRecord(msgspec.Struct, kw_only=True):
     START_TIMESTAMP_LC: datetime | None = None
     END_TIMESTAMP_LC: datetime | None = None
     LAST_UPDATED_AT_TS_LC: datetime | None = None
-    CURRENT_STAGE: str | None = None
+    CURRENT_STEP: str | None = None
     JOB_BITMASK: str | None = None
     IS_SCHEDULED: int = 0
     ERRORS: dict[str, str] | None = None
@@ -201,7 +224,7 @@ class TaskRecord(msgspec.Struct, kw_only=True):
         if not self.JOB_ID or not self.DATASET_ID:
             raise ValueError(f"Invalid TaskRecord: missing IDs for {self}")
 
-        for field in ("CURRENT_STAGE", "JOB_STATUS"):
+        for field in ("CURRENT_STEP", "JOB_STATUS"):
             val = getattr(self, field, None)
             if isinstance(val, str):
                 super().__setattr__(field, val.upper())

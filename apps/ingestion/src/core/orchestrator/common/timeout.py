@@ -5,14 +5,15 @@ import time
 from typing import TYPE_CHECKING, Any
 
 import msgspec
-from apps.ingestion.src.core.models.stages.enums import ALL_STAGES
-from apps.ingestion.src.services.factory import ServiceFactory
 from libs.resilience.timeout import TimeoutManager
 from loguru import logger
 
+from src.core.stages.enums import ALL_STAGES
+from src.services.factory import ServiceFactory
+
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.models.task import TaskRef
-    from apps.ingestion.src.core.orchestrator.enums import TaskMetadata
+    from src.core.models.task import TaskRef
+    from src.core.orchestrator.enums import TaskMetadata
 
 LOG = logger
 
@@ -330,26 +331,29 @@ class TimeoutMonitor:
                 ) t
                 GROUP BY JOB_ID
             """
-            # Note: job_id here is the pipeline name (e.g., "extract_append")
-            # The first %s is the job_id from the task, second is dataset_id
             params = [job_id, dataset_id, *stages]
-            results = self.db.fetch(query, params)
 
-            # Build timeout dict from results
+            # Replace parameters in query string if required by underlying db engine
+            # or pass formatted query to fetch_df
+            formatted_query = query % tuple(
+                f"'{p}'" if isinstance(p, str) else p for p in params
+            )
+
             history_count = 0
-            for row in results:
-                stage = row["stage"]
-                p95 = row["p95_duration"]
-                sample_count = row.get("sample_count", 0)
+            for df_batch in self.db.fetch_df(formatted_query):
+                for row in df_batch.to_dicts():
+                    stage = row["stage"]
+                    p95 = row["p95_duration"]
+                    sample_count = row.get("sample_count", 0)
 
-                # Only use historical data if we have enough samples
-                if sample_count > 10:
-                    timeout = min(p95 * 1.5, STAGE_CAPS.get(stage, 14400))
-                    timeouts[stage] = timeout
-                    history_count += 1
-                else:
-                    # Not enough samples - use default
-                    timeouts[stage] = STAGE_DEFAULTS.get(stage, 1800)
+                    # Only use historical data if we have enough samples
+                    if sample_count > 10:
+                        timeout = min(p95 * 1.5, STAGE_CAPS.get(stage, 14400))
+                        timeouts[stage] = timeout
+                        history_count += 1
+                    else:
+                        # Not enough samples - use default
+                        timeouts[stage] = STAGE_DEFAULTS.get(stage, 1800)
 
             # Use defaults for stages without history
             for stage in stages:
@@ -374,7 +378,7 @@ class TimeoutMonitor:
     # PUBLIC API
     # ========================================================================
 
-    def resolve_timeout(self, job_id: str, dataset_id: str, stage: str) -> float:
+    def resolve_timeout(self, job_id: str, dataset_id: str, step_id: str) -> float:
         """
         Calculate timeout from historical performance for a specific stage.
 
@@ -386,7 +390,7 @@ class TimeoutMonitor:
         This method is idempotent and can be called many times.
         """
         # Check cache first
-        cached = self._get_cached_timeout(job_id, dataset_id, stage)
+        cached = self._get_cached_timeout(job_id, dataset_id, step_id)
         if cached is not None:
             return cached
 
@@ -398,16 +402,16 @@ class TimeoutMonitor:
             if (
                 job_id in self._timeout_cache
                 and dataset_id in self._timeout_cache[job_id]
-                and stage in self._timeout_cache[job_id][dataset_id]
+                and step_id in self._timeout_cache[job_id][dataset_id]
             ):
-                timeout, _ = self._timeout_cache[job_id][dataset_id][stage]
+                timeout, _ = self._timeout_cache[job_id][dataset_id][step_id]
                 return timeout
 
         # Fallback (should rarely happen)
         LOG.warning(
-            f"Timeout not found for {job_id}:{dataset_id}:{stage}, using default"
+            f"Timeout not found for {job_id}:{dataset_id}:{step_id}, using default"
         )
-        return STAGE_DEFAULTS.get(stage, 1800)
+        return STAGE_DEFAULTS.get(step_id, 1800)
 
     def resolve_budget(
         self, job_id: str, dataset_id: str, stages: list[str] | None = None
@@ -466,7 +470,7 @@ class TimeoutMonitor:
         """
         job_id = task_ref.identity.job_id
         dataset_id = task_ref.identity.dataset_id
-        stage = task_ref.stage
+        step = task_ref.step_id
         cache_key = self._get_cache_key(job_id, dataset_id)
 
         # Track active task count (prevents premature cache cleanup)
@@ -477,13 +481,13 @@ class TimeoutMonitor:
 
         # Create state (will trigger pre-fetch if needed)
         state = TimeoutState()
-        state.stage_timeout = self.resolve_timeout(job_id, dataset_id, stage)
+        state.stage_timeout = self.resolve_timeout(job_id, dataset_id, step)
         state.budget_total = self.resolve_budget(job_id, dataset_id)
         state.budget_used = 0.0
         state.stage_start_time = 0.0
 
         LOG.debug(
-            f"Created timeout state for {job_id}:{dataset_id}:{stage}, "
+            f"Created timeout state for {job_id}:{dataset_id}:{step}, "
             f"timeout={state.stage_timeout:.1f}s, budget={state.budget_total:.1f}s, "
             f"active_tasks={self._active_task_counts.get(cache_key, 0)}"
         )

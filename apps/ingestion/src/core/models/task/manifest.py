@@ -1,100 +1,21 @@
 """Task manifest data structures for stage payloads."""
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import msgspec
-from apps.ingestion.src.core.models.task.status import ExecutionStatus
-from apps.ingestion.src.utils.constants import MANIFEST_FILENAME
-from libs.utils.dates import current_timestamp
+from loguru import logger
 from msgspec import field
 
+from src.core.models.task.status import ExecutionStatus
+from src.core.stages.contracts.payload import ErrorInfo
+from src.core.stages.types import StagePayload
+from src.utils.constants import MANIFEST_FILENAME
 
-class FileInfo(msgspec.Struct):
-    """Metadata for a physical file artifact."""
+if TYPE_CHECKING:
+    from src.core.stages.contracts.payload import ErrorInfo
 
-    path: str
-    checksum: str
-    row_count: int
-    size_bytes: int
-
-
-class StagePayload(msgspec.Struct, kw_only=True):
-    """Base payload with timestamps."""
-
-    start_time: str = field(
-        default_factory=lambda: current_timestamp(naive=True).isoformat(sep=" ")
-    )
-    end_time: str = field(
-        default_factory=lambda: current_timestamp(naive=True).isoformat(sep=" ")
-    )
-
-
-class StartPayload(StagePayload):
-    """Start stage payload - tracks task initialization."""
-
-    commit_hash: str = ""
-    # worker_id: str = ""
-
-
-class ExtractPayload(StagePayload):
-    """Extract stage results."""
-
-    file_count: int = 0
-    files: list[FileInfo] = []
-    artifact_folder: str = ""
-    source_files: list[str] = []
-    resource: str | None = None
-    source_count: int = 0
-    schema: dict[str, str] = {}  # column → type
-
-
-class TransformPayload(StagePayload):
-    """Transform stage results."""
-
-    transform_type: str
-    artifact_folder: str | None = None
-    output_count: int = 0
-    schema_valid: bool = False
-    output_schema: dict[str, str] = {}
-
-
-class WritePayload(StagePayload):
-    """Write stage results."""
-
-    staging_artifact: str
-    sink_type: str
-    write_count: int
-    partition_on: str
-    partition_value: str
-    destination: str
-
-
-class PublishPayload(StagePayload):
-    """Publish stage results."""
-
-    final_path: str
-    final_count: int
-    start_time: str
-
-
-class ArchivePayload(StagePayload):
-    """Archive stage results."""
-
-    # cleanup_done: bool
-    archive_path: str | None
-    retention_expiry: str | None
-
-
-class ErrorInfo(msgspec.Struct):
-    """Error information for failed stages."""
-
-    stage: str
-    error_type: str
-    message: str
-    traceback: str | None = None
-    timestamp: str = field(
-        default_factory=lambda: current_timestamp(naive=True).isoformat(sep=" ")
-    )
+LOG = logger
 
 
 class TaskManifest(msgspec.Struct, kw_only=True):
@@ -107,40 +28,49 @@ class TaskManifest(msgspec.Struct, kw_only=True):
 
     # State
     status: ExecutionStatus
-    current_stage: str
+    current_step_id: str
     bitmask: int
     retry_count: int = 0
     remarks: str | None = None
 
-    # Stage payloads
-    start: StartPayload | None = None
-    extract: ExtractPayload | None = None
-    transform: TransformPayload | None = None
-    write: WritePayload | None = None
-    publish: PublishPayload | None = None
-    archive: ArchivePayload | None = None
+    # List of all stage/step payloads executed so far
+    payloads: list[StagePayload] = field(default_factory=list)
 
     # Error
-    error: ErrorInfo | None = None
+    error: "ErrorInfo | None" = None
 
     @property
-    def is_complete(self) -> bool:
-        """Check if all stages have completed."""
-        return all(
-            getattr(self, stage)
-            for stage in ["extract", "transform", "write", "publish", "archive"]
-        )
+    def completed_step_ids(self) -> list[str]:
+        """Return a deduplicated list of step_ids present in the payloads, in execution order."""
+        if len(self.payloads) == 0:
+            LOG.warning("There are no payloads captured in the manifest!!")
+        return list(dict.fromkeys(p.step_id for p in self.payloads if p.step_id))
 
     @classmethod
     def from_path(
         cls, folder_path: Path | str | None = None, filepath: Path | str | None = None
     ):
-        if filepath and (path := Path(filepath)).is_file():
-            manifest_file = path
-        elif folder_path and (path := Path(folder_path)).is_dir():
-            manifest_file = path / MANIFEST_FILENAME
+        manifest_file: Path | None = None
 
-        if not manifest_file.exists():
-            raise FileNotFoundError(f"Failed to load manifest file: {path}")
+        if filepath:
+            manifest_file = Path(filepath)
+        elif folder_path:
+            manifest_file = Path(folder_path) / MANIFEST_FILENAME
 
-        return msgspec.json.decode(manifest_file.read_bytes(), type=TaskManifest)
+        if manifest_file is None or not manifest_file.is_file():
+            raise FileNotFoundError(
+                f"Failed to load manifest file at: {filepath or folder_path}"
+            )
+
+        return msgspec.json.decode(manifest_file.read_bytes(), type=cls)
+
+    # def get_payloads_for_stage(self, stage: str) -> list[StagePayload]:
+    #     """Retrieve all payload instances for a given stage type (e.g., 'extract')."""
+    #     return [p for p in self.payloads if p.stage == stage]
+
+    def get_payload_for_step(self, step_id: str) -> "StagePayload | None":
+        """Retrieve the latest payload associated with a specific step_id."""
+        for p in reversed(self.payloads):
+            if p.step_id == step_id:
+                return p
+        return None

@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from unittest.mock import patch
 
-from apps.ingestion.src.utils.dates import (
+from src.utils.dates import (
     end_of_day_timestamp,
     epoch_to_iso,
     iso_to_epoch,

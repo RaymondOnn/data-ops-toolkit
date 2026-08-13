@@ -1,8 +1,7 @@
 from collections.abc import Callable
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar, Literal, TypeVar
 
-from apps.ingestion.src.utils.exceptions import TryAgainLater
 from libs.auth.factory import AuthFactory, SecretProvider
 from libs.auth.secret import Secret
 from libs.clients.base import ClientCantConnect
@@ -10,14 +9,14 @@ from libs.resilience.circuit_breaker import CircuitOpen
 from libs.utils.exceptions import AuthFailure, HostUnreachable
 from loguru import logger
 
-from .base import Archive, Sink, Source
+from src.utils.exceptions import TryAgainLater
 
-if TYPE_CHECKING:
-    from libs.queue.priority.base import PriorityQueue
-    from libs.storage.cache import Cache
+from .base import Archive, Sink, Source
 
 LOG = logger
 SECRET_PROTOCOL = "secret://"
+
+T = TypeVar("T", bound=type)
 
 
 class ServiceNotFound(Exception):
@@ -32,7 +31,9 @@ class ServiceFactory:
     _provider: ClassVar[SecretProvider | None] = None
 
     @classmethod
-    def register(cls, name: str) -> Callable[[type], type]:
+    def register(
+        cls, source_type: str, role: Literal["source", "sink", "archive"] | None = None
+    ) -> Callable[[T], T]:
         """
         Decorator to register a service class into the factory registry.
 
@@ -43,8 +44,10 @@ class ServiceFactory:
             Callable: The decorator wrapper.
         """
 
-        def wrapper(wrapped: type) -> type:
-            cls._registry[name.casefold()] = wrapped
+        def wrapper(wrapped: T) -> T:
+            service_role = role.casefold() if role else None
+            key = (source_type.casefold(), service_role)
+            cls._registry[key] = wrapped
             return wrapped
 
         return wrapper
@@ -60,18 +63,6 @@ class ServiceFactory:
         cls._provider = AuthFactory.get_provider(**config)
 
     @classmethod
-    def get_task_queue(cls, config: dict[str, Any]) -> "PriorityQueue":
-        from libs.queue.priority.factory import QueueFactory
-
-        return QueueFactory.create(**config)
-
-    @classmethod
-    def get_cache(cls, config: dict[str, Any]) -> "Cache":
-        from libs.storage.cache.factory import CacheFactory
-
-        return CacheFactory.create(**config)
-
-    @classmethod
     def _make_hashable(cls, value: Any) -> Any:
         """Convert dict/list to hashable structure."""
         if isinstance(value, dict):
@@ -81,34 +72,40 @@ class ServiceFactory:
         return value
 
     @classmethod
-    def get(cls, flags: Any | None = None, **config) -> Any:
+    def get(cls, flags: Any | None = None, role: str | None = None, **config) -> Any:
         """Get or create a service instance with feature flag support."""
-        service_key = config.get("key")
-        if not service_key:
-            raise ValueError(f"Service key is required: {service_key}")
+        source_type = config.get("type").casefold()
+        if not source_type:
+            raise ValueError(
+                f"Service configuration must include 'type': {config.get('type')}"
+            )
 
         # FEATURE TOGGLE: Benchmark mode swaps service for experimental one
-        if (flags and getattr(flags, "benchmark_mode", False)) and (
-            experimental := getattr(flags, "experimental_sink_type", None)
-        ):
-            new_service_key = experimental
-            LOG.info(f"🚀 BENCHMARK MODE: Swapping {service_key} -> {new_service_key}")
+        # if (flags and getattr(flags, "benchmark_mode", False)) and (
+        #     experimental := getattr(flags, "experimental_sink_type", None)
+        # ):
+        #     new_service_key = experimental
+        #     LOG.info(f"🚀 BENCHMARK MODE: Swapping {source_type} -> {new_service_key}")
 
-        key = service_key.casefold()
-        if key not in cls._registry:
-            raise ServiceNotFound(f"No service registered for: {key}")
+        target_role = role.casefold() if role else None
+        target_cls = cls._registry.get((source_type, target_role))
+        if not target_cls:
+            role_str = f"with role '{target_role}'" if target_role else "(base)"
+            raise ServiceNotFound(
+                f"No service registered for type '{source_type}' {role_str}"
+            )
 
         # Hash config for caching (exclude flags from cache key)
         config_hash = cls._make_hashable(config)
-        instance_key = f"{key}:{config_hash}"
+        instance_key = f"{source_type}:{target_role}:{config_hash}"
 
         if instance_key not in cls._instances:
-            cls._instances[instance_key] = cls._create(key, config)
+            cls._instances[instance_key] = cls._create(source_type, role, config)
 
         return cls._instances[instance_key]
 
     @classmethod
-    def _create(cls, key: str, config: dict) -> Any:
+    def _create(cls, source_type: str, role: str, config: dict) -> Any:
         """Create new service instance with secret resolution."""
 
         config_copy = deepcopy(config)
@@ -131,7 +128,10 @@ class ServiceFactory:
                 config_copy[k] = value
 
         try:
-            return cls._registry[key](name=key, **config_copy)
+            target_role = role.casefold() if role else None
+            key = (source_type.casefold(), target_role)
+            name = config_copy.pop("name", None) or source_type
+            return cls._registry[key](name=name, **config_copy)
         except (HostUnreachable, ClientCantConnect, CircuitOpen) as e:
             raise TryAgainLater(
                 reason=f"Service {key} unavailable: {e}",
@@ -142,29 +142,31 @@ class ServiceFactory:
             raise
 
     @classmethod
-    def is_file_source(cls, service_type: str) -> bool:
+    def is_file_source(cls, instance: Any) -> bool:
         """
         Checks if a registered service type is a file-based storage service.
 
         Args:
             service_type: The key used to register the service.
         """
-        from .file import StorageSource
+        from .file import FileSource
 
-        target_cls = cls._registry.get(service_type.casefold())
-        return target_cls is not None and issubclass(target_cls, StorageSource)
+        if instance is None:
+            return False
+
+        return isinstance(instance, FileSource)
 
     @classmethod
     def get_source(cls, flags: Any | None = None, **config) -> Source:
         """Get a Source service."""
-        return cls.get(flags=flags, **config)
+        return cls.get(flags=flags, role="source", **config)
 
     @classmethod
     def get_sink(cls, flags: Any | None = None, **config) -> Sink:
         """Get a Sink service."""
-        return cls.get(flags=flags, **config)
+        return cls.get(flags=flags, role="sink", **config)
 
     @classmethod
     def get_archive(cls, flags: Any | None = None, **config) -> Archive:
         """Get an Archive service."""
-        return cls.get(flags=flags, **config)
+        return cls.get(flags=flags, role="archive", **config)

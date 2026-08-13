@@ -1,5 +1,15 @@
 # Built-in snowflake.yaml (Representative Blueprint)
 
+identifiers:
+  quote_open: '"'
+  quote_close: '"'
+  expected_parts: 3,
+  naming_structure: "[DATABASE.][SCHEMA.]TABLE" # Can resolve default database
+  allowed_depths: [1, 2, 3]
+
+# -----------------------------------------------------------------------------
+# 1. CORE OPERATIONAL SQL (DDL & DML)
+# -----------------------------------------------------------------------------
 core:
   drop_table: "drop table if exists {table}"
   create_table: "create table if not exists {table} ({col_types})"

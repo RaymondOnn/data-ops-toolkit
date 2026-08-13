@@ -1,318 +1,182 @@
 """Task configuration and context models for pipeline execution."""
 
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Any
 
 import msgspec
-from apps.ingestion.src.core.models.stages.enums import Stage
-from apps.ingestion.src.extras.flags import FeatureFlags
-from apps.ingestion.src.extras.hooks.enums import StageHooks
-from apps.ingestion.src.utils.constants import CONFIG_FILENAME
 from loguru import logger
+from msgspec import Struct, field
+
+from src.core.contexts.step import StepConfig
+from src.core.stages.enums import Stage
+from src.extras.flags import FeatureFlags
+from src.extras.hooks.enums import StageHooks
+from src.utils.constants import CONFIG_FILENAME
 
 LOG = logger
 
+# Cannot find implementation or library stub for module
 
 # =============================================================================
-# Schema Definition
-# =============================================================================
-
-
-# class ColumnMapping(msgspec.Struct):
-#     """Column mapping and transformation rule."""
-
-#     target_col: str
-#     target_type: str = "string"
-#     target_length: Any = None
-#     target_scale: Any = None
-#     source_col: str | None = None
-#     source_type: str | None = None
-#     source_length: Any = None
-#     source_scale: Any = None
-#     masking: str | None = None
-#     internal: bool = False
-#     is_primary_key: bool = False
-
-#     @classmethod
-#     def from_csv_row(cls, row: dict[str, str]) -> "ColumnMapping":
-#         """Create ColumnMapping from CSV row."""
-#         return cls(
-#             source_col=cls._none_if_empty(row.get("source_col")),
-#             target_col=row.get("target_col", ""),
-#             source_type=cls._none_if_empty(row.get("source_dtype")),
-#             target_type=row.get("target_dtype", ""),
-#             source_length=cls._to_int(row.get("source_length")),
-#             source_scale=cls._to_int(row.get("source_scale")),
-#             target_length=cls._to_int(row.get("target_length")),
-#             target_scale=cls._to_int(row.get("target_scale")),
-#             masking=cls._none_if_empty(row.get("masking")),
-#             internal=cls._to_bool(row.get("internal_flag", "false")),
-#             is_primary_key=cls._to_bool(row.get("primary_key", "false")),
-#         )
-
-#     @staticmethod
-#     def _none_if_empty(value: str | None) -> str | None:
-#         return None if not value or value.lower() == "none" else value
-
-#     @staticmethod
-#     def _to_int(value: str | None) -> int | None:
-#         if not value or value.lower() == "none":
-#             return None
-#         try:
-#             return int(float(value))
-#         except (ValueError, TypeError):
-#             return None
-
-#     @staticmethod
-#     def _to_bool(value: str) -> bool:
-#         return value.lower().strip() in ("true", "1", "t", "yes", "y")
-
-#     def to_dict(self) -> dict[str, Any]:
-#         """Convert config to dictionary (excludes None values)."""
-#         return msgspec.to_builtins(self)
-
-
-# =============================================================================
-# Stage Configurations
+# Step Configuration
 # =============================================================================
 
 
-class BaseConfig(msgspec.Struct):
-    """Base class for all config classes."""
-
-    @classmethod
-    def from_params(cls, *args: Any, **kwargs: Any) -> Any:
-        """Abstract factory method for creating configuration from raw parameters."""
-        raise NotImplementedError(f"from_params must be implemented by {cls.__name__}")
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert config to dictionary (excludes None values)."""
-        return msgspec.to_builtins(self)
-
-
-class ExtractConfig(msgspec.Struct):
-    """Configuration for data extraction."""
-
-    type: str  # "postgres", "s3", "local", etc.
-    resource: str  # Table name, path, or endpoint
-    num_workers: int = 10
-    load_mode: Literal["append", "delta"] = "append"
-    connection: dict[str, Any] = msgspec.field(default_factory=dict)
-    select: list[str] = msgspec.field(default_factory=list)
-    where: str | None = None
-    limit: int | None = None
-    sql: str | None = None
-    columns: dict[str, str] = msgspec.field(default_factory=dict)
-    null_if: list[str] = msgspec.field(default_factory=list)
-    batch_size: int | None = None
-    flatten: int = -1
-
-    # ---- file only attributes ----
-    compression: str | None = None
-    glob: str | None = None
-    header: bool = True
-    skip_blank_lines: bool = True
-
-    def __post_init__(self) -> None:
-        """Validate schema has primary key."""
-        if not self.resource or self.resource == "N/A":
-            return
-
-    @staticmethod
-    def _resolve_file_resource(params: dict) -> tuple[str, str | None]:
-        """Resolve resource for file sources.
-
-        Case 1: file_path with wildcards
-            Input: file_path = './mock_data/*.parquet', archive=None
-            Output: folder='./mock_data', pattern='*.parquet'
-
-        Case 2: direct file path
-            Input: file_path = './mock_data/sample_orders.csv', archive=None
-            Output: folder='./mock_data', pattern='sample_orders.csv'
-
-        Case 3: folder only (no file_path, just context.resource)
-            Input: context.resource = './mock_data', file_path=None
-            Output: folder='./mock_data', pattern='' or None? Let's say pattern=None
-
-        Returns:
-            tuple[str, str | None]: (resource_path, file_pattern)
-        """
-        file_pattern = params.pop("file_pattern", {})
-        archive = file_pattern.get("archive")
-        glob_pattern = file_pattern.get("glob", "")
-
-        if archive:
-            # Archive file: archive is the resource
-            return archive, glob_pattern if glob_pattern else None
-
-        if not glob_pattern:
-            return "", None
-
-        # Check if it's a pattern with wildcards
-        if "*" in glob_pattern or "?" in glob_pattern:
-            # Pattern - split into directory and pattern
-            path = Path(glob_pattern)
-            resource = str(path.parent) if path.parent != path else "."
-            return resource, path.name
-
-        # Direct file
-        return glob_pattern, None
-
-
-def parse_extract_config(config) -> ExtractConfig:
-    """Create ExtractConfig from raw source parameters."""
-    return ExtractConfig(
-        type=config["connection"]["key"].casefold(),
-        resource=config["object"],
-        num_workers=config["num_workers"],
-        load_mode=config["mode"],
-        connection=config["connection"],
-        select=config["select"],
-    )
-
-
-class TransformConfig(msgspec.Struct):
-    """Configuration for data transformation."""
-
-    type: str = "default"  # "default", "bitmask", "custom"
-    params: dict[str, Any] = msgspec.field(default_factory=dict)
-    source_dir: str | None = None  # For regression testing
-
-
-def parse_transform_config(config) -> TransformConfig:
-    """Create TransformConfig from raw parameters."""
-    # LOG.debug(
-    #     f"Creating TransformConfig: type={transform_type}, params={transform_params}, overrides={overrides}"
-    # )
-    return TransformConfig(
-        type=config["transform_type"],
-        params=config["transform_params"],
-        source_dir=config.get("source_dir"),
-    )
-
-
-class LoadConfig(msgspec.Struct):
-    """Configuration for data loading."""
-
-    type: str  # "clickhouse", "snowflake", etc.
-    destination: str  # Target table or path
-    partition_on: str
-    partition_value: str
-    connection: dict[str, Any] = msgspec.field(default_factory=dict)
-    params: dict[str, Any] = msgspec.field(default_factory=dict)
-
-
-def parse_load_config(config) -> LoadConfig:
-    """Create LoadConfig from raw parameters."""
-    params = config["sink_params"].copy()
-
-    # Resolve destination from params
-    partition_on = config.get("partition_on") or params.pop("partition_on", "")
-    partition_value = config.get("partition_value") or params.pop("partition_value", "")
-
-    return LoadConfig(
-        type=config["connection"]["key"].casefold(),
-        destination=params["destination"],
-        partition_on=partition_on,
-        partition_value=partition_value,
-        connection=config["connection"],
-        params=params,
-    )
-
-
-class ArchiveConfig(msgspec.Struct, kw_only=True, omit_defaults=True):
-    enabled: bool = False
-    type: str = ""  # Serializer drops key if it is ""
-    base_path: str = ""  # Serializer drops key if it is ""
-    connection: dict[str, Any] = msgspec.field(default_factory=dict)
-    retention_days: int = 2555
-
-
-def parse_archive_config(config) -> ArchiveConfig:
-    """Create ArchiveConfig from raw parameters."""
-
-    if not config["archive_enabled"]:
-        return ArchiveConfig(enabled=False)
-
-    return ArchiveConfig(
-        enabled=True,
-        retention_days=config.get("retention_days", 2555),
-        base_path=config["connection"]["url"],
-        type=config["connection"]["key"].casefold(),
-        connection=config["connection"],
-    )
-
-
-# =============================================================================
-# Pipeline Context
-# =============================================================================
-
-
-class TaskContext(msgspec.Struct, kw_only=True):
+class TaskContext(Struct, kw_only=True):
     """Complete pipeline configuration for a task run."""
 
-    # Stage configurations
-    extract: ExtractConfig | None = None
-    transform: TransformConfig | None = None
-    write: LoadConfig | None = None
-    archive: ArchiveConfig | None = None
-    hooks: dict[str, StageHooks] = msgspec.field(default_factory=dict)
+    # Ordered list of steps for this dataset (new canonical structure)
+    steps: list[StepConfig] = field(default_factory=list)
+    hooks: dict[str, StageHooks] = field(default_factory=dict)
 
     # Identity
     job_id: str
     dataset_id: str
     partition_date: str
+    run_id: str
 
-    # Execution boundaries
-    from_stage: str = Stage.first().value
-    to_stage: str = Stage.last().value
+    # Execution boundaries — step-based (preferred) and stage-based (legacy)
+    from_step: str = "start"  # step id to start from (inclusive)
+    to_step: str = ""  # step id to stop at (inclusive)
     mode: str | None = None  # append | incremental | truncate | CDC
-    partition_on: list[str] = msgspec.field(default_factory=list)
-    primary_keys: list[str] = msgspec.field(default_factory=list)
+    partition_on: list[str] = field(default_factory=list)
+    primary_keys: list[str] = field(default_factory=list)
 
     # Paths
     output_path: str = ""
 
     # Metadata
-    audit_columns: list[str] = msgspec.field(
+    audit_columns: list[str] = field(
         default_factory=lambda: ["_partition", "_run_id", "_source"]
     )
     validation_command: str = "validation-app"
     expires_at: float | None = None
-    overrides: dict[str, Any] = msgspec.field(default_factory=dict)
-    extras: dict[str, Any] = msgspec.field(default_factory=dict)
-    flags: FeatureFlags = msgspec.field(default_factory=FeatureFlags)
+    overrides: dict[str, Any] = field(default_factory=dict)
+    extras: dict[str, Any] = field(default_factory=dict)
+    flags: "FeatureFlags" = field(default_factory=FeatureFlags)
 
-    @classmethod
-    def from_params(cls, raw_config: dict[str, Any]) -> Self:
-        return cls(
-            # Stage configurations
-            extract=parse_extract_config(raw_config.get("extract", {})),
-            transform=parse_transform_config(raw_config.get("transform", {})),
-            write=parse_load_config(raw_config.get("write", {})),
-            archive=parse_archive_config(raw_config.get("archive", {})),
-            # Identity
-            job_id=raw_config["job_id"],
-            dataset_id=raw_config["dataset_id"],
-            partition_date=raw_config["partition_date"],
-            # Execution boundaries
-            from_stage=raw_config.get("from_stage", Stage.first().value),
-            to_stage=raw_config.get("to_stage", Stage.last().value),
-            mode=raw_config.get("mode"),
-            partition_on=raw_config.get("partition_on", []),
-            primary_keys=raw_config.get("primary_keys", []),
-            # Paths
-            # output_path = str(raw_config["output_path"]) or None,
-            # Metadata
-            audit_columns=raw_config.get(
-                "audit_columns", ["_partition", "_run_id", "_source"]
-            ),
-            expires_at=raw_config.get("expires_at"),
-            overrides=raw_config.get("overrides", {}),
-            extras=raw_config.get("extras", {}),
-            flags=raw_config.get("flags", FeatureFlags()),
-            hooks=raw_config.get("hooks", {}),
+    def __post_init__(self) -> None:
+        """Validates and normalizes execution boundaries after initialization."""
+        all_ids = self.get_step_ids()
+
+        # 1. Default empty boundaries
+        if not self.from_step:
+            self.from_step = "start"
+        if not self.to_step:
+            self.to_step = all_ids[-1]
+
+        # 2. Strict presence validation
+        if self.from_step not in all_ids:
+            raise ValueError(
+                f"Invalid from_step '{self.from_step}'. Valid steps: {all_ids}"
+            )
+        if self.to_step not in all_ids:
+            raise ValueError(
+                f"Invalid to_step '{self.to_step}'. Valid steps: {all_ids}"
+            )
+
+        # 3. Order validation
+        if all_ids.index(self.from_step) > all_ids.index(self.to_step):
+            raise ValueError(
+                f"Invalid boundary range: from_step '{self.from_step}' "
+                f"occurs after to_step '{self.to_step}'."
+            )
+
+    def get_step(self, step_id: str) -> "StepConfig | None":
+        """Look up a step by its id."""
+        return next((s for s in self.steps if s.id == step_id), None)
+
+    def get_step_ids(
+        self,
+        from_step: str | None = None,
+        to_step: str | None = None,
+    ) -> list[str]:
+        """Return step ids in execution order filtered by inclusive boundaries.
+
+        Args:
+            from_step: Start step ID (inclusive). Defaults to self.from_step if set.
+            to_step: End step ID (inclusive). Defaults to self.to_step if set.
+        """
+        all_ids = ["start"] + [s.id for s in self.steps]
+
+        start_boundary = from_step if from_step is not None else self.from_step
+        stop_boundary = to_step if to_step is not None else self.to_step
+
+        # Resolve inclusive start index
+        start_idx = (
+            all_ids.index(start_boundary)
+            if start_boundary and start_boundary in all_ids
+            else 0
         )
+
+        # Resolve inclusive stop index (+1 to include the end step)
+        end_idx = (
+            all_ids.index(stop_boundary) + 1
+            if stop_boundary and stop_boundary in all_ids
+            else len(all_ids)
+        )
+
+        # Handle invalid/reversed ranges
+        if start_idx >= end_idx:
+            return []
+
+        return all_ids[start_idx:end_idx]
+
+    # def get_active_steps(self) -> list[StepConfig]:
+    #     """Return steps within from_step..to_step boundaries (inclusive).
+
+    #     Falls back to all steps if no boundaries are set.
+    #     """
+    #     if not self.steps:
+    #         return []
+    #     ids = self.get_step_ids()
+    #     start = (
+    #         ids.index(self.from_step) if self.from_step and self.from_step in ids else 0
+    #     )
+    #     end = (
+    #         ids.index(self.to_step) + 1
+    #         if self.to_step and self.to_step in ids
+    #         else len(ids)
+    #     )
+    #     return self.steps[start:end]
+
+    # def get_step_index(self, step_id: str) -> int | None:
+    #     """Return the 0-based index of a step by its ID."""
+    #     for idx, step in enumerate(self.steps):
+    #         if step.id == step_id:
+    #             return idx
+    #     return None
+
+    # def get_prev_step(self, step_id: str) -> StepConfig | None:
+    #     """Get the step executing immediately before the current step_id."""
+    #     idx = self.get_step_index(step_id)
+    #     if idx is not None and idx > 0:
+    #         return self.steps[idx - 1]
+    #     return None
+
+    def get_next_step_id(self, current_step_id: str) -> str | None:
+        """Get the ID of the step executing immediately after current_step_id
+
+        Respects the active run boundaries (from_step .. to_step).
+        """
+        active_ids = self.get_step_ids()
+        if current_step_id in active_ids:
+            idx = active_ids.index(current_step_id)
+            if idx + 1 < len(active_ids):
+                return active_ids[idx + 1]
+        return None
+
+    def resolve_stage(self, step_id: str) -> str:
+        """Derives the system Stage enum value for a given step_id."""
+        if step_id == "start":
+            return Stage.START.value
+
+        step = self.get_step(step_id)
+        if not step:
+            raise ValueError(
+                f"Step '{step_id}' not found in TaskContext configuration."
+            )
+        return step.stage
 
     @classmethod
     def from_path(
@@ -329,13 +193,13 @@ class TaskContext(msgspec.Struct, kw_only=True):
 
         return msgspec.json.decode(config_file.read_bytes(), type=TaskContext)
 
-    def __post_init__(self):
-        if self.extract and not self.primary_keys:
-            LOG.error(f"{self.extract=} {self.primary_keys=}")
-            raise ValueError(
-                "No primary key defined for source dataset. "
-                "At least one column must be marked as primary_key."
-            )
+    # def __post_init__(self):
+    #     if self.extract and not self.primary_keys:
+    #         LOG.error(f"{self.extract=} {self.primary_keys=}")
+    #         raise ValueError(
+    #             "No primary key defined for source dataset. "
+    #             "At least one column must be marked as primary_key."
+    #         )
 
 
 # =============================================================================
@@ -343,7 +207,7 @@ class TaskContext(msgspec.Struct, kw_only=True):
 # =============================================================================
 
 
-def load_context(folder: Path) -> TaskContext:
+def load_context(folder: Path) -> "TaskContext":
     """Load pipeline context from workspace folder."""
     config_path = folder / CONFIG_FILENAME
     if not config_path.exists():

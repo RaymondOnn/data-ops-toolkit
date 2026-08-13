@@ -25,36 +25,38 @@ x-aws-prod-client: &aws_prod_client
   sts_endpoint_url: "https://sts.us-west-2.amazonaws.com"
   role_arn: "arn:aws:iam::123456789012:role/ProdIngestionRole"
 
+x-s3-source-base: &s3_source_base
+  type: file
+  skills: [file]
+
 x-s3-archive-base: &s3_archive_base
   key: "standard_archive"
+  skills: [archive]
   type: file
   storage_options:
     s3_storage_class: "DEEP_ARCHIVE"
 
-x-s3-cas-base: &s3_cas_base
-  key: "cas_archive"
+x-s3-cas-base: &s3_cas_base # key: "cas_archive"
   type: file
+  skills: [cas]
   storage_options:
     s3_storage_class: "GLACIER"
 
-x-s3-source-base: &s3_source_base
-  key: "data_lake"
-  type: file
-
-
 local:
-  file:
-    key: flat_file
+  mock_data_folder:
+    # key: flat_file
     type: file
-    url: "."
+    url: ./mock_data
+    skills: [file]
   clickhouse: # Now pointing to a Docker container
-    key: clickhouse_db
     type: database
+    db_type: clickhouse
     host: localhost
     port: 8123
     user: default
     password: secret://CLICKHOUSE_PASSWORD
     secure: false
+
   s3_source:
     <<: [*s3_source_base, *localstack_base]
     url: s3://landing-zone
@@ -72,8 +74,8 @@ dev:
     key: flat_file
     type: file
   clickhouse: # Now pointing to a Docker container
-    key: "clickhouse_db"
     type: database
+    db_type: clickhouse
     host: "localhost"
     port: 8123
     user: "default"

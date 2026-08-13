@@ -2,31 +2,32 @@ from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pytest
-from apps.ingestion.src.services.file import (
-    BaseStorageService,
-    StorageSink,
-    StorageSource,
-)
 from libs.file import FileSystemSkills
 
+from src.services.file import (
+    FileSink,
+    FileSource,
+    StorageServiceService,
+)
 
-class TestBaseStorageService:
+
+class TestStorageServiceService:
     """Unit tests for the base storage service logic."""
 
     @pytest.fixture
     def service(self):
-        """Returns a BaseStorageService for testing."""
-        return BaseStorageService(
+        """Returns a StorageServiceService for testing."""
+        return StorageServiceService(
             name="test-fs",
             url="s3://bucket",
-            capabilities={FileSystemSkills.FILE},
+            skills={FileSystemSkills.FILE},
             storage_options={},
         )
 
     @patch("libs.file.base.create_fs_client")
     def test_client_lazy_initialization(self, mock_create, service):
         """
-        GIVEN a BaseStorageService instance
+        GIVEN a StorageServiceService instance
         THEN the client should be created once and cached
         WHEN the client property is accessed
         """
@@ -58,11 +59,11 @@ class TestStorageSource:
 
     @pytest.fixture
     def source(self):
-        """Returns a StorageSource for testing."""
-        return StorageSource(
+        """Returns a FileSource for testing."""
+        return FileSource(
             name="source-fs",
             url="s3://source",
-            capabilities={FileSystemSkills.FILE},
+            skills={FileSystemSkills.FILE},
             storage_options={},
         )
 
@@ -147,11 +148,11 @@ class TestStorageSink:
 
     @pytest.fixture
     def sink(self):
-        """Returns a StorageSink for testing."""
-        return StorageSink(
+        """Returns a FileSink for testing."""
+        return FileSink(
             name="sink-fs",
             url="s3://sink",
-            capabilities={FileSystemSkills.FILE},
+            skills={FileSystemSkills.FILE},
             storage_options={},
         )
 

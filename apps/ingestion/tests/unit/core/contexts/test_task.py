@@ -1,12 +1,13 @@
 from datetime import datetime
 
 import pytest
-from apps.ingestion.src.core.contexts.task import (
+
+from src.core.contexts.task import (
     ExtractConfig,
     TaskContext,
     load_context,
 )
-from apps.ingestion.src.core.orchestrator.enums import TaskRecord
+from src.core.orchestrator.enums import TaskRecord
 
 
 def test_placeholder():

@@ -1,5 +1,6 @@
 import pytest
-from apps.ingestion.src.core.contexts.execution import (
+
+from src.core.contexts.execution import (
     ExecutionContext,
     ExecutionMode,
     RayMode,

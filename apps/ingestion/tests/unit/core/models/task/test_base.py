@@ -1,6 +1,6 @@
-from apps.ingestion.src.core.models.task.base import Task
-from apps.ingestion.src.core.models.task.enums import TaskRef, TaskSignal
-from apps.ingestion.src.core.models.task.status import ExecutionStatus
+from src.core.models.task.base import Task
+from src.core.models.task.enums import TaskRef, TaskSignal
+from src.core.models.task.status import ExecutionStatus
 
 
 def test_task_check_in_new_manifest(exec_ctx):

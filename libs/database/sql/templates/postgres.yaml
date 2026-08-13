@@ -1,5 +1,12 @@
 # postgres.yaml
 
+identifiers:
+  quote_open: '"'
+  quote_close: '"'
+  expected_parts: 2,
+  naming_structure: "[SCHEMA.]TABLE" # Can resolve default database
+  allowed_depths: [1, 2, 3]
+
 # -----------------------------------------------------------------------------
 # 1. CORE OPERATIONAL SQL (DDL & DML)
 # -----------------------------------------------------------------------------
@@ -18,6 +25,8 @@ core:
 
   # PostgreSQL native upsert for target_options (merge_strategy: upsert)
   replace: "insert into {table} ({fields}) values ({values}) on conflict ({pk}) do update"
+
+  upsert: "INSERT INTO {table} ({fields}) VALUES ({values}) ON CONFLICT ({pk}) DO UPDATE SET {set_values};"
 
   # Secondary temp updates used during some legacy sync steps
   update_temp: "update {table} set {set_values} where {join_cond}"
@@ -107,14 +116,14 @@ function:
 # -----------------------------------------------------------------------------
 general_type_map:
   string: "varchar(65535)"
-  integer: "bigint"
+  integer: "BIGINT"
   decimal: "numeric(38,9)"
   float: "double precision"
   boolean: "boolean"
   date: "date"
   time: "time without time zone"
-  datetime: "timestamp with time zone"
-  json: "jsonb"
+  datetime: "TIMESTAMP WITH TIME ZONE"
+  json: "JSONB"
   binary: "bytea"
 
 native_type_map:

@@ -1,20 +1,20 @@
 from typing import Any
 
 import ray
-from apps.ingestion.src.core.contexts.execution import ExecutionContext
-from apps.ingestion.src.core.models.stages.enums import Stage
-from apps.ingestion.src.core.models.states import ZombieState
-from apps.ingestion.src.core.models.task import (
+from loguru import logger
+
+from src.core.contexts.execution import ExecutionContext
+from src.core.models.states import ZombieState
+from src.core.models.task import (
     ExecutionStatus,
 )
-from apps.ingestion.src.core.orchestrator.common.task.cache import TaskCache
-from apps.ingestion.src.core.orchestrator.contracts.policies import (
+from src.core.orchestrator.common.task.cache import TaskCache
+from src.core.orchestrator.contracts.policies import (
     AdmissionPolicy,
     MaintenancePolicy,
 )
-from apps.ingestion.src.core.orchestrator.enums import TaskMetadata
-from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE
-from loguru import logger
+from src.core.orchestrator.enums import TaskMetadata
+from src.utils.constants import CACHE_TASK_NAMESPACE
 
 LOG = logger
 
@@ -58,7 +58,7 @@ class DenyDuplicateAdmission(AdmissionPolicy):
         # Check if this specific partition identity is already present in any active state
         for status in active_statuses:
             # Build search pattern using the domain prefix configuration layout
-            pattern = f"{CACHE_TASK_NAMESPACE}:{task_meta.current_stage}:{status}:{task_meta.run_id}"
+            pattern = f"{CACHE_TASK_NAMESPACE}:{task_meta.current_step_id}:{status}:{task_meta.run_id}"
             if cache.client.exists(pattern):
                 LOG.warning(
                     f"Admission denied. Duplicate active task found for run: {task_meta.run_id}"
@@ -129,18 +129,18 @@ class ProactiveMaintenance(MaintenancePolicy):
                     active_tasks.pop(metadata.run_id, None)
 
                     # Determine where this task should resume
-                    resume_stage = metadata.current_stage or Stage.first().value
+                    resume_step_id = metadata.current_step_id or "start"
 
                     # Update metadata context fields safely
                     metadata.status = ExecutionStatus.WAITING.value
-                    metadata.current_stage = resume_stage
+                    metadata.current_step_id = resume_step_id
 
                     # Leverage TaskCache.transition_state to rotate keys cleanly
                     # This removes the old DISPATCHED/RUNNING key and writes a clean WAITING record
                     cache.transition_state(
                         metadata=metadata,
                         next_status=ExecutionStatus.WAITING,
-                        next_stage=Stage(resume_stage),
+                        next_step_id=resume_step_id,
                     )
 
                 # Return the recovered task so the daemon engine knows to queue it

@@ -6,14 +6,15 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import msgspec
-from apps.ingestion.src.utils.constants import APP_TIMEZONE_LC
 from loguru import logger
+
+from src.utils.constants import APP_TIMEZONE_LC
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
 
-    from apps.ingestion.src.core.models.task.enums import TaskIdentity
+    from src.core.models.task.enums import TaskIdentity
 
 LOG = logger
 
@@ -130,7 +131,7 @@ class ExecutionContext(msgspec.Struct, kw_only=True):
 
     def parse_task_id(self, full_string: str) -> TaskIdentity:
         """Parse colon-delimited string into TaskIdentity."""
-        from apps.ingestion.src.core.models.task.enums import TaskIdentity
+        from src.core.models.task.enums import TaskIdentity
 
         return TaskIdentity.from_signal_stem(full_string)
 

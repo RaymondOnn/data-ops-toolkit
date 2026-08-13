@@ -4,16 +4,17 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, Protocol
 
-from apps.ingestion.src.core.models.task import TaskSignal
-from apps.ingestion.src.core.models.task.enums import (
+from loguru import logger
+
+from src.core.models.task import TaskSignal
+from src.core.models.task.enums import (
     SUPPORTED_SIGNAL_EXTENSIONS,
     TaskIdentity,
 )
-from apps.ingestion.src.utils.common import find_path
-from loguru import logger
+from src.utils.common import find_path
 
 if TYPE_CHECKING:
-    from apps.ingestion.src.core.contexts import ExecutionContext
+    from src.core.contexts import ExecutionContext
 
 LOG = logger
 

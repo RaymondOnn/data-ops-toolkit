@@ -1,0 +1,127 @@
+
+
+identifiers:
+  quote_open: '"'
+  quote_close: '"'
+  expected_parts: 2,
+  naming_structure: "[SCHEMA.]TABLE" # Can resolve default database
+  allowed_depths: [1, 2, 3]
+
+# -----------------------------------------------------------------------------
+# 1. CORE OPERATIONAL SQL (DDL & DML)
+# -----------------------------------------------------------------------------
+core:
+  drop_table: "drop table if exists {table}"
+  drop_view: "drop view if exists {view}"
+  drop_schema: "drop schema if exists {schema} cascade"
+
+  create_schema: "create schema if not exists {schema}"
+  create_table: "create table if not exists {table} ({col_types})"
+
+  truncate: "delete from {table}"
+
+  insert: "insert into {table} ({fields}) values ({values})"
+  replace: "insert into {table} ({fields}) values ({values}) on conflict ({pk}) do update"
+  update_temp: "update {table} set {set_values} where {join_cond}"
+
+# -----------------------------------------------------------------------------
+# 2. MERGE STRATEGIES
+# -----------------------------------------------------------------------------
+merge:
+  merge_update: |
+    update {tgt_table} tgt
+    set {set_values}
+    from {src_table} src
+    where {join_cond}
+
+  merge_insert: |
+    insert into {tgt_table} ({insert_fields})
+    select {src_fields}
+    from {src_table} src
+    where not exists (
+      select 1
+      from {tgt_table} tgt
+      where {join_cond}
+    )
+
+  merge_delete: |
+    delete from {tgt_table} tgt
+    using {src_table} src
+    where {join_cond}
+
+# -----------------------------------------------------------------------------
+# 3. METADATA QUERIES
+# -----------------------------------------------------------------------------
+metadata:
+  table_exists: |
+    select count(*)
+    from information_schema.tables
+    where table_schema = '{schema}' and table_name = '{table}'
+
+  tables: |
+    select table_name
+    from information_schema.tables
+    where table_schema = '{schema}' and table_type = 'BASE TABLE'
+    order by table_name
+
+  columns: |
+    select column_name, data_type, character_maximum_length, numeric_precision, numeric_scale, is_nullable
+    from information_schema.columns
+    where table_schema = '{schema}' and table_name = '{table}'
+    order by ordinal_position
+
+  primary_keys: |
+    select column_name
+    from duckdb_constraints()
+    where constraint_type = 'PRIMARY KEY'
+      and schema_name = '{schema}'
+      and table_name = '{table}'
+
+# -----------------------------------------------------------------------------
+# 4. DATA PROFILING & CHECKS
+# -----------------------------------------------------------------------------
+analysis:
+  count: "select count(*) as cnt from {table}"
+  sample: "select {fields} from {table} limit {n}"
+
+# -----------------------------------------------------------------------------
+# 5. IN-FLIGHT TRANSFORM FUNCTION WRAPPER TEMPLATES
+# -----------------------------------------------------------------------------
+function:
+  cast_to_date: "cast({val} as date)"
+  cast_to_string: "cast({val} as varchar)"
+  md5: "md5({val})"
+  coalesce: "coalesce({val}, {default})"
+
+# -----------------------------------------------------------------------------
+# 6. TYPE MAPS
+# -----------------------------------------------------------------------------
+general_type_map:
+  string: "varchar"
+  integer: "bigint"
+  decimal: "decimal(38,9)"
+  float: "double"
+  boolean: "boolean"
+  date: "date"
+  time: "time"
+  datetime: "timestamp with time zone"
+  json: "json"
+  binary: "blob"
+
+native_type_map:
+  varchar: "string"
+  text: "string"
+  bigint: "integer"
+  hugeint: "integer"
+  integer: "integer"
+  smallint: "integer"
+  decimal: "decimal"
+  double: "float"
+  float: "float"
+  boolean: "boolean"
+  date: "date"
+  time: "time"
+  timestamp with time zone: "datetime"
+  timestamp: "datetime"
+  json: "json"
+  blob: "binary"

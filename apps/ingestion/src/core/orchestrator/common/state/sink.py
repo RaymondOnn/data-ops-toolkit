@@ -6,10 +6,11 @@ from threading import RLock
 
 import msgspec
 import polars as pl
-from apps.ingestion.src.core.orchestrator.enums import TaskUpdate
-from apps.ingestion.src.services.factory import ServiceFactory
 from libs.database import TypeResolver
 from loguru import logger
+
+from src.core.orchestrator.enums import TaskUpdate
+from src.services.factory import ServiceFactory
 
 LOG = logger
 DESTINATION_TBL = "META.EXECUTION_LOG"
@@ -52,7 +53,7 @@ class StateSink:
         self.stage_dir.mkdir(parents=True, exist_ok=True)
         self.archive_dir.mkdir(parents=True, exist_ok=True)
 
-        LOG.info(
+        LOG.trace(
             "StateSink initialized",
             stage_dir=str(self.stage_dir),
             archive_dir=str(self.archive_dir),
@@ -184,7 +185,7 @@ class StateSink:
         """
         if self._target_schema is None:
             LOG.debug("Fetching target table schema", table=DESTINATION_TBL)
-            self._target_schema = self.db.client.get_schema(DESTINATION_TBL)
+            self._target_schema = self.db.connector.get_schema(DESTINATION_TBL)
         return self._target_schema
 
     def send(self) -> bool:
@@ -303,7 +304,7 @@ class StateSink:
 
             LOG.info("Loading Parquet files to ClickHouse", count=len(pending))
 
-            self.db.client.copy_from_file(
+            self.db.connector.copy_from_file(
                 table=DESTINATION_TBL,
                 source_dir=str(self.stage_dir),
                 file_ext="parquet",
@@ -318,7 +319,7 @@ class StateSink:
 
     def close(self) -> None:
         """Close stream and cleanup resources."""
-        LOG.info("Closing StateStream")
+        LOG.trace("Closing StateStream")
         try:
             self.send()
         except Exception:

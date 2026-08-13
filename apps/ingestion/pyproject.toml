@@ -20,12 +20,20 @@ dependencies = [
     "nanoid",
     "typer",
     "filelock",
-    "dynaconf==3.2.13",
+    "dynaconf",
     "apscheduler",
     "simpleeval",
     "numpy",
 ]
 requires-python = ">=3.11"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
 
 [tool.uv.sources]
 # This tells uv: "Don't look on PyPI, look inside this monorepo"

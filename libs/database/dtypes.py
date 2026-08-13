@@ -3,6 +3,8 @@ from typing import Any, Final
 
 import polars as pl
 
+from libs.database.sql import Dialect, DialectTemplate
+
 
 class TypeGroup(StrEnum):
     """Canonical type groups for cross-database compatibility."""
@@ -53,14 +55,17 @@ _GLOBAL_TYPE_MAPPING: Final[dict[str, TypeGroup]] = {
     "raw": TypeGroup.BINARY,
 }
 
-_PROVIDER_OVERRIDES: Final[dict[str, dict[str, TypeGroup]]] = {
-    "oracle": {
-        # Treat Oracle DATE as TEMPORAL instead of basic DATE
-        "date": TypeGroup.TEMPORAL,
-    },
-    "postgres": {
-        # Custom Postgres resolutions if any anomalies arise
-    },
+GENERIC_TO_TYPE_GROUP: Final[dict[str, TypeGroup]] = {
+    "string": TypeGroup.TEXT,
+    "integer": TypeGroup.NUMERIC,
+    "decimal": TypeGroup.NUMERIC,
+    "float": TypeGroup.NUMERIC,
+    "boolean": TypeGroup.BOOLEAN,
+    "date": TypeGroup.TEMPORAL,
+    "time": TypeGroup.TEMPORAL,
+    "datetime": TypeGroup.TEMPORAL,
+    "json": TypeGroup.OBJECT,
+    "binary": TypeGroup.BINARY,
 }
 
 # Polars type mapping
@@ -82,19 +87,35 @@ class TypeResolver:
     """Resolves database-specific types to canonical Polars types."""
 
     @classmethod
-    def resolve_to_group(cls, db_type: str, raw_type: str) -> TypeGroup:
-        """Convert DB-specific type string to canonical TypeGroup."""
-        base_type = cls._normalize_type(raw_type)
-        db_key = db_type.lower()
+    def db_to_generic_type(cls, dialect: str | Dialect, raw_type: str) -> str:
+        """Looks up the dialect's native_type_map from the YAML template."""
+        dialect_enum = (
+            Dialect(dialect.casefold()) if isinstance(dialect, str) else dialect
+        )
+        template = DialectTemplate.build(dialect_enum)
 
-        # Check database-specific overrides first
-        if (provider_map := _PROVIDER_OVERRIDES.get(db_key)) and (
-            mapped_group := provider_map.get(base_type)
-        ):
-            return mapped_group
+        cleaned_type = cls._normalize_type(raw_type)
 
-        # Fall back to the consolidated global multi-string map
-        return _GLOBAL_TYPE_MAPPING.get(base_type, DEFAULT_TYPE_GROUP)
+        # 1. Check template native_type_map (e.g. "character varying" -> "string")
+        generic_type = template.native_type_map.get(cleaned_type)
+        if generic_type:
+            return generic_type
+
+        # 2. Fallback prefix check (e.g. "varchar(255)" -> "varchar")
+        base_type = cleaned_type.split("(")[0].strip()
+        return template.native_type_map.get(base_type, "string")
+
+    @classmethod
+    def resolve_to_group(cls, dialect: str | Dialect, raw_type: str) -> TypeGroup:
+        """DB type -> Generic Type -> TypeGroup"""
+        generic_type = cls.db_to_generic_type(dialect, raw_type)
+        return GENERIC_TO_TYPE_GROUP.get(generic_type, TypeGroup.TEXT)
+
+    @classmethod
+    def resolve_to_polars(cls, dialect: str | Dialect, raw_type: str) -> pl.DataType:
+        """DB type -> Generic Type -> TypeGroup -> Polars DataType"""
+        group = cls.resolve_to_group(dialect, raw_type)
+        return _POLARS_MAP.get(group, pl.Utf8)
 
     @classmethod
     def group_to_polars(cls, group: TypeGroup) -> Any:
@@ -102,32 +123,17 @@ class TypeResolver:
         return _POLARS_MAP.get(group, DEFAULT_POLARS_TYPE)
 
     @classmethod
-    def resolve_to_polars(cls, db_type: str, raw_type: str) -> pl.DataType:
-        """Complete resolution: DB type -> Polars type."""
-        group = cls.resolve_to_group(db_type, raw_type)
-        return cls.group_to_polars(group)
-
-    @classmethod
     def _normalize_type(cls, raw_type: str) -> str:
-        """Strip parameters, nullability wrappers, and whitespace from type strings."""
         if not raw_type:
             return ""
 
         raw = raw_type.strip().lower()
 
-        # 1. Unpack Nullable or LowCardinality wrappers commonly used in ClickHouse
-        # e.g. "nullable(string)" -> "string"
+        # Unpack ClickHouse Nullable(...) or LowCardinality(...)
         while raw.startswith("nullable(") or raw.startswith("lowcardinality("):
             raw = raw[raw.find("(") + 1 : -1].strip()
 
-        # 2. Handle PostgreSQL array notation (_int4, _text)
-        if raw.startswith("_"):
-            return raw
-
-        # 3. Remove parameters (e.g., "varchar(255)" -> "varchar")
-        if "(" in raw:
-            raw = raw.split("(", maxsplit=1)[0]
-
+        # Strip standard parameter lengths like varchar(255) if exact match fails
         return raw
 
     # Convenience methods

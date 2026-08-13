@@ -40,15 +40,15 @@ class RollbackRequired(Exception):
     to the specified stage to recreate the missing dependency.
     """
 
-    def __init__(self, target_stage: str, reason: str):
+    def __init__(self, target_step_id: str, reason: str):
         """
         Initialize the rollback signal.
 
         Args:
-            target_stage: The name of the stage to rollback to.
+            target_step_id: The ID of the step to rollback to.
             reason: The reason for the rollback.
         """
-        self.target_stage = target_stage
+        self.target_step_id = target_step_id
         self.reason = reason
         super().__init__(self.reason)
 

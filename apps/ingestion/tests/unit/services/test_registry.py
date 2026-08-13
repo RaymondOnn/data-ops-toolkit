@@ -1,8 +1,9 @@
 import time
 
 import pytest
-from apps.ingestion.src.core.monitor import ServiceMonitor, monitor
 from libs.resilience.circuit_breaker import CircuitBreaker, CircuitOpen
+
+from src.services.health.monitor import ServiceMonitor, monitor
 
 
 class TestServiceMonitor:

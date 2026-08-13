@@ -2,8 +2,9 @@ from unittest.mock import MagicMock
 
 import polars as pl
 import pytest
-from apps.ingestion.src.core.models.stages.enums import Stage
-from apps.ingestion.src.core.models.stages.extract import ExtractStage
+
+from src.core.models.stages.extract import ExtractStage
+from src.core.stages.enums import Stage
 
 
 @pytest.fixture

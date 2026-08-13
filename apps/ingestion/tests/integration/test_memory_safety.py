@@ -1,7 +1,8 @@
 import time
 
 import polars as pl
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task
+
+from src.core.models.task import ExecutionStatus, Task
 
 
 def test_streaming_memory_safety_limit(runtime, tmp_path):

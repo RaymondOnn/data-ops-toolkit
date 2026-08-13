@@ -1,6 +1,7 @@
 import pytest
-from apps.ingestion.src.core.models.task.enums import TaskRef
-from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE
+
+from src.core.models.task.enums import TaskRef
+from src.utils.constants import CACHE_TASK_NAMESPACE
 
 
 @pytest.fixture

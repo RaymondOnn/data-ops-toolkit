@@ -1,7 +1,7 @@
 from unittest.mock import patch
 
-from apps.ingestion.src.core.models.stages.enums import Stage
-from apps.ingestion.src.core.models.stages.start import StartStage
+from src.core.models.stages.start import StartStage
+from src.core.stages.enums import Stage
 
 
 def test_start_stage_execution(mock_task):

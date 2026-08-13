@@ -10,11 +10,12 @@ from enum import StrEnum
 import psutil
 import ray
 import ray.util.state
-from apps.ingestion.src.core.contexts import RayMode
-from apps.ingestion.src.core.contexts.execution import ExecutionContext
-from apps.ingestion.src.core.models.stages.enums import Stage
-from apps.ingestion.src.core.system import HealthStatus, SystemMonitor
 from loguru import logger
+
+from src.core.contexts import RayMode
+from src.core.contexts.execution import ExecutionContext
+from src.core.stages.enums import Stage
+from src.services.health.system import HealthStatus, SystemMonitor
 
 LOG = logger
 

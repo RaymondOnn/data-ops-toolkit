@@ -3,12 +3,12 @@
 from typing import TYPE_CHECKING, Any
 
 import msgspec
-from apps.ingestion.src.core.contexts import ExecutionContext, TaskContext
-from apps.ingestion.src.core.models.stages.enums import ALL_STAGES
-from apps.ingestion.src.core.models.task import ExecutionStatus, TaskManifest
-from apps.ingestion.src.core.orchestrator.enums import TaskUpdate, to_ch_datetime
 from libs.utils.dates import current_timestamp
 from loguru import logger
+
+from src.core.contexts import ExecutionContext, TaskContext
+from src.core.models.task import ExecutionStatus, TaskManifest
+from src.core.orchestrator.enums import TaskUpdate, to_ch_datetime
 
 if TYPE_CHECKING:
     from .store import StateStore
@@ -26,80 +26,7 @@ class StateSource:
     ):
         self.store = store
         self.exec_ctx = exec_ctx
-        LOG.debug("StateSource initialized")
-
-    # def sync_folder(
-    #     self,
-    #     folder_path: Path,
-    #     deep_sync: bool = False,
-    #     metadata: dict[str, Any] | None = None,
-    # ) -> None:
-    #     """Synchronizes a physical task folder with the orchestrator state.
-
-    #     This reads the manifest and config files from disk and notifies
-    #     the store and sink of the task's latest status.
-
-    #     Args:
-    #         folder_path: The physical directory for the run.
-    #         deep_sync: If True, serializes the entire manifest into the
-    #             telemetry database for deep audit.
-
-    #     Decision: Manifest Synchronization.
-    #     By rehydrating state from disk, we enable 'Cold Start'
-    #     resumption. If the orchestrator daemon crashes, it can
-    #     reconstruct its internal cache by scanning the 'active/'
-    #     folder and invoking this method.
-    #     """
-    #     manifest_file = folder_path / MANIFEST_FILENAME
-    #     config_file = folder_path / CONFIG_FILENAME
-    #     metadata = metadata or {}
-
-    #     if not manifest_file.exists():
-    #         LOG.warning("No manifest found for sync", path=str(folder_path))
-    #         return
-
-    #     LOG.trace("Syncing manifest to state", path=str(folder_path), deep=deep_sync)
-
-    #     try:
-    #         manifest = msgspec.json.decode(
-    #             manifest_file.read_bytes(), type=TaskManifest
-    #         )
-    #         LOG.trace(
-    #             "Loaded manifest", run_id=manifest.run_id, status=manifest.status.value
-    #         )
-
-    #         context = self._load_context(manifest, config_file)
-    #         self.parse_update(manifest, context, deep_sync, metadata)
-    #         LOG.debug("Successfully synced manifest", run_id=manifest.run_id)
-
-    #     except msgspec.DecodeError:
-    #         LOG.exception(
-    #             "Failed to decode manifest", path=str(manifest_file)
-    #         )
-    #     except Exception:
-    #         LOG.exception("Sync failed", path=str(folder_path))
-
-    # def _load_context(self,  folder_path: Path) -> TaskContext | None:
-    #     """Attempts to find the TaskContext required for state alignment.
-
-    #     Decision: Context Discovery.
-    #     We prioritize the local config file found inside the task
-    #     folder. If missing (e.g., during surgical recovery), we
-    #     attempt to build a placeholder from the current registry to
-    #     ensure the state update can still be processed.
-    #     """
-    #     config_file = folder_path / CONFIG_FILENAME
-    #     if not config_file.exists():
-    #         raise FileNotFoundError(f"Missing config file in {folder_path}")
-
-    #     try:
-    #         with config_file.open("rb") as f:
-    #             return msgspec.json.decode(f.read(), type=TaskContext)
-    #     except Exception:
-    #         LOG.exception(
-    #             "Failed to load config file", path=str(config_file)
-    #         )
-    #         raise
+        LOG.trace("StateSource initialized")
 
     def parse_update(
         self,
@@ -130,7 +57,11 @@ class StateSource:
             else:
                 status = manifest.status.value
 
-            progress = self._format_bitmask(manifest.bitmask, status)
+            progress, current_step = self._calculate_step_progress(
+                manifest, context, status
+            )
+            start_time, end_time = self._extract_timestamps(manifest)
+            source_row_count, final_row_count = self._extract_row_counts(manifest)
             remarks = self._build_remarks(manifest, status, metadata)
 
             # Get record and resolve context info
@@ -166,14 +97,14 @@ class StateSource:
                 SCHEDULED_TIMESTAMP_LC=to_ch_datetime(record.SCHEDULED_TIMESTAMP_LC),
                 IS_SCHEDULED=record.IS_SCHEDULED,
                 JOB_STATUS=status,
-                CURRENT_STAGE=manifest.current_stage,
-                JOB_BITMASK=progress,
+                CURRENT_STEP=current_step,
+                PROGRESS=progress,
                 RETRY_ATTEMPTS=manifest.retry_count,
                 LAST_UPDATED_AT_TS_LC=current_timestamp().isoformat(sep=" "),
-                START_TIMESTAMP_LC=getattr(manifest.start, "start_time", None),
-                END_TIMESTAMP_LC=getattr(manifest.archive, "end_time", None),
-                SOURCE_ROW_COUNT=getattr(manifest.extract, "source_count", None),
-                FINAL_ROW_COUNT=getattr(manifest.publish, "final_count", None),
+                START_TIMESTAMP_LC=start_time,
+                END_TIMESTAMP_LC=end_time,
+                SOURCE_ROW_COUNT=source_row_count,
+                FINAL_ROW_COUNT=final_row_count,
                 RUNTIME_OVERRIDES=overrides,
                 FINAL_MANIFEST=(
                     msgspec.json.encode(manifest).decode() if deep_sync else None
@@ -238,33 +169,95 @@ class StateSource:
         return remarks
 
     @staticmethod
-    def _format_bitmask(bitmask: int, status: str) -> str:
-        """Translates a numeric stage bitmask into a human-readable progress bar.
+    def _calculate_step_progress(
+        manifest: TaskManifest, context: TaskContext | None, status: str
+    ) -> tuple[str | None, str | None]:
+        """Calculates 'Step X of Y' progress taking into account from_step and to_step boundaries."""
+        current_step_id = manifest.current_step_id or getattr(
+            manifest, "current_step_id", None
+        )
 
-        Args:
-            bitmask: The current completion bitmask.
-            status: The execution status (for handling failure markers).
+        if not context or not context.steps:
+            return None, current_step_id
 
-        Returns:
-            str: A formatted string like "EXT+ | TRN- | WRI_".
+        # 1. get_step_ids() directly gives us the bounded active step sequence
+        active_step_ids = context.get_step_ids()
+        if not active_step_ids:
+            return None, current_step_id
 
-        Decision: Progress Visualization.
-        Providing a 'Timeline' string in the database log allows SREs
-        to instantly see where a task stalled without needing to
-        unzip and parse terminal logs.
-        """
-        stages = ALL_STAGES
-        failed = status.upper() == ExecutionStatus.FAILED.value
-        failed_seen = False
-        parts = []
+        total_active_count = len(active_step_ids)
 
-        for stage in stages:
-            if bitmask & stage.bitmask:
-                parts.append(f"{stage.token}+")
-            elif failed and not failed_seen:
-                parts.append(f"{stage.token}-")
-                failed_seen = True
-            else:
-                parts.append(f"{stage.token}_")
+        # 2. Match completed step IDs against active step scope
+        completed_ids = set(manifest.completed_step_ids)
+        completed_count = sum(1 for sid in active_step_ids if sid in completed_ids)
 
-        return " | ".join(parts)
+        # 3. Calculate ordinal step position
+        if status == ExecutionStatus.SUCCESS.value:
+            current_index = total_active_count
+        elif current_step_id in active_step_ids:
+            current_index = active_step_ids.index(current_step_id) + 1
+        else:
+            current_index = min(completed_count + 1, total_active_count)
+
+        progress_str = f"Step {current_index} of {total_active_count}"
+
+        # 4. Concise step indicator with boundary context if partial execution
+        formatted_step = current_step_id
+        if context.from_step != "start" or context.to_step:
+            formatted_step = (
+                f"{current_step_id} [{context.from_step}..{context.to_step or 'end'}]"
+            )
+
+        return progress_str, formatted_step
+
+    @staticmethod
+    def _extract_timestamps(manifest: TaskManifest) -> tuple[str | None, str | None]:
+        """Extracts task overall start and end times from executed payloads."""
+        if not manifest.payloads:
+            return None, None
+
+        # Start time is from the first payload
+        start_time = getattr(manifest.payloads[0], "start_time", None)
+
+        # End time is taken from the latest payload only when completed/failed
+        end_time = None
+        if manifest.status in (
+            ExecutionStatus.SUCCESS,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        ):
+            end_time = getattr(manifest.payloads[-1], "end_time", None)
+
+        return start_time, end_time
+
+    @staticmethod
+    def _extract_row_counts(manifest: TaskManifest) -> tuple[str | None, int | None]:
+        """Extracts per-source row counts as a JSON string and identifies final output count."""
+        from src.core.stages.extract.enums import ExtractPayload
+        from src.core.stages.publish.enums import PublishPayload
+        from src.core.stages.write.enums import WritePayload
+
+        source_counts: dict[str, int] = {}
+        final_count = None
+
+        for payload in manifest.payloads:
+            # 1. Map each extract step/resource to its specific row count
+            if isinstance(payload, ExtractPayload):
+                # Prefers resource/source identifier, falls back to step_id
+                source_key = payload.resource or payload.step_id or "unknown_source"
+                source_counts[source_key] = payload.source_count
+
+            # 2. Get the final output count from Publish or Write payload
+            if isinstance(payload, PublishPayload):
+                final_count = payload.final_count
+            elif isinstance(payload, WritePayload) and final_count is None:
+                final_count = payload.write_count
+
+        # Convert dictionary to JSON string if any sources were extracted
+        source_counts_json = (
+            msgspec.json.encode(source_counts).decode("utf-8")
+            if source_counts
+            else None
+        )
+
+        return source_counts_json, final_count

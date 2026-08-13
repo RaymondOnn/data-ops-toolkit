@@ -1,8 +1,6 @@
 """Format handler factory."""
 
-from typing import Any, ClassVar
-
-import fsspec
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from .base import FormatHandler
 from .csv import CSVHandler
@@ -10,23 +8,26 @@ from .json import JSONHandler
 from .parquet import ParquetHandler
 from .xml import XMLHandler
 
+if TYPE_CHECKING:
+    from libs.file.base import FileSystemClient
+
 
 class FormatFactory:
     """Factory for creating format-specific handlers."""
 
     _HANDLERS: ClassVar[dict[str, type[FormatHandler]]] = {
         "csv": CSVHandler,
+        "parquet": ParquetHandler,
         "json": JSONHandler,
         "jsonl": JSONHandler,
         "ndjson": JSONHandler,
-        "parquet": ParquetHandler,
         "xml": XMLHandler,
     }
 
     @staticmethod
     def get(
         ext: str,
-        fs: fsspec.AbstractFileSystem | None = None,
+        fs: "FileSystemClient",
         options: dict[str, Any] | None = None,
     ) -> FormatHandler:
         """Get handler for file extension.
@@ -39,7 +40,8 @@ class FormatFactory:
         Returns:
             FormatHandler: The handler for the file extension.
         """
-        handler_cls = FormatFactory._HANDLERS.get(ext)
+        ext_clean = ext.casefold().lstrip(".")
+        handler_cls = FormatFactory._HANDLERS.get(ext_clean)
         if not handler_cls:
             raise ValueError(f"Unsupported extension: {ext}")
         return handler_cls(fs, options)

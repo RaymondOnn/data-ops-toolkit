@@ -12,37 +12,38 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
-from apps.ingestion.src.cli.state import app, configure_runtime, state
-from apps.ingestion.src.cli.utils import _write_signal_file
-from apps.ingestion.src.core.contexts import (
-    TaskContextBuilder,
-    parse_cli_overrides,
-)
-from apps.ingestion.src.core.models.stages.enums import ALL_STAGES, Stage
-from apps.ingestion.src.core.models.task import Task
-from apps.ingestion.src.core.orchestrator.factory import assemble_runtime
-from apps.ingestion.src.core.orchestrator.modes.trigger import TriggerRuntime
-from apps.ingestion.src.utils.common import setup_logger, short_hash
 from libs.utils.dates import current_timestamp
 from loguru import logger
 
+from src.cli.state import app, configure_runtime, state
+from src.cli.utils import _write_signal_file
+from src.core.contexts import (
+    TaskContextBuilder,
+    parse_cli_overrides,
+)
+from src.core.models.task import Task
+from src.core.orchestrator.factory import assemble_runtime
+from src.core.orchestrator.modes.trigger import TriggerRuntime
+from src.core.stages.enums import ALL_STAGES, Stage
+from src.utils.common import setup_logger, short_hash
+
 
 def _log_startup_msg(
-    dataset: str, partition_date: datetime, from_stage: str | None, to_stage: str | None
+    dataset: str, partition_date: datetime, from_step: str | None, to_step: str | None
 ) -> None:
     """Constructs and prints a descriptive startup message to the console.
 
     Args:
         dataset: The identifier of the dataset being processed.
         partition_date: The logical date for the ingestion run.
-        from_stage: The starting stage label, if restricted.
-        to_stage: The ending stage label, if restricted.
+        from_step: The starting stage label, if restricted.
+        to_step: The ending stage label, if restricted.
 
     """
     msg = f"🚀 Initializing {dataset} for {partition_date.date()}"
-    if from_stage or to_stage:
-        start_label = from_stage or Stage.first().value
-        end_label = to_stage or Stage.last().value
+    if from_step or to_step:
+        start_label = from_step or Stage.first().value
+        end_label = to_step or Stage.last().value
         msg += f" (Range: {start_label} ➔ {end_label})"
     typer.echo(msg)
 
@@ -111,14 +112,14 @@ def _get_trigger_runtime(
 
 
 def _apply_run_overrides(
-    overrides: dict, from_stage: str | None, to_stage: str | None
+    overrides: dict, from_step: str | None, to_step: str | None
 ) -> dict:
     """Injects execution range constraints into the global override dictionary.
 
     Args:
         overrides: Existing custom user settings.
-        from_stage: The label of the stage to start from.
-        to_stage: The label of the stage to stop after.
+        from_step: The label of the stage to start from.
+        to_step: The label of the stage to stop after.
 
     Returns:
         dict: The updated overrides dictionary.
@@ -128,10 +129,10 @@ def _apply_run_overrides(
     individual stage strategies to remain unaware of the total range while
     the Orchestrator enforces the execution boundaries.
     """
-    if from_stage:
-        overrides.setdefault("_global", {})["from_stage"] = from_stage
-    if to_stage:
-        overrides.setdefault("_global", {})["to_stage"] = to_stage
+    if from_step:
+        overrides.setdefault("_global", {})["from_step"] = from_step
+    if to_step:
+        overrides.setdefault("_global", {})["to_step"] = to_step
     return overrides
 
 
@@ -156,7 +157,7 @@ def _validate_stage_label(label: str | None) -> str | None:
 
 
 def _resume_locally(
-    exec_ctx: Any, builder: Any, run_id: str, from_stage: str | None, overrides: dict
+    exec_ctx: Any, builder: Any, run_id: str, from_step: str | None, overrides: dict
 ) -> None:
     """Initializes a local runtime to surgically resume a failed task.
 
@@ -164,7 +165,7 @@ def _resume_locally(
         exec_ctx: The execution context.
         builder: The context builder for re-provisioning.
         run_id: The ID of the task to recover.
-        from_stage: Optional stage label to rewind to.
+        from_step: Optional stage label to rewind to.
         overrides: Custom settings to apply during recovery.
 
     Decision: Local Recovery Ownership.
@@ -181,11 +182,11 @@ def _resume_locally(
         raise typer.Exit(code=1)
 
     # Apply Surgical Overrides to the quarantined config before recovery
-    if from_stage or overrides:
+    if from_step or overrides:
         task = Task.from_path(folder, exec_ctx)
         updates = {}
-        if from_stage:
-            updates["current_stage"] = from_stage
+        if from_step:
+            updates["current_stage"] = from_step
         if overrides:
             updates["custom_overrides"] = overrides
 
@@ -219,10 +220,10 @@ def execute_pipeline(
         str | None,
         typer.Option("--dataset", "-d", help="Dataset identifier (e.g., 'sales_data')"),
     ] = None,
-    from_stage: Annotated[
+    from_step: Annotated[
         str | None, typer.Option("--from", help="Start execution from this stage")
     ] = None,
-    to_stage: Annotated[
+    to_step: Annotated[
         str | None, typer.Option("--to", help="Stop execution after this stage")
     ] = None,
     verbose: Annotated[
@@ -241,8 +242,8 @@ def execute_pipeline(
         partition_date: The target date for processing (YYYY-MM-DD).
         job_id: The unique identifier for this specific pipeline run.
         dataset: Dataset identifier (e.g., 'sales_data').
-        from_stage: Start execution from this specific stage.
-        to_stage: Stop execution after this specific stage.
+        from_step: Start execution from this specific stage.
+        to_step: Stop execution after this specific stage.
         debug: Enable verbose logging and diagnostics.
         settings: Override config parameters using key=value pairs.
 
@@ -269,7 +270,7 @@ def execute_pipeline(
     try:
         # 1. Setup Environment
         overrides = _apply_run_overrides(
-            parse_cli_overrides(settings), from_stage, to_stage
+            parse_cli_overrides(settings), from_step, to_step
         )
         setup_logger(
             log_dir=Path("./.workspace/logs"),
@@ -280,7 +281,7 @@ def execute_pipeline(
 
         # 2. Assemble and Run
         runtime, _ = _get_trigger_runtime(state["verbose_level"], state["ray_mode"])
-        _log_startup_msg(dataset, partition_date, from_stage, to_stage)
+        _log_startup_msg(dataset, partition_date, from_step, to_step)
 
         runtime.run(
             job_id=job_id,
@@ -356,7 +357,7 @@ def add_adhoc_run(
 @app.command(name="resume")
 def resume_failed_run(
     run_id: Annotated[str, typer.Argument(help="The specific Run ID to resume")],
-    from_stage: Annotated[
+    from_step: Annotated[
         str | None,
         typer.Option("--from", help="Force restart from this stage (Rewind)"),
     ] = None,
@@ -372,12 +373,12 @@ def resume_failed_run(
 
     Args:
         run_id: The unique identifier of the failed task.
-        from_stage: Force a rewind to this specific stage.
+        from_step: Force a rewind to this specific stage.
         settings: Key=value overrides for the recovery run.
         env: Environment to resolve configurations from.
 
     Raises:
-        typer.BadParameter: If the provided 'from_stage' label is invalid.
+        typer.BadParameter: If the provided 'from_step' label is invalid.
 
     Decision: Dual-Mode Recovery.
     If the Daemon is active (detected via lock file), this drops a RESUME
@@ -391,15 +392,15 @@ def resume_failed_run(
     builder = TaskContextBuilder(env=env)
     exec_ctx = builder.build_execution_context()
 
-    _validate_stage_label(from_stage)
+    _validate_stage_label(from_step)
 
     # Process overrides if provided
     overrides = parse_cli_overrides(settings) if settings else {}
-    payload = {"run_id": run_id, "from_stage": from_stage, "overrides": overrides}
+    payload = {"run_id": run_id, "from_step": from_step, "overrides": overrides}
 
     if exec_ctx.always_on:
         # --- DAEMON MODE: Drop Signal ---
         _write_signal_file(exec_ctx, f"RESUME_{run_id}.cmd", payload)
     else:
         # --- TRIGGER MODE: Execute Immediately ---
-        _resume_locally(exec_ctx, builder, run_id, from_stage, overrides)
+        _resume_locally(exec_ctx, builder, run_id, from_step, overrides)

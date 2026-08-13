@@ -1,6 +1,6 @@
 import time
 
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task
+from src.core.models.task import ExecutionStatus, Task
 
 
 def test_full_pipeline_lifecycle(runtime, tmp_path):

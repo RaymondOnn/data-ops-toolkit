@@ -7,14 +7,15 @@ import msgspec
 import msgspec.yaml
 import polars as pl
 import typer
-from apps.ingestion.src.cli.state import state
-from apps.ingestion.src.core.contexts import (
+
+from src.cli.state import state
+from src.core.contexts import (
     ExecutionMode,
     TaskContext,
     TaskContextBuilder,
 )
-from apps.ingestion.src.core.orchestrator.factory import assemble_runtime
-from apps.ingestion.src.extras.regression.regression import (
+from src.core.orchestrator.factory import assemble_runtime
+from src.extras.regression.regression import (
     RegressionRunner,
     find_affected_datasets,
 )

@@ -1,0 +1,132 @@
+
+
+
+identifiers:
+  quote_open: '"'
+  quote_close: '"'
+  expected_parts: 2,
+  naming_structure: "SCHEMA.TABLE"
+  allowed_depths: [1, 2, 3]
+
+# -----------------------------------------------------------------------------
+# 1. CORE OPERATIONAL SQL (DDL & DML)
+# -----------------------------------------------------------------------------
+core:
+  drop_table: "drop table if exist {table}"
+  drop_view: "drop view if exist {view}"
+  drop_schema: "drop schema if exist {schema}"
+
+  create_schema: "create schema if not exists {schema}"
+  create_table: "create table if not exists {table} ({col_types})"
+
+  truncate: "truncate table {table}"
+
+  insert: "insert into {table} ({fields}) values ({values})"
+  replace: "insert into {table} ({fields}) values ({values})"
+  update_temp: "update {table} set {set_values} where {join_cond}"
+
+# -----------------------------------------------------------------------------
+# 2. MERGE STRATEGIES
+# -----------------------------------------------------------------------------
+merge:
+  merge_update: |
+    merge into {tgt_table} tgt
+    using {src_table} src
+    on {join_cond}
+    when matched then update set {set_values}
+
+  merge_insert: |
+    insert into {tgt_table} ({insert_fields})
+    select {src_fields}
+    from {src_table} src
+    where not exists (
+      select 1
+      from {tgt_table} tgt
+      where {join_cond}
+    )
+
+  merge_delete: |
+    delete from {tgt_table}
+    where exists (
+      select 1 from {src_table} src where {join_cond}
+    )
+
+# -----------------------------------------------------------------------------
+# 3. METADATA QUERIES
+# -----------------------------------------------------------------------------
+metadata:
+  table_exists: |
+    select count(*)
+    from information_schema.tables
+    where table_schema = '{schema}' and table_name = '{table}'
+
+  tables: |
+    select table_name
+    from information_schema.tables
+    where table_schema = '{schema}' and table_type = 'BASE TABLE'
+    order by table_name
+
+  columns: |
+    select column_name, data_type, character_maximum_length, numeric_precision, numeric_scale, is_nullable
+    from information_schema.columns
+    where table_schema = '{schema}' and table_name = '{table}'
+    order by ordinal_position
+
+  primary_keys: |
+    select kcu.column_name
+    from information_schema.table_constraints tc
+    join information_schema.key_column_usage kcu
+      on tc.constraint_name = kcu.constraint_name
+      and tc.table_schema = kcu.table_schema
+    where tc.constraint_type = 'PRIMARY KEY'
+      and tc.table_schema = '{schema}'
+      and tc.table_name = '{table}'
+    order by kcu.ordinal_position
+
+# -----------------------------------------------------------------------------
+# 4. DATA PROFILING & CHECKS
+# -----------------------------------------------------------------------------
+analysis:
+  count: "select count(*) as cnt from {table}"
+  sample: "select {fields} from {table} fetch first {n} rows only"
+
+# -----------------------------------------------------------------------------
+# 5. IN-FLIGHT TRANSFORM FUNCTION WRAPPER TEMPLATES
+# -----------------------------------------------------------------------------
+function:
+  cast_to_date: "cast({val} as date)"
+  cast_to_string: "cast({val} as varchar)"
+  md5: "md5({val})"
+  coalesce: "coalesce({val}, {default})"
+
+# -----------------------------------------------------------------------------
+# 6. TYPE MAPS
+# -----------------------------------------------------------------------------
+general_type_map:
+  string: varchar(255)  # "varchar(65535)"
+  integer: "bigint"
+  decimal: "DECIMAL(38,9)"
+  float: "double precision"
+  boolean: "BOOLEAN"
+  date: "date"
+  time: "time"
+  datetime: "TIMESTAMP"
+  json: "TEXT"
+  binary: "blob"
+
+native_type_map:
+  varchar: "string"
+  character varying: "string"
+  text: "string"
+  bigint: "integer"
+  integer: "integer"
+  smallint: "integer"
+  numeric: "decimal"
+  decimal: "decimal"
+  double precision: "float"
+  float: "float"
+  boolean: "boolean"
+  date: "date"
+  time: "time"
+  timestamp: "datetime"
+  blob: "binary"

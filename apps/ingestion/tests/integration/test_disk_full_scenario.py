@@ -1,8 +1,8 @@
 import time
 from unittest.mock import MagicMock, patch
 
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task
-from apps.ingestion.src.utils.constants import DISK_THRESHOLD_HALT
+from src.core.models.task import ExecutionStatus, Task
+from src.utils.constants import DISK_THRESHOLD_HALT
 
 
 def test_disk_full_halts_task_execution(runtime, tmp_path):

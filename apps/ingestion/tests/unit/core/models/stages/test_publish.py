@@ -1,9 +1,10 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from apps.ingestion.src.core.models.stages.enums import Stage
-from apps.ingestion.src.core.models.stages.publish import PublishStage
-from apps.ingestion.src.utils.exceptions import RollbackRequired
+
+from src.core.models.stages.publish import PublishStage
+from src.core.stages.enums import Stage
+from src.utils.exceptions import RollbackRequired
 
 
 @pytest.fixture

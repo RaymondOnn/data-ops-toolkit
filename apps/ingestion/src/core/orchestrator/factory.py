@@ -1,5 +1,5 @@
-from apps.ingestion.src.core.contexts import ExecutionContext, TaskContextBuilder
-from apps.ingestion.src.core.orchestrator.common import (
+from src.core.contexts import ExecutionContext, TaskContextBuilder
+from src.core.orchestrator.common import (
     Janitor,
     Orchestrator,
     SignalScanner,
@@ -7,7 +7,7 @@ from apps.ingestion.src.core.orchestrator.common import (
     TaskManager,
     TimeoutMonitor,
 )
-from apps.ingestion.src.services.factory import ServiceFactory
+from src.services.factory import ServiceFactory
 
 from .modes import DaemonRuntime, TriggerRuntime
 

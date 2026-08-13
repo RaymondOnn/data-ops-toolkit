@@ -1,8 +1,9 @@
 from enum import StrEnum
 
 import msgspec
-from apps.ingestion.src.core.models.task.status import ExecutionStatus
-from apps.ingestion.src.utils.constants import CACHE_TASK_NAMESPACE
+
+from src.core.models.task.status import ExecutionStatus
+from src.utils.constants import CACHE_TASK_NAMESPACE
 
 
 class TaskSignal(StrEnum):
@@ -44,7 +45,7 @@ class TaskRef(msgspec.Struct, frozen=True):
 
     identity: TaskIdentity
     status: ExecutionStatus
-    stage: str
+    step_id: str
     namespace: str = CACHE_TASK_NAMESPACE
 
     @classmethod
@@ -57,7 +58,7 @@ class TaskRef(msgspec.Struct, frozen=True):
         return cls(
             namespace=parts[0],
             status=ExecutionStatus(parts[1]),
-            stage=parts[2],
+            step_id=parts[2],
             identity=TaskIdentity(*parts[3:]),
         )
 
@@ -69,22 +70,23 @@ class TaskRef(msgspec.Struct, frozen=True):
     def run_id(self) -> str:
         return self.identity.run_id
 
-    def build(self, status: str | None = None, stage: str | None = None) -> str:
+    def build(self, status: str | None = None, step_id: str | None = None) -> str:
         """Build cache key string with optional overrides."""
         return (
             f"{self.namespace}:"
             f"{status or self.status.value}:"
-            f"{stage or self.stage}:"
+            f"{step_id or self.step_id}:"
             f"{self.identity.job_id}:{self.identity.dataset_id}:{self.identity.partition_date}:"
             f"{self.identity.run_id}"
         )
 
     def with_updates(
-        self, status: ExecutionStatus | None = None, stage: str | None = None
+        self, status: ExecutionStatus | None = None, step_id: str | None = None
     ) -> "TaskRef":
         """Create new TaskRef with updated status/stage."""
         return msgspec.structs.replace(
             self,
             status=status if status is not None else self.status,
-            stage=stage if stage is not None else self.stage,
+            # stage=stage if stage is not None else self.stage,
+            step_id=step_id if step_id is not None else self.step_id,
         )

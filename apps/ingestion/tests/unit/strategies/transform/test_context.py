@@ -1,7 +1,8 @@
 from pathlib import Path
 
 import msgspec
-from apps.ingestion.src.core.strategies.transform.base import TransformContext
+
+from src.core.strategies.transform.base import TransformContext
 
 
 def test_transform_context_initialization():

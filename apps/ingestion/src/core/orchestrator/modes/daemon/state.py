@@ -1,20 +1,19 @@
 """Daemon-only logic for observing database state and handling background events."""
 
-from datetime import datetime
-
 import msgspec
-from apps.ingestion.src.core.contexts.execution import ExecutionContext
-from apps.ingestion.src.core.contexts.task import TaskContext
-from apps.ingestion.src.core.models.task import ExecutionStatus, TaskManifest
-from apps.ingestion.src.core.orchestrator.common.state import StateHub
-from apps.ingestion.src.core.orchestrator.enums import (
+import polars as pl
+from loguru import logger
+
+from src.core.contexts.execution import ExecutionContext
+from src.core.contexts.task import TaskContext
+from src.core.models.task import ExecutionStatus, TaskManifest
+from src.core.orchestrator.common.state import StateHub
+from src.core.orchestrator.enums import (
     TaskRecord,
-    to_ch_datetime,
 )
-from apps.ingestion.src.utils.constants import (
+from src.utils.constants import (
     MANIFEST_FILENAME,
 )
-from loguru import logger
 
 LOG = logger
 SOURCE_TABLE = "META.CURRENT_EXECUTION"
@@ -40,7 +39,7 @@ class DaemonState:
         self.exec_ctx = exec_ctx
         self._column_cache: list[str] | None = None
 
-        LOG.debug("DaemonStateObserver initialized")
+        LOG.trace("DaemonStateObserver initialized")
 
     def refresh(self, lookahead_minutes: int = 60) -> dict[str, TaskRecord]:
         """
@@ -52,21 +51,11 @@ class DaemonState:
         Returns:
             dict[str, TaskRecord]: Mapping of Run IDs to TaskRecord objects.
         """
-        active_statuses = [f"'{s.value}'" for s in ExecutionStatus.active_statuses()]
-        status_filter = ", ".join(active_statuses)
+        # active_statuses = [f"'{s.value}'" for s in ExecutionStatus.active_statuses()]
+        # status_filter = ", ".join(active_statuses)
 
-        sql = f"""
-            WITH dates AS (
-                SELECT
-                    8 AS OFFSET_HOURS,
-                    now64(3) + INTERVAL OFFSET_HOURS HOUR AS NOW_TS_LC
-            )
-            SELECT * FROM {SOURCE_TABLE}
-            WHERE JOB_STATUS IN ({status_filter})
-            AND RUN_ID IS NOT NULL
-            AND SCHEDULED_TIMESTAMP_LC <= (SELECT NOW_TS_LC FROM dates)
-            + INTERVAL {lookahead_minutes} MINUTE
-        """
+        # TODO: Compute query via SQLCompiler
+        sql = "SELECT * FROM META.DAEMON_TASK_POLL"
 
         try:
             records = self._fetch_records(sql)
@@ -85,31 +74,56 @@ class DaemonState:
         """Execute SQL and convert results to TaskRecord dictionary."""
         records = {}
 
-        # Get or cache column schema
-        if not self._column_cache:
-            self._column_cache = [
-                row[0]
-                for row in self.hub.sink.db.fetch(f"DESCRIBE TABLE {SOURCE_TABLE}")
+        # Query directly using fetch_df() - column names are automatically included
+        for df in self.hub.sink.db.fetch_df(sql):
+            processed_df = df
+
+            # 1. Cast Binary / BinaryView columns to Utf8 to prevent write_json panic
+            binary_cols = [
+                c
+                for c, dtype in processed_df.schema.items()
+                if dtype == pl.Binary or "Binary" in str(dtype)
             ]
+            if binary_cols:
+                processed_df = processed_df.with_columns(
+                    pl.col(col).cast(pl.Utf8, strict=False) for col in binary_cols
+                )
 
-        raw_records = self.hub.sink.db.fetch(sql)
+            # 2. Strip trailing null bytes from Utf8 columns
+            str_cols = [
+                c for c, dtype in processed_df.schema.items() if dtype == pl.Utf8
+            ]
+            if str_cols:
+                processed_df = processed_df.with_columns(
+                    pl.col(col).str.strip_chars("\x00") for col in str_cols
+                )
 
-        for raw_row in raw_records:
-            raw_dict = dict(zip(self._column_cache, raw_row, strict=False))
+            # 3. Format datetimes directly inside Polars
+            datetime_cols = [
+                c for c, dtype in processed_df.schema.items() if dtype.is_temporal()
+            ]
+            if datetime_cols:
+                processed_df = processed_df.with_columns(
+                    pl.col(col).dt.strftime("%Y-%m-%d %H:%M:%S")
+                    for col in datetime_cols
+                )
 
-            # Clean up values
-            for key, value in raw_dict.items():
-                if isinstance(value, bytes):
-                    raw_dict[key] = value.decode("utf-8").rstrip("\x00")
-                elif isinstance(value, datetime):
-                    raw_dict[key] = to_ch_datetime(value)
-
+            # 4. Safely serialize to JSON and parse with msgspec
+            json_bytes = processed_df.write_json().encode("utf-8")
             try:
-                record = msgspec.convert(raw_dict, TaskRecord)
-                records[record.RUN_ID] = record
+                parsed_records = msgspec.json.decode(json_bytes, type=list[TaskRecord])
+                for rec in parsed_records:
+                    records[rec.RUN_ID] = rec
             except msgspec.ValidationError:
-                LOG.warning("Failed to convert record", run_id=raw_dict.get("RUN_ID"))
-                continue
+                # Fallback to row-by-row conversion if a bad record breaks batch decoding
+                for raw_dict in processed_df.to_dicts():
+                    try:
+                        record = msgspec.convert(raw_dict, TaskRecord)
+                        records[record.RUN_ID] = record
+                    except msgspec.ValidationError:
+                        LOG.warning(
+                            "Failed to convert record", run_id=raw_dict.get("RUN_ID")
+                        )
 
         return records
 
@@ -131,6 +145,7 @@ class DaemonState:
             job_id=run.JOB_ID,
             dataset_id=run.DATASET_ID,
             partition_date=str(run.PARTITION_DATE),
+            run_id=run.RUN_ID,
         )
         manifest = self._try_load_manifest(run.RUN_ID)
 
@@ -140,7 +155,7 @@ class DaemonState:
                 run_id=run.RUN_ID,
                 dataset_id=run.DATASET_ID,
                 status=ExecutionStatus.PENDING,
-                current_stage="N/A",
+                current_step_id="N/A",
                 bitmask=0,
             )
 

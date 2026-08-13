@@ -17,21 +17,22 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from apps.ingestion.src.core.contexts import (
+from loguru import logger
+
+from src.core.contexts import (
     ExecutionMode,
-    LoadConfig,
     TaskContext,
     TaskContextBuilder,
-    TransformConfig,
 )
-from apps.ingestion.src.services.factory import ServiceFactory
-from apps.ingestion.src.utils.constants import APP_CONFIG_ROOT
-from loguru import logger
+from src.core.stages.transform.config import TransformConfig
+from src.core.stages.write.config import LoadConfig
+from src.services.factory import ServiceFactory
+from src.utils.constants import APP_CONFIG_ROOT
 
 from .report import ComparisonReport, RegressionSummary
 
 if TYPE_CHECKING:
-    from apps.ingestion.src.services.base import Sink
+    from src.services.base import Sink
 
 LOG = logger
 
@@ -53,7 +54,7 @@ class RegressionTaskContext(Protocol):
     partition_date: str
 
     transform: TransformConfig
-    load: LoadConfig
+    write: LoadConfig
 
 
 # =============================================================================
@@ -319,8 +320,8 @@ class RegressionRunner:
             maintenance and archival stages during regression tests, keeping the focus
             purely on data movement and transformation logic.
         """
-        from apps.ingestion.src.core.orchestrator.factory import assemble_runtime
-        from apps.ingestion.src.core.orchestrator.modes.trigger import TriggerRuntime
+        from src.core.orchestrator.factory import assemble_runtime
+        from src.core.orchestrator.modes.trigger import TriggerRuntime
 
         builder = TaskContextBuilder(env=self.env)
         exec_ctx = builder.build_execution_context(mode=ExecutionMode.NORMAL)
@@ -332,7 +333,7 @@ class RegressionRunner:
 
         overrides = {
             "load": {"identifier": table_name},
-            "_global": {"from_stage": "extract", "to_stage": "write"},
+            "_global": {"from_step": "extract", "to_step": "write"},
         }
 
         try:
@@ -613,8 +614,8 @@ def find_affected_datasets(
         target_ctx = next(iter(builder.build(job_id=job_id, dataset_ids=dataset_id)))
         target_sig = _get_signature(target_ctx)
         LOG.info(f"Target signature: {target_sig}")
-    except Exception as e:
-        LOG.error(f"Failed to resolve target: {e}")
+    except Exception:
+        LOG.exception("Failed to resolve target")
         return []
 
     if not config_root.exists():

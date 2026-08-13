@@ -3,12 +3,13 @@ from itertools import takewhile
 from typing import Any
 
 import msgspec
-from apps.ingestion.src.core.models.task.enums import ExecutionStatus
-from apps.ingestion.src.core.orchestrator.common.state import StateHub
-from apps.ingestion.src.core.orchestrator.enums import TaskMetadata
 from libs.storage.cache import CacheFactory
 from libs.utils.dates import current_timestamp
 from loguru import logger
+
+from src.core.models.task.enums import ExecutionStatus
+from src.core.orchestrator.common.state import StateHub
+from src.core.orchestrator.enums import TaskMetadata
 
 LOG = logger
 
@@ -19,13 +20,11 @@ class TaskCache:
     def __init__(self, cache_config, prefix: str, state_hub: StateHub | None = None):
         self.prefix = f"{prefix.rstrip(':')}:" if prefix else prefix
         self.client = CacheFactory.create(
-            **{
-                "key": cache_config["key"],
-                "directory": str(cache_config["directory"]),
-                "namespace": prefix,
-                "size_limit": cache_config.get("size_limit", 2**30),
-                "timeout": cache_config.get("timeout", 5),
-            },
+            key=cache_config["key"],
+            directory=str(cache_config["directory"]),
+            namespace=prefix,
+            size_limit=cache_config.get("size_limit", 2**30),
+            timeout=cache_config.get("timeout", 5),
         )
         self.state_hub = state_hub  # Your external DB / State Store instance
         LOG.trace(
@@ -66,8 +65,7 @@ class TaskCache:
         cache_key = self._sanitize_key(key)
 
         client_key = cache_key
-        if client_key.startswith(self.prefix):
-            client_key = client_key[len(self.prefix) :]
+        client_key = client_key.removeprefix(self.prefix)
 
         try:
             raw = self.client.get(client_key)
@@ -100,8 +98,7 @@ class TaskCache:
     def pop(self, key: str, default: Any) -> Any:
         cache_key = self._sanitize_key(key)
         client_key = cache_key
-        if client_key.startswith(self.prefix):
-            client_key = client_key[len(self.prefix) :]
+        client_key = client_key.removeprefix(self.prefix)
 
         return self.client.pop(client_key, default)
 
@@ -115,31 +112,27 @@ class TaskCache:
         self,
         metadata: TaskMetadata,
         next_status: ExecutionStatus,
-        next_stage: str | None = None,
+        next_step_id: str | None = None,
         **overrides,
     ) -> str:
         """Atomically rotates the cache key to prevent state race conditions and syncs the DB."""
         # 1. Purge old tracking footprint
         old_key = self._sanitize_key(metadata.generate_cache_key())
-        old_client_key = (
-            old_key[len(self.prefix) :] if old_key.startswith(self.prefix) else old_key
-        )
+        old_client_key = old_key.removeprefix(self.prefix)
         self.client.pop(old_client_key, None)
 
         # 2. Apply metadata overrides
         metadata.status = next_status.value
         metadata.last_hb = time.time()
-        if next_stage:
-            metadata.current_stage = next_stage
+        if next_step_id:
+            metadata.current_step_id = next_step_id
         for field, value in overrides.items():
             if hasattr(metadata, field):
                 setattr(metadata, field, value)
 
         # 3. Save to active operational runtime cache
         new_key = self._sanitize_key(metadata.generate_cache_key())
-        new_client_key = (
-            new_key[len(self.prefix) :] if new_key.startswith(self.prefix) else new_key
-        )
+        new_client_key = new_key.removeprefix(self.prefix)
         self.client.set(new_client_key, metadata)
         LOG.trace("Cache updated", old_key=old_key, new_key=new_key)
 
@@ -158,7 +151,7 @@ class TaskCache:
                         "%Y-%m-%d", time.gmtime(metadata.last_hb)
                     ),
                     "JOB_STATUS": metadata.status,
-                    "CURRENT_STAGE": metadata.current_stage,
+                    "CURRENT_STEP": metadata.current_step_id,
                     "REMARKS": overrides.get("remarks"),
                     "RETRY_ATTEMPTS": getattr(metadata, "retry_count", 0),
                     "LAST_UPDATED_AT_TS_LC": current_timestamp().isoformat(sep=" "),

@@ -3,11 +3,6 @@ import traceback
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import msgspec
-from apps.ingestion.src.core.models.stages.enums import Stage
-from apps.ingestion.src.core.models.task import ExecutionStatus, Task, TaskSignal
-from apps.ingestion.src.core.orchestrator.enums import TaskMetadata
-from apps.ingestion.src.utils.dates import epoch_to_iso
-from apps.ingestion.src.utils.exceptions import OutOfDiskSpace, TryAgainLater
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitOpen
 from libs.utils.dates import current_timestamp
@@ -16,6 +11,15 @@ from libs.utils.exceptions import (
     TransientError,
 )
 from loguru import logger
+
+from src.core.models.task import ExecutionStatus, Task, TaskSignal
+from src.core.orchestrator.enums import TaskMetadata
+from src.utils.dates import epoch_to_iso
+from src.utils.exceptions import (
+    OutOfDiskSpace,
+    RollbackRequired,
+    TryAgainLater,
+)
 
 if TYPE_CHECKING:
     from .manager import TaskManager
@@ -62,13 +66,10 @@ def is_retryable(task: Task, error: Exception) -> bool:
 
 def is_complete(task: Task) -> bool:
     """Check if task is complete."""
-    from apps.ingestion.src.core.models.stages.enums import StageBitmask
 
-    if StageBitmask(task.manifest.bitmask) == StageBitmask.all():
-        return True
-    return bool(
-        task.context.to_stage and task.context.to_stage == task.manifest.current_stage
-    )
+    required_step_ids = {"start", *task.context.get_step_ids()}
+    completed_step_ids = set(task.manifest.completed_step_ids)
+    return required_step_ids == completed_step_ids
 
 
 # 2. Extract the common logic into a pure helper function
@@ -76,7 +77,7 @@ def transition_task_cache(
     manager: "TaskManager",
     task: "Task",
     target_status: "ExecutionStatus",
-    next_stage: str | None = None,
+    next_step_id: str | None = None,
     **overrides,
 ) -> TaskMetadata | None:
     """Atomically rotates the cache key to the new state status."""
@@ -87,7 +88,10 @@ def transition_task_cache(
         return None
 
     manager.cache.transition_state(
-        metadata, next_stage=next_stage, next_status=target_status, overrides=overrides
+        metadata,
+        next_step_id=next_step_id,
+        next_status=target_status,
+        overrides=overrides,
     )
     LOG.trace(
         "[DISPATCH] outcome cache updated",
@@ -115,21 +119,25 @@ class ProgressOutcome:
     status = ExecutionStatus.WAITING
 
     def handle(self, manager: "TaskManager", task: Task, ctx: Any) -> None:
-        current_stage = Stage(task.task_ref.stage or task.stage.name)
-        next_stage_enum = current_stage.next()
-        if not next_stage_enum:
-            raise ValueError("No next stage found.")
+        current_step_id = task.task_ref.step_id or task.target_step_id
+        next_step_id = task.context.get_next_step_id(current_step_id)
+        if not next_step_id:
+            raise ValueError(
+                f"No next step found after '{current_step_id}' "
+                f"within range [{task.context.from_step} .. {task.context.to_step or 'end'}]"
+            )
 
-        next_stage = next_stage_enum.value
-        task.update_manifest({"status": self.status.value, "current_stage": next_stage})
+        task.update_manifest(
+            {"status": self.status.value, "current_step_id": next_step_id}
+        )
         task.send_signal(TaskSignal.SYNC)
 
         metadata = transition_task_cache(
-            manager, task, next_stage=next_stage, target_status=self.status
+            manager, task, next_step_id=next_step_id, target_status=self.status
         )
         if metadata:
             manager.queue.push(metadata)
-        LOG.info(f"Task {task.run_id} progressing to {next_stage}")
+        LOG.info(f"Task {task.run_id} progressing to {next_step_id}")
 
 
 class RetryOutcome:
@@ -235,13 +243,13 @@ class FailedOutcome:
             LOG.trace(
                 "[DISPATCH] execute timeout",
                 run_id=task.run_id,
-                stage=task.task_ref.stage,
+                step=task.task_ref.step_id,
             )
         else:
             LOG.trace(
                 "[DISPATCH] execute exception",
                 run_id=task.run_id,
-                stage=task.task_ref.stage,
+                step=task.task_ref.step_id,
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
@@ -249,7 +257,7 @@ class FailedOutcome:
             {
                 "status": self.status.value,
                 "error": {
-                    "stage": task.task_ref.stage,
+                    "step_id": task.task_ref.step_id,
                     "message": str(exc),
                     "error_type": type(exc).__name__,
                     "traceback": traceback.format_exc(),
@@ -263,38 +271,40 @@ class FailedOutcome:
         manager.cache.client.pop(
             task.task_ref.build(status=ExecutionStatus.RUNNING), None
         )
-        LOG.exception(
-            f"Task {task.run_id} FAILED at {task.task_ref.stage}. Error: {exc}"
-        )
+        LOG.error(f"Task {task.run_id} FAILED at {task.task_ref.step_id}. Error: {exc}")
 
 
 class RollbackOutcome:
     status = ExecutionStatus.WAITING
 
-    def handle(self, manager: "TaskManager", task: Task, exc: Exception) -> None:
+    def handle(self, manager: "TaskManager", task: Task, exc: RollbackRequired) -> None:
         LOG.trace(
             "[DISPATCH] execute rollback",
             run_id=task.run_id,
-            stage=task.task_ref.stage,
+            step=task.task_ref.step_id,
             error=str(exc),
         )
-        target = task.task_ref.stage
+
         old_key = task.task_ref.build(status=ExecutionStatus.RUNNING)
         metadata = manager.cache.get(
             old_key
         )  # Get metadata safely using the unified interface
 
-        if not metadata or target in metadata.rewind_history:
+        if not metadata or exc.target_step_id in metadata.rewind_history:
             LOG.error(
-                f"Maximum rollback reached or metadata missing for {target}. Dropping to Failure."
+                f"Maximum rollback reached or metadata missing for {exc.target_step_id}. Dropping to Failure."
             )
             FailedOutcome().handle(manager, task, exc)
             return
 
         # Prepare updates
-        metadata.rewind_history[target] = current_timestamp().isoformat()
+        metadata.rewind_history[exc.target_step_id] = current_timestamp().isoformat()
         task.update_manifest(
-            {"status": self.status.value, target: None, "current_stage": target}
+            {
+                "status": self.status.value,
+                # target: None,
+                "current_step_id": exc.target_step_id,
+            }
         )
 
         # Transition cache atomically using helper (Updates cache, syncs DB telemetry, returns new metadata)
@@ -302,14 +312,14 @@ class RollbackOutcome:
             manager,
             task,
             target_status=self.status,
-            next_stage=target,
+            next_step_id=exc.target_step_id,
             rewind_history=metadata.rewind_history,
-            remarks=f"Rolled back task to stage {target}",
+            remarks=f"Rolled back task to step {exc.target_step_id}",
         )
 
-        # Re-enqueue the rolled back task to run again at the target stage
+        # Re-enqueue the rolled back task to run again at the prev step
         if updated_metadata:
             manager.queue.push(updated_metadata)
             LOG.trace(
-                f"[DISPATCH] Rolled back and re-queued task {task.run_id} back to stage {target}"
+                f"[DISPATCH] Rolled back and re-queued task {task.run_id} back to step {exc.target_step_id}"
             )
