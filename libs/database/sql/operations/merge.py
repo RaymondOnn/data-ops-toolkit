@@ -1,12 +1,26 @@
+"""Merge SQL operation compilation functions."""
+
 from typing import TYPE_CHECKING, Any
 
-from .base import SQLOperation, format_fields, format_table_ref, register_compile_func
+from libs.database.sql.exceptions import SQLCompilationError
+
+from .base import (
+    SQLOperation,
+    SQLOperationType,
+)
+from .utils import (
+    append_where_clause,
+    format_fields,
+    format_join_cond,
+    format_set_values,
+    format_table_ref,
+)
 
 if TYPE_CHECKING:
     from libs.database.sql.compile import SQLCompiler
 
 
-@register_compile_func(SQLOperation.MERGE_UPSERT)
+@SQLOperation.register(SQLOperationType.MERGE_UPSERT)
 def _compile_merge_upsert(
     compiler: "SQLCompiler",
     tgt_table: str,
@@ -15,23 +29,16 @@ def _compile_merge_upsert(
     fields: list[str] | str = "*",
     **kwargs,
 ) -> str:
-    """
-    Compiles an upsert operation using the dialect's merge strategy.
-    """
+    """Compiles an upsert operation using the dialect's merge strategy."""
+    template_str = compiler.template.merge.get("merge_upsert")
+    if not template_str:
+        raise SQLCompilationError(
+            f"No 'merge_upsert' template configured for dialect '{compiler.dialect}'."
+        )
+
     formatted_tgt = format_table_ref(compiler, tgt_table, alias="tgt")
     formatted_src = format_table_ref(compiler, src_table, alias="src")
     formatted_fields = format_fields(compiler, fields)
-
-    # Fetch template from the merge section
-    template_str = compiler.template.merge.get("merge_upsert")
-
-    if not template_str:
-        # Fallback ANSI-like multi-statement strategy
-        template_str = (
-            "ALTER TABLE {tgt_table} DELETE WHERE {join_cond};\n"
-            "INSERT INTO {tgt_table} ({insert_fields})\n"
-            "SELECT {src_fields} FROM {src_table}"
-        )
 
     return template_str.format(
         tgt_table=formatted_tgt,
@@ -42,7 +49,7 @@ def _compile_merge_upsert(
     )
 
 
-@register_compile_func(SQLOperation.MERGE_INSERT)
+@SQLOperation.register(SQLOperationType.MERGE_INSERT)
 def _compile_merge_insert(
     compiler: "SQLCompiler",
     tgt_table: str,
@@ -51,20 +58,16 @@ def _compile_merge_insert(
     where_cond: Any | None = None,
     **kwargs,
 ) -> str:
-    """
-    Compiles a merge insert operation.
-    """
+    """Compiles a merge insert operation."""
+    template_str = compiler.template.merge.get("merge_insert")
+    if not template_str:
+        raise SQLCompilationError(
+            f"No 'merge_insert' template configured for dialect '{compiler.dialect}'."
+        )
+
     formatted_tgt = format_table_ref(compiler, tgt_table, alias="tgt")
     formatted_src = format_table_ref(compiler, src_table, alias="src")
     formatted_fields = format_fields(compiler, fields)
-
-    template_str = compiler.template.merge.get("merge_insert")
-
-    if not template_str:
-        template_str = (
-            "INSERT INTO {tgt_table} ({insert_fields})\n"
-            "SELECT {src_fields} FROM {src_table}"
-        )
 
     sql = template_str.format(
         tgt_table=formatted_tgt,
@@ -73,28 +76,24 @@ def _compile_merge_insert(
         src_fields=formatted_fields,
     )
 
-    # Append optional filter conditions on source rows if supplied
-    if where_cond:
-        where_clause = compiler.compile_conditions(where_cond)
-        if where_clause:
-            sql = f"{sql}\n{where_clause}"
-
-    return sql
+    return append_where_clause(compiler, sql, where_cond, newline=True)
 
 
-@register_compile_func(SQLOperation.MERGE_DELETE)
+@SQLOperation.register(SQLOperationType.MERGE_DELETE)
 def _compile_merge_delete(
     compiler: "SQLCompiler",
     tgt_table: str,
     where_cond: Any | str = None,
     **kwargs,
 ) -> str:
-    """
-    Compiles a delete operation on the target table.
-    """
-    formatted_tgt = format_table_ref(compiler, tgt_table, alias="tgt")
+    """Compiles a delete operation on the target table."""
+    template_str = compiler.template.merge.get("merge_delete")
+    if not template_str:
+        raise SQLCompilationError(
+            f"No 'merge_delete' template configured for dialect '{compiler.dialect}'."
+        )
 
-    # Format where condition using compile_conditions if passed as expression/dict/list
+    formatted_tgt = format_table_ref(compiler, tgt_table, alias="tgt")
     if where_cond and not isinstance(where_cond, str):
         where_clause = compiler.compile_conditions(where_cond)
     elif isinstance(where_cond, str):
@@ -106,12 +105,41 @@ def _compile_merge_delete(
     else:
         where_clause = ""
 
-    template_str = compiler.template.merge.get("merge_delete")
-
-    if not template_str:
-        template_str = "DELETE FROM {tgt_table}\n{where_cond}"
-
     return template_str.format(
         tgt_table=formatted_tgt,
         where_cond=where_clause,
     ).strip()
+
+
+@SQLOperation.register(SQLOperationType.MERGE_UPDATE)
+def _compile_merge_update(
+    compiler: "SQLCompiler",
+    tgt_table: str,
+    src_table: str,
+    join_cond: list[tuple[str, str]] | list[str] | str,
+    set_values: dict[str, str] | list[str] | str | None = None,
+    *,
+    fields: list[str] | str | None = None,
+    where_cond: Any | None = None,
+    **kwargs,
+) -> str:
+    """Compiles a merge update operation to update matching rows in target table from source table."""
+    template_str = compiler.template.merge.get("merge_update")
+    if not template_str:
+        raise SQLCompilationError(
+            f"No 'merge_update' template configured for dialect '{compiler.dialect}'."
+        )
+
+    formatted_tgt = format_table_ref(compiler, tgt_table, alias="tgt")
+    formatted_src = format_table_ref(compiler, src_table, alias="src")
+    formatted_join = format_join_cond(compiler, join_cond)
+    formatted_set = format_set_values(compiler, set_values, fields)
+
+    sql = template_str.format(
+        tgt_table=formatted_tgt,
+        src_table=formatted_src,
+        join_cond=formatted_join,
+        set_values=formatted_set,
+    ).strip()
+
+    return append_where_clause(compiler, sql, where_cond, clause="AND", newline=True)

@@ -6,13 +6,13 @@ from loguru import logger
 from src.core.stages.transform.execution.base import (
     DistributedTransformer,
     TransformContext,
+    Transformer,
 )
-from src.core.stages.transform.execution.factory import TransformFactory
 
 LOG = logger
 
 
-@TransformFactory.register("masking")
+@Transformer.register("masking")
 class PIIMaskingTransformer(DistributedTransformer):
     """
     An example transformer that masks a specific column (e.g., 'email' or 'ssn')

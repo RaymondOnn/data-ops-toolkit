@@ -22,13 +22,12 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from libs.resilience.heartbeat import Heartbeat
 from loguru import logger
 
-from src.core.models.task import ExecutionStatus, Task
+from src.core.models.task import Task
 
 if TYPE_CHECKING:
     from src.core.orchestrator.common.orchestrator import (
         Orchestrator,
     )
-    from src.core.orchestrator.enums import TaskMetadata
 
     from .commands import CommandProcessor
     from .janitor import DaemonJanitor
@@ -227,25 +226,12 @@ class DaemonRuntime:
             LOG.error(f"RESUME: run {request.run_id} not found")
             return
 
-        # Update cache state
-        cache_keys = list(self.tasks.cache.find(pattern=f"*:*:{request.run_id}"))
-        if cache_keys:
-            key = cache_keys[0]
-            metadata: TaskMetadata = self.tasks.cache.get(key)
-
-            # Determine target resume stage
-            resume_step_id = request.from_step or metadata.current_step_id
-
-            # Package extra state overrides to pass directly to transition_cache mutations
-            # We enforce WAITING status so the scheduling ring immediately picks it up
-            self.tasks.cache.transition_state(
-                metadata=metadata,
-                next_status=ExecutionStatus.WAITING,
-                next_step_id=resume_step_id,
-                rewind_history={},  # Clears rewind history via mutations kwargs
-                retry_count=0,  # Resets retry count via mutations kwargs
-                remarks=f"Manual Resume requested. Target stage: {resume_step_id}.",
-            )
+        # Trigger recovery via TaskManager policy
+        resumed = self.tasks.resume_task(
+            run_id=request.run_id, from_step=request.from_step
+        )
+        if not resumed:
+            LOG.warning(f"RESUME: no active cache entry found for run {request.run_id}")
 
         # Update manifest
         task = Task.from_path(folder, self.exec_ctx)
@@ -306,10 +292,10 @@ class DaemonRuntime:
                 needs_wake = True
             elif decision.action == "trigger":
                 self.orchestrator.start_job(
-                    job_id=decision.record.JOB_ID,
-                    dataset_id=decision.record.DATASET_ID,
-                    partition_date=decision.record.PARTITION_DATE,
-                    run_id=decision.record.RUN_ID,
+                    job_id=decision.record.job_id,
+                    dataset_id=decision.record.dataset_id,
+                    partition_date=decision.record.partition_date,
+                    run_id=decision.record.run_id,
                 )
 
         if needs_wake:

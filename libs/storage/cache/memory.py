@@ -5,11 +5,12 @@ import time
 from collections.abc import Iterator
 from typing import Any
 
-from .base import Cache
+from .base import Cache, CacheType
 
 LOG = logging.getLogger(__name__)
 
 
+@Cache.register(CacheType.MEMORY)
 class MemoryCache(Cache):
     """In-memory cache implementation."""
 

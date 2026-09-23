@@ -1,77 +1,85 @@
-"""Transformer factory with dynamic registration."""
+# """Transformer factory with dynamic registration."""
 
-import importlib
-from collections.abc import Callable
-from typing import ClassVar
+# import importlib
 
-from .base import (
-    CustomFunctionTransformerAdapter,
-    TransformContext,
-    Transformer,
-)
+# from .base import (
+#     CustomFunctionTransformerAdapter,
+#     TransformContext,
+#     Transformer,
+#     TransformRegistry,
+# )
 
 
-class TransformFactory:
-    """Factory for creating transform logic instances."""
+# class TransformFactory:
+#     """Factory for creating transform logic instances."""
 
-    _registry: ClassVar[dict[str, type[Transformer]]] = {}
+#     @classmethod
+#     def get(cls, context: TransformContext) -> Transformer:
+#         """Get transformer instance by registered name or module path."""
+#         transform_type = context.sub_step.type.casefold() if context else None
+#         if not transform_type:
+#             raise ValueError("Transform type must be specified in the context.")
 
-    @classmethod
-    def register(cls, name: str) -> Callable[[type[Transformer]], type[Transformer]]:
-        """Decorator for core framework transformers (e.g., 'sql')."""
+#         # 1. Check built-in transformer registry
+#         if transform_type in TransformRegistry:
+#             transformer_cls = Transformer.get(transform_type)
+#             return cls._instantiate(transformer_cls, context)
 
-        def wrapper(wrapped: type[Transformer]) -> type[Transformer]:
-            cls._registry[name.lower()] = wrapped
-            return wrapped
+#         # 2. Dynamic custom class or function import
+#         if transform_type in ("custom", "python"):
+#             module_path = context.sub_step.module_path
+#             if not module_path:
+#                 raise ValueError(
+#                     f"Sub-step '{context.sub_step.id}' is typed as '{transform_type}' "
+#                     "but lacks 'module_path'."
+#                 )
+#             return cls._load_from_path(module_path, context)
 
-        return wrapper
+#         raise ValueError(
+#             f"Unknown transform type: '{transform_type}'. "
+#             f"Available built-ins: {TransformRegistry.keys()}"
+#         )
 
-    @classmethod
-    def get(cls, context: TransformContext) -> Transformer:
-        """Get transformer instance by registered name or module path."""
-        transform_type = context.sub_step.type.casefold() if context else None
-        if not transform_type:
-            raise ValueError("Transform type must be specified in the context.")
+#     @classmethod
+#     def _instantiate(
+#         cls, transformer_cls: type[Transformer], context: TransformContext
+#     ) -> Transformer:
+#         """Instantiate transformer with context parameters."""
+#         return transformer_cls(
+#             config=context.sub_step,
+#             sources=context.sources,
+#             output_dir=context.target,
+#             file_format=context.format,
+#         )
 
-        # 1. Built-in core transformer registry
-        if transform_type in cls._registry:
-            return cls._registry[transform_type](context=context)
+#     @classmethod
+#     def _load_from_path(
+#         cls, module_path: str, context: TransformContext
+#     ) -> Transformer:
+#         """Loads a Transformer subclass or standalone Callable function from a python path."""
+#         try:
+#             mod_path, target_name = module_path.rsplit(".", 1)
+#             module = importlib.import_module(mod_path)
+#             target = getattr(module, target_name)
+#         except (ValueError, ImportError, AttributeError) as e:
+#             raise ImportError(
+#                 f"Failed to load custom transformer from '{module_path}': {e}"
+#             ) from e
 
-        # 2. Dynamic custom class or function import
-        if transform_type in ("custom", "python"):
-            module_path = context.sub_step.module_path
-            if not module_path:
-                raise ValueError(
-                    f"Sub-step '{context.sub_step.id}' is typed as '{transform_type}' "
-                    "but lacks 'module_path'."
-                )
-            return cls._load_from_path(module_path, context)
+#         # Target is a Transformer subclass
+#         if isinstance(target, type) and issubclass(target, Transformer):
+#             return cls._instantiate(target, context)
 
-        raise ValueError(
-            f"Unknown transform type: '{transform_type}'. "
-            f"Available built-ins: {list(cls._registry.keys())}"
-        )
+#         # Target is a standalone custom function
+#         if callable(target):
+#             return CustomFunctionTransformerAdapter(
+#                 target_func=target,
+#                 config=context.sub_step,
+#                 sources=context.sources,
+#                 output_dir=context.target,
+#                 file_format=context.format,
+#             )
 
-    @staticmethod
-    def _load_from_path(module_path: str, context: TransformContext) -> Transformer:
-        """Loads a Transformer subclass or standalone Callable function from a python path."""
-        try:
-            mod_path, target_name = module_path.rsplit(".", 1)
-            module = importlib.import_module(mod_path)
-            target = getattr(module, target_name)
-        except (ValueError, ImportError, AttributeError) as e:
-            raise ImportError(
-                f"Failed to load custom transformer from '{module_path}': {e}"
-            ) from e
-
-        # If target is a Transformer subclass
-        if isinstance(target, type) and issubclass(target, Transformer):
-            return target(context=context)
-
-        # If target is a standalone custom function
-        if callable(target):
-            return CustomFunctionTransformerAdapter(target=target, context=context)
-
-        raise TypeError(
-            f"Target '{module_path}' must be a Transformer subclass or a Callable."
-        )
+#         raise TypeError(
+#             f"Target '{module_path}' must be a Transformer subclass or a Callable."
+#         )

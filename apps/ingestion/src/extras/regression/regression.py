@@ -25,14 +25,14 @@ from src.core.contexts import (
     TaskContextBuilder,
 )
 from src.core.stages.transform.config import TransformConfig
-from src.core.stages.write.config import LoadConfig
+from src.core.stages.write.config import WriteConfig
 from src.services.factory import ServiceFactory
 from src.utils.constants import APP_CONFIG_ROOT
 
 from .report import ComparisonReport, RegressionSummary
 
 if TYPE_CHECKING:
-    from src.services.base import Sink
+    from src.services.contracts import Sink
 
 LOG = logger
 
@@ -54,7 +54,7 @@ class RegressionTaskContext(Protocol):
     partition_date: str
 
     transform: TransformConfig
-    write: LoadConfig
+    write: WriteConfig
 
 
 # =============================================================================

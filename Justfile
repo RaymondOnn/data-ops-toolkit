@@ -143,7 +143,7 @@ docker-clean:
     {{dc}} down --volumes --rmi all || true
     @echo -n "Cleaning up local workspace and legacy temp folders..."
     rm -rf .workspace
-    rm -rf apps/ingestion/infra/environments/local/.tmp/localstack
+    rm -rf apps/ingestion/infra/environments/local/.tmp/floci
     @echo -n "Data volumes wiped."
 
 # View logs for all Docker services

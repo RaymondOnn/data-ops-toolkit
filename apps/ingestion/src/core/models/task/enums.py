@@ -87,6 +87,5 @@ class TaskRef(msgspec.Struct, frozen=True):
         return msgspec.structs.replace(
             self,
             status=status if status is not None else self.status,
-            # stage=stage if stage is not None else self.stage,
             step_id=step_id if step_id is not None else self.step_id,
         )

@@ -6,14 +6,13 @@ import pyarrow as pa
 from duckdb import DuckDBPyConnection
 
 from .base import DBClient
-from .factory import DatabaseFactory
 
 LOG = logging.getLogger(__name__)
 
 
-@DatabaseFactory.register
+@DBClient.register(key="duckdb")
 class DuckDBClient(DBClient):
-    type: str = "duckdb"
+    db_type: str = "duckdb"
 
     def __init__(self, **config):
         super().__init__(**config)
@@ -205,11 +204,12 @@ class DuckDBClient(DBClient):
     def copy(
         self,
         table: str,
+        filepaths: str | list[str],
+        file_format: str,
         source_dir: str,
-        file_ext: str = "parquet",
-        audit_values: dict[str, Any] | None = None,
+        **kwargs,
     ) -> None:
-        pattern = f"{source_dir}/*.{file_ext}"
+        pattern = f"{source_dir}/*.{file_format}"
         self.command(f"INSERT INTO {table} SELECT * FROM read_parquet('{pattern}')")
 
     def _execute(self, query: str, params: tuple | dict | None = None) -> Any:

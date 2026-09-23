@@ -6,44 +6,72 @@ version: "1.0"
 
 default:
   workspace_dir: "./.workspace"
+  mode:
+  destination:
+  update_key:
+  primary_keys: []
+  soft_delete_missing: True
+  add_new_columns: true # default to false
 
-  extract:
-    num_workers: 10
-    select:
-    where:
-    limit:
-    sql:
+  meta_columns:
+    run_id: "_run_id"
+    partition_date: "_partition"
+    source: "_source" # source identifier / file path
+    loaded_at: "_created_at_ts"
 
-    flatten: -1
-    columns: {}
-    null_if: [
-      # Standard string representations
-      "NA", "N/A", "na", "n/a", "N / A", "n / a",
+  calls:
+    extract:
+      num_workers: 10
+      select:
+      where:
+      limit:
+      sql:
 
-      # Literal null indicators
-      "NULL", "null", "Null", "\\N", "None", "NONE", "none",
+      flatten: -1
+      columns: {}
+      null_if: [
+        # Standard string representations
+        "NA", "N/A", "na", "n/a", "N / A", "n / a",
 
-      # Common system/data placeholders
-      "NaN", "nan", "NAN", "UNDEFINED", "undefined", "UNKNOWN", "unknown",
+        # Literal null indicators
+        "NULL", "null", "Null", "\\N", "None", "NONE", "none",
 
-      # Punctuation/Empty markers
-      "-", ".", "?", "??", ""
-    ]
+        # Common system/data placeholders
+        "NaN", "nan", "NAN", "UNDEFINED", "undefined", "UNKNOWN", "unknown",
 
-    # ---- FILE ----
-    glob:
-    # header: true # true | false
-    # skip_blank_lines:
-    # encoding: utf-8
+        # Punctuation/Empty markers
+        "-", ".", "?", "??", ""
+      ]
 
-  transform:
-    type: default
-    options: {}
+      # ---- FILE ----
+      glob:
+      # header: true # true | false
+      # skip_blank_lines:
+      # encoding: utf-8
 
-  archive:
-    retention_days: 2555  # 7-year default
-    enable_archival: true
-    archive_type: "standard_archive"
+    transform:
+      type: default
+      options: {}
+
+    write:
+      write_strategy: skeleton_clone
+      working_table: "{dataset.destination}_STG_{YYYY}{MM}{DD}"
+      target: {dataset.destination}
+      object: "{upstream.artifact_folder}"         # Auto-binds output from previous step
+      column_case_type: upper
+      column_case_style: snake
+      expected_count: "{upstream.rows_processed}"
+      column_types: {}
+      create_table_ddl:
+
+    publish:
+      target: {dataset.destination}
+      delta_merge_type: delete_insert
+
+    archive:
+      retention_days: 2555  # 7-year default
+      enable_archival: true
+      archive_type: "standard_archive"
 
   partition_date:
     offset:

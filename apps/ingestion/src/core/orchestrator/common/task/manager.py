@@ -1,6 +1,7 @@
 # 572 -> 424
 import time
 from pathlib import Path
+from typing import Any
 
 import ray
 from filelock import FileLock
@@ -10,18 +11,19 @@ from loguru import logger
 from src.core.contexts import ExecutionContext
 from src.core.models.task import ExecutionStatus, Task
 from src.core.models.task.enums import TaskIdentity, TaskRef
+from src.core.models.task.workspace import TaskWorkspace
 from src.core.orchestrator.common.state import StateHub
 from src.core.orchestrator.common.task.compute import Compute
 from src.core.orchestrator.common.task.executor import process_stage_task
 from src.core.orchestrator.common.task.queue import TaskQueue
-from src.core.orchestrator.common.timeout import TimeoutMonitor
+from src.core.orchestrator.common.task.timeout import TimeoutMonitor
+from src.core.orchestrator.common.task.types import TaskMetadata
 from src.core.orchestrator.contracts.policies import (
     AdmissionPolicy,
     MaintenancePolicy,
 )
-from src.core.orchestrator.enums import TaskMetadata
 from src.core.stages.contracts.stage import DISK_FREE_STAGES
-from src.core.stages.enums import Stage
+from src.core.stages.types import Stage
 from src.services.factory import ServiceFactory
 from src.services.health import ServiceMonitor, SystemMonitor
 from src.utils.common import short_hash
@@ -37,6 +39,7 @@ from .cache import TaskCache
 from .outcome import (
     BlockedOutcome,
     FailedOutcome,
+    OutcomeResolution,
     ProgressOutcome,
     RetryOutcome,
     RollbackOutcome,
@@ -223,7 +226,7 @@ class TaskManager:
         def _score_task(item: tuple[str, TaskMetadata]):
             return self.queue.calculate_priority(item[1])
 
-        self.reconcile_active_tasks()
+        self.process_completed_steps()
 
         now_ts = time.time()
 
@@ -375,7 +378,7 @@ class TaskManager:
         if msg_id:
             self.queue.ack(msg_id)
 
-    def reconcile_active_tasks(self) -> None:
+    def process_completed_steps(self) -> None:
         """Polls active Ray tasks, retrieves results, and executes DB state transitions."""
         if not self.active_tasks:
             return
@@ -427,8 +430,16 @@ class TaskManager:
                         worker_id="driver-reconciler",
                         exec_ctx=self.exec_ctx,
                     )
-                    self._conclude_task(
+                    workspace = TaskWorkspace(
+                        job_id=fallback_ref.identity.job_id,
+                        dataset_id=fallback_ref.identity.dataset_id,
+                        partition_date=fallback_ref.identity.partition_date,
+                        run_id=run_id,
+                        exec_ctx=self.exec_ctx,
+                    )
+                    self._conclude_outcome(
                         task,
+                        workspace,
                         runtime_exception=result.get("error")
                         or RuntimeError("Worker bootstrap crash"),
                     )
@@ -441,36 +452,102 @@ class TaskManager:
                     worker_id="driver-reconciler",
                     exec_ctx=self.exec_ctx,
                 )
+                workspace = TaskWorkspace(
+                    job_id=task.job_id,
+                    dataset_id=task.dataset_id,
+                    partition_date=task.partition_date,
+                    run_id=task.run_id,
+                    exec_ctx=self.exec_ctx,
+                )
 
                 # 3. Process the outcome on the driver side (writes DB telemetry & re-queues)
                 if result["success"]:
-                    self._conclude_task(task, runtime_exception=None)
+                    self._conclude_outcome(task, workspace, runtime_exception=None)
                 else:
-                    self._conclude_task(task, runtime_exception=result["error"])
+                    self._conclude_outcome(
+                        task, workspace, runtime_exception=result["error"]
+                    )
 
             except Exception:
                 LOG.exception(f"Error reconciling completed worker run {run_id}")
 
-    def _conclude_task(
-        self, task: Task, runtime_exception: Exception | None = None
+    def _conclude_outcome(
+        self,
+        task: Task,
+        workspace: TaskWorkspace,
+        runtime_exception: Exception | None = None,
     ) -> None:
         """Finalizes a stage execution and calculates the next state."""
         if runtime_exception:
             if isinstance(runtime_exception, RollbackRequired):
-                RollbackOutcome().handle(self, task, runtime_exception)
+                old_key = task.task_ref.build(status=ExecutionStatus.RUNNING)
+                cached_metadata = self.cache.get(old_key)
+                directive = RollbackOutcome().evaluate(
+                    task, workspace, runtime_exception, cached_metadata
+                )
             elif isinstance(runtime_exception, OutOfDiskSpace | TryAgainLater):
-                BlockedOutcome().handle(self, task, runtime_exception)
-            elif is_retryable(task, runtime_exception):
-                RetryOutcome().handle(self, task, runtime_exception)
+                directive = BlockedOutcome().evaluate(
+                    task, workspace, runtime_exception
+                )
+            elif is_retryable(workspace, runtime_exception):
+                directive = RetryOutcome().evaluate(task, workspace, runtime_exception)
             else:
-                FailedOutcome().handle(self, task, runtime_exception)
+                directive = FailedOutcome().evaluate(task, workspace, runtime_exception)
+        # Success Evaluations
+        elif is_complete(task, workspace):
+            directive = SuccessOutcome().evaluate(task, workspace)
+        else:
+            directive = ProgressOutcome().evaluate(task, workspace, None)
+
+        self._apply_outcome_resolution(task, workspace, directive)
+
+    def _apply_outcome_resolution(
+        self, task: Task, workspace: TaskWorkspace, directive: OutcomeResolution
+    ) -> None:
+        """Applies state changes, cache rotation, and queueing based on OutcomeResolution."""
+        old_key = task.task_ref.build(status=ExecutionStatus.RUNNING)
+        metadata = self.cache.get(old_key)
+
+        if directive.signal:
+            workspace.send_signal(directive.signal, step_id=task.task_ref.step_id)
+
+        if directive.release_dataset_lock:
+            self.timeout.release_dataset_cache(task.run_id, task.dataset_id)
+
+        if directive.release_cache:
+            self.cache.client.pop(old_key, None)
             return
 
-        # Success Evaluations
-        if is_complete(task):
-            SuccessOutcome().handle(self, task)
-        else:
-            ProgressOutcome().handle(self, task, None)
+        if not metadata:
+            LOG.error(f"Failed to find hot-cache metadata for task run: {task.run_id}")
+            return
+
+        overrides: dict[str, Any] = {}
+        if directive.next_attempt_ts:
+            overrides["next_attempt_ts"] = directive.next_attempt_ts
+        if directive.remarks:
+            overrides["remarks"] = directive.remarks
+        if directive.blocked_by:
+            overrides["blocked_by"] = directive.blocked_by
+        if directive.rollback_history:
+            overrides["rollback_history"] = directive.rollback_history
+        if directive.rollback_stack:
+            overrides["rollback_stack"] = directive.rollback_stack
+
+        self.cache.transition_state(
+            metadata,
+            next_step_id=directive.next_step_id,
+            next_status=directive.status,
+            **overrides,
+        )
+        LOG.trace(
+            "[DISPATCH] outcome cache updated",
+            run_id=task.run_id,
+            new_status=directive.status.value,
+        )
+
+        if directive.re_enqueue:
+            self.queue.push(metadata)
 
     def recover_zombie_tasks(self) -> None:
         """Reclaims tasks in RUNNING state without active Ray workers.
@@ -487,6 +564,15 @@ class TaskManager:
             for meta in recovered:
                 self.queue.push(meta)
                 LOG.info(f"Re-queued recovered zombie task: {meta.run_id}")
+
+    def resume_task(self, run_id: str, from_step: str | None = None) -> bool:
+        """Delegates targeted task recovery to the maintenance policy."""
+        return self.maintenance_policy.resume(
+            cache=self.cache,
+            lock=self.lock,
+            run_id=run_id,
+            from_step=from_step,
+        )
 
     def _service_has_recovered(self, metadata: TaskMetadata) -> bool:
         """Determines if a structural external dependency block has cleared."""

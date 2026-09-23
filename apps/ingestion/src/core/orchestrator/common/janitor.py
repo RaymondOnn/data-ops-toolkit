@@ -3,7 +3,6 @@
 import shutil
 import time
 from collections.abc import Callable, Iterable
-from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -15,8 +14,10 @@ from src.core.contexts.task import load_context
 from src.core.models.task import (
     ExecutionStatus,
     Task,
+    TaskManifestFile,
     TaskRef,
     TaskSignal,
+    TaskWorkspace,
 )
 from src.utils.constants import (
     CONFIG_FILENAME,
@@ -27,12 +28,12 @@ from src.utils.decorators import log_dry_run
 LOG = logger
 
 
-class SourceCleanupMode(StrEnum):
-    """Modes for cleaning up external source files."""
+# class SourceCleanupMode(StrEnum):
+#     """Modes for cleaning up external source files."""
 
-    FILE = "file"
-    DIRECTORY = "directory"
-    DIRECTORY_IF_EMPTY = "directory_if_empty"
+#     FILE = "file"
+#     DIRECTORY = "directory"
+#     DIRECTORY_IF_EMPTY = "directory_if_empty"
 
 
 class Janitor:
@@ -48,6 +49,18 @@ class Janitor:
         self._get_active_tasks = active_tasks_fn
         self._enqueue = enqueue_fn
         self.exec_ctx.failed_path.mkdir(parents=True, exist_ok=True)
+
+    # ========== Helper Factory ==========
+
+    def _get_workspace(self, task: Task) -> TaskWorkspace:
+        """Instantiate workspace directly for a task."""
+        return TaskWorkspace(
+            job_id=task.job_id,
+            dataset_id=task.dataset_id,
+            partition_date=task.partition_date,
+            run_id=task.run_id,
+            exec_ctx=self.exec_ctx,
+        )
 
     # ========== Public API ==========
 
@@ -70,8 +83,9 @@ class Janitor:
         """Move a failed task to quarantine."""
         try:
             task = Task.from_path(folder_path, self.exec_ctx)
+            workspace = self._get_workspace(task)
             LOG.info(f"Quarantining {task.run_id} -> {category}")
-            task.move_to(category.upper())
+            workspace.relocate(category.upper())
         except Exception:
             LOG.exception(f"Quarantine failed for {folder_path}")
 
@@ -80,20 +94,15 @@ class Janitor:
         """Recover a quarantined / failed task and re-queue it."""
         try:
             task = Task.from_path(folder_path, self.exec_ctx)
-            resume_step_id = task.manifest.current_step_id
+            workspace = self._get_workspace(task)
+            manifest = TaskManifestFile.load(workspace)
+            resume_step_id = manifest.current_step_id
 
             LOG.info(
                 f"Recovering {task.run_id} from quarantine, resuming at {resume_step_id}"
             )
 
             # Reset task state
-            updates = {
-                "status": ExecutionStatus.PENDING,
-                "current_step_id": resume_step_id,
-                "error": None,
-                "retry_count": 0,
-            }
-
             # Clear bitmask for resume stage and onward
             # found = False
             # for stage in Stage:
@@ -103,9 +112,17 @@ class Janitor:
             #         updates[stage.value] = None
             #         task.workspace.remove_marker(stage.value)
 
-            task.workspace.remove_marker(resume_step_id)
-            task.update_manifest(updates)
-            task.move_to("active")
+            TaskManifestFile.update(
+                workspace=workspace,
+                updates={
+                    "status": ExecutionStatus.PENDING,
+                    "current_step_id": resume_step_id,
+                    "error": None,
+                    "retry_count": 0,
+                },
+            )
+            workspace.remove_marker(resume_step_id)
+            workspace.relocate("ACTIVE")
 
             # Re-queue
             updated_ref = TaskRef(
@@ -115,8 +132,8 @@ class Janitor:
                 step_id=resume_step_id,
             )
 
-            self._enqueue(updated_ref, str(task.workspace.path / CONFIG_FILENAME))
-            task.send_signal(TaskSignal.SYNC)
+            self._enqueue(updated_ref, str(workspace.config_file))
+            workspace.send_signal(TaskSignal.SYNC, step_id=resume_step_id)
 
         except Exception:
             LOG.exception(f"Recovery failed for {folder_path}")
@@ -125,6 +142,7 @@ class Janitor:
     def cleanup_task(self, task: "Task") -> None:
         """Apply all cleanup policies to a completed task."""
         # Vault cleanup - but preserve in certain modes
+        workspace = self._get_workspace(task)
         preserve = any(
             [
                 self.exec_ctx.is_test,
@@ -146,8 +164,7 @@ class Janitor:
 
         # Metadata cleanup - must be LAST (removes config/manifest needed above)
         LOG.debug("Purging workspace metadata", run_id=task.run_id)
-        if task.workspace.path.exists():
-            shutil.rmtree(task.workspace.path, ignore_errors=True)
+        workspace.delete(include_data=True)
 
         self.remove_orphaned_config(task.id, task.run_id)
 
@@ -275,15 +292,18 @@ class Janitor:
 
         try:
             task = Task.from_path(folder, self.exec_ctx)
+            workspace = self._get_workspace(task)
             LOG.warning(f"Purging {task.run_id}: {reason}")
 
+            manifest = TaskManifestFile.load(workspace)
             if (
                 reason
                 and "Expired" in reason
-                and task.manifest.status != ExecutionStatus.EXPIRED
+                and manifest.status != ExecutionStatus.EXPIRED
             ):
-                task.update_manifest(
-                    {"status": ExecutionStatus.EXPIRED, "remarks": reason}
+                TaskManifestFile.update(
+                    workspace=workspace,
+                    updates={"status": ExecutionStatus.EXPIRED, "remarks": reason},
                 )
 
             self.cleanup_task(task)

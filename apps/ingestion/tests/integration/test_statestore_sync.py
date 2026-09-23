@@ -20,7 +20,7 @@ def test_statestore_flushes_manifest_to_db(runtime, tmp_path, mock_db_client):
     task.update_manifest(
         {
             "status": ExecutionStatus.RUNNING,
-            "extract": {"source_count": 50000000, "file_count": 50},
+            "extract": {"rows_processed": 50000000, "file_count": 50},
         }
     )
 

@@ -1,22 +1,20 @@
 incorporate data retention policies i.e. can keep data for 1 year
-[x] disable self-healing
 error_handling / exception hook /.
+[x] disable self-healing
 feature flags
-- database mode: truncate / incremental (update_key) / snapshot / cdc
-- primary key field
 work on CD process.
 - Can't proceed to K8S without this
 - regression testing
-bug: Why constantly evict expired run?
 bug: check updates
 qn: change fallback in TaskCache to build from manifest
 qn: daemon mode + overrides
 idea: saving to filesystem -> data lakes
 idea: bash pipe input and output
-idea: using column info in insert using select query
 idea: new stages: download, iterate, parse for ai pipeline
 idea: two extract steps -> merge the two datasets
 idea: dry run mode
+idea: run budgets i.e max_run_events, max_run_duration
+idea: add cdc ingestion
 idea: quarantine process (after write / publish)
   - Write the problematic rows into a qurantine file in jsonl format, saved to the data folder.
   - {
@@ -25,15 +23,29 @@ idea: quarantine process (after write / publish)
     "_quarantine_timestamp": "2026-08-03T18:04:12",
     "order_id": null,
     "amount": 150.00
-  }
+  } or a database table
   - Have a threshold to decide whether to go ahead with the load process. The threshold is to be discussed with the stakeholder.
   - The task folder is moved to FAILED/ and either the quarantine file or symlink to the file will be available in the task folder.
+idea: add lakehouse client i.e. iceberg, delta
+idea: add api clients
+qn: rerun the entire stage or saving progress. especially for api pagination
+idea: config via sql (dbt-style)
+idea: late-arriving data: allow reingesting partition dates a few days back
+
+- database mode: truncate / incremental (update_key) / snapshot / cdc
+check if hooks can trigger other hooks on failure.
+meta_repo: schema evo missing schema info
+file glob using YYYY, MM, DD
+----------
+add is_backfill
+timeout monitor
+transform_config for python func
+terraform for local env
+split taskworkspace
 
 
-refine custom transform logic.
-rollback
-zomie recovery
-check if metadata folder is removed on success
+
+ingestr / filament, https://github.com/galaxy-io/filament
 
 ### Planned Enhancements & s
 

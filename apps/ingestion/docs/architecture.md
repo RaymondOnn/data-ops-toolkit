@@ -13,19 +13,6 @@ We implement a "Data Vault" structure (`data/{job}/{dataset}/{run}/{stage}`) com
 * **Pros:** Stages (e.g., `Transform`) don't need to know the physical timestamp of the `Extract` stage; they simply read from the `extract/` symlink.
 * **Cons:** Requires the runtime to handle relative symlink creation to ensure portability across Pods/Nodes.
 
-## ADR 002: Bitmask-Driven State Machine
-
-**Context:**
-We need to track partial completion of a multi-stage pipeline that can be resumed or rewound.
-
-**Decision:**
-Each stage is assigned a bitmask (1, 2, 4, 8...). The `TaskManifest` stores a cumulative integer.
-
-**Consequences:**
-
-* **Pros:** Checking if a job is "All Done" is a single bitwise comparison. Rewinding to a specific stage is a simple bit-clearing operation.
-* **Cons:** Limits the total number of stages to the bit-width of the integer (though 64 stages is plenty for this scope).
-
 ## ADR 003: Process Isolation via Ray Actors
 
 **Context:**
@@ -48,6 +35,8 @@ Use Ray to spawn stages as isolated processes with logical resource constraints 
 
 **Consequences:**
 *   **Pros:** Perfectly observable by humans (`ls -la signals/`). Inherently persistent and survives orchestrator reboots.
+*   **Pros:** Portable — operates identically on local SSDs, AWS EFS, or Azure Files without any broker infrastructure.
+*   **Pros:** Natural backpressure — the polling loop batches signal processing, preventing thundering-herd spikes during large job fan-outs.
 *   **Cons:** Requires polling (The "Tick" loop), which introduces a sub-second latency in task transitions.
 
 ## ADR 005: Multi-Worker Schema Unioning

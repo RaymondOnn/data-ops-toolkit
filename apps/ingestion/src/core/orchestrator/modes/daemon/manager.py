@@ -9,11 +9,11 @@ from src.core.models.task import (
     ExecutionStatus,
 )
 from src.core.orchestrator.common.task.cache import TaskCache
+from src.core.orchestrator.common.task.types import TaskMetadata
 from src.core.orchestrator.contracts.policies import (
     AdmissionPolicy,
     MaintenancePolicy,
 )
-from src.core.orchestrator.enums import TaskMetadata
 from src.utils.constants import CACHE_TASK_NAMESPACE
 
 LOG = logger
@@ -147,3 +147,30 @@ class ProactiveMaintenance(MaintenancePolicy):
                 recovered_tasks.append(metadata)
 
         return recovered_tasks if recovered_tasks else None
+
+    def resume(
+        self,
+        cache: TaskCache,
+        lock: Any,
+        run_id: str,
+        from_step: str | None = None,
+    ) -> bool:
+        """Manually recovers/resumes a targeted task by run_id."""
+        cache_keys = list(cache.find(pattern=f"*:*:{run_id}"))
+        if not cache_keys:
+            return False
+
+        key = cache_keys[0]
+        metadata = cache.get(key)
+        resume_step_id = from_step or metadata.current_step_id
+
+        with lock:
+            cache.transition_state(
+                metadata=metadata,
+                next_status=ExecutionStatus.WAITING,
+                next_step_id=resume_step_id,
+                rollback_history={},
+                retry_count=0,
+                remarks=f"Manual Resume requested. Target stage: {resume_step_id}.",
+            )
+        return True

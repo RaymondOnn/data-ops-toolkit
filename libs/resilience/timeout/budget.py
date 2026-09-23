@@ -30,6 +30,7 @@ class TimeoutBudget(msgspec.Struct):
     total_budget: timedelta
     stage_timeouts: dict[str, timedelta] = field(default_factory=dict)
     started_at: datetime | None = None
+    _start_monotonic: float = field(default_factory=time.monotonic, init=False)
     _stage_start_times: dict[str, float] = field(default_factory=dict, init=False)
     _stage_durations: dict[str, timedelta] = field(default_factory=dict, init=False)
     _paused: bool = False
@@ -39,19 +40,20 @@ class TimeoutBudget(msgspec.Struct):
     def __post_init__(self):
         if self.started_at is None:
             self.started_at = datetime.now()
+        self._start_monotonic = time.monotonic()
 
     def start_stage(self, stage: str) -> None:
         """Mark the start of a stage."""
         if stage in self._stage_start_times:
             raise ValueError(f"Stage '{stage}' already started without ending")
-        self._stage_start_times[stage] = time.time()
+        self._stage_start_times[stage] = time.monotonic()
 
     def end_stage(self, stage: str) -> timedelta:
         """Mark the end of a stage and return its duration."""
         if stage not in self._stage_start_times:
             raise ValueError(f"Stage '{stage}' was not started")
 
-        duration = timedelta(seconds=time.time() - self._stage_start_times[stage])
+        duration = timedelta(seconds=time.monotonic() - self._stage_start_times[stage])
         self._stage_durations[stage] = duration
 
         # Check stage-specific timeout
@@ -69,23 +71,20 @@ class TimeoutBudget(msgspec.Struct):
         if self._paused:
             return
         self._paused = True
-        self._pause_start = time.time()
+        self._pause_start = time.monotonic()
 
     def resume(self) -> None:
         """Resume the budget timer."""
         if not self._paused or self._pause_start is None:
             return
-        self._elapsed_paused += timedelta(seconds=time.time() - self._pause_start)
+        self._elapsed_paused += timedelta(seconds=time.monotonic() - self._pause_start)
         self._paused = False
         self._pause_start = None
 
     @property
     def elapsed(self) -> timedelta:
         """Total elapsed time excluding paused time."""
-        if self.started_at is None:
-            raise ValueError("Budget has not been started")
-
-        elapsed = timedelta(seconds=time.time() - self.started_at.timestamp())
+        elapsed = timedelta(seconds=time.monotonic() - self._start_monotonic)
         return elapsed - self._elapsed_paused
 
     @property
@@ -121,7 +120,7 @@ class TimeoutBudget(msgspec.Struct):
         """Get elapsed time for currently running stages."""
         result = {}
         for stage, start_time in self._stage_start_times.items():
-            result[stage] = time.time() - start_time
+            result[stage] = time.monotonic() - start_time
         return result
 
     def reset(self) -> None:
@@ -132,6 +131,7 @@ class TimeoutBudget(msgspec.Struct):
         self._paused = False
         self._pause_start = None
         self.started_at = datetime.now()
+        self._start_monotonic = time.monotonic()
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize budget state for monitoring."""

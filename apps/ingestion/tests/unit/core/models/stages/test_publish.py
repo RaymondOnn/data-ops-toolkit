@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.core.models.stages.publish import PublishStage
-from src.core.stages.enums import Stage
+from src.core.stages.types import Stage
 from src.utils.exceptions import RollbackRequired
 
 

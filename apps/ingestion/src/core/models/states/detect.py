@@ -1,7 +1,7 @@
 """Task outcome policies for success, failure, retry, and background detection."""
 
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 import ray
 from libs.utils.dates import current_timestamp, parse_timestamp
@@ -11,12 +11,19 @@ from src.core.models.task.status import ExecutionStatus
 from src.utils.common import find_path
 from src.utils.constants import MANIFEST_FILENAME, STRIP_TZ_FOR_DB
 
-from .base import DetectedState
-
 if TYPE_CHECKING:
-    from src.core.orchestrator.enums import TaskRecord
+    from src.core.orchestrator.contracts.state import TaskStateView
 
 LOG = logger
+
+
+@runtime_checkable
+class DetectedState(Protocol):
+    """Outcome determined by background monitoring (zombie, expiry)."""
+
+    status: ClassVar[ExecutionStatus]
+
+    def matches(self, record: "TaskStateView | None" = None, **kwargs: Any) -> bool: ...
 
 
 class ZombieState(DetectedState):
@@ -25,7 +32,7 @@ class ZombieState(DetectedState):
     status = ExecutionStatus.WAITING
 
     @classmethod
-    def matches(cls, record: "TaskRecord | None" = None, **kwargs: Any) -> bool:
+    def matches(cls, record: "TaskStateView | None" = None, **kwargs: Any) -> bool:
         """Check if task is a zombie using triple verification."""
         metadata = kwargs.get("metadata")
         active_tasks = kwargs.get("active_tasks", {})
@@ -85,19 +92,19 @@ class ExpiredState(DetectedState):
     status = ExecutionStatus.EXPIRED
 
     @classmethod
-    def matches(cls, record: "TaskRecord | None" = None, **kwargs: Any) -> bool:
-        if not record or not record.IS_SNAPSHOT or not record.EXPIRATION_THRESHOLD:
+    def matches(cls, record: "TaskStateView | None" = None, **kwargs: Any) -> bool:
+        if not record or not record.is_snapshot or not record.expiration_threshold:
             return False
 
         # Don't expire terminal tasks
-        if ExecutionStatus(record.JOB_STATUS).is_terminal:
+        if ExecutionStatus(record.status).is_terminal:
             return False
 
-        # Don't expire if extraction already completed (sunk cost)
-        if "EXT+" in str(getattr(record, "JOB_BITMASK", "")):
-            return False
+        # # Don't expire if extraction already completed (sunk cost)
+        # if "EXT+" in str(getattr(record, "JOB_BITMASK", "")):
+        #     return False
 
-        threshold = parse_timestamp(record.EXPIRATION_THRESHOLD, naive=STRIP_TZ_FOR_DB)
+        threshold = parse_timestamp(record.expiration_threshold, naive=STRIP_TZ_FOR_DB)
         current = kwargs.get("now") or current_timestamp(naive=STRIP_TZ_FOR_DB)
 
         return current > threshold

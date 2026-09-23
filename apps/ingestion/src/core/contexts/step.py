@@ -4,7 +4,7 @@ from src.core.stages.types import StageConfig
 from src.extras.hooks.enums import StageHooks
 
 
-class StepConfig(Struct, kw_only=True):
+class StepContext(Struct, kw_only=True):
     """Configuration for a single pipeline step as declared in job.yaml.
 
     A step binds a logical id (e.g., 'normalize') to a pipeline stage

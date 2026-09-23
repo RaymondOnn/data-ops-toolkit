@@ -8,11 +8,12 @@ from typing import Any
 import msgspec
 import redis
 
-from .base import Cache
+from .base import Cache, CacheType
 
 LOG = logging.getLogger(__name__)
 
 
+@Cache.register(CacheType.REDIS)
 class RedisCache(Cache):
     """Redis cache implementation."""
 

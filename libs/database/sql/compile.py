@@ -12,7 +12,7 @@ from libs.utils.dict import deep_merge
 
 from .enums import JoinConfig, SelectQueryContext, SQLContext
 from .exceptions import ConfigurationValidationError, SQLCompilationError
-from .operations.base import COMPILE_FUNCTIONS, SQLOperation
+from .operations.base import SQLOperation, SQLOperationType
 
 LOG = logging.getLogger(__name__)
 DB_TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -81,16 +81,10 @@ class SQLCompiler:
         self.template = DialectTemplate.build(self.dialect_enum, user_override)
         LOG.debug(f"Initialized compiler for dialect: '{self.dialect}'")
 
-    def compile(self, operation: SQLOperation | str, **ops_kwargs: Any) -> str:
+    def compile(self, operation: SQLOperationType | str, **ops_kwargs: Any) -> str:
         """Single entry-point that dispatches compilation to registered decorator handlers."""
-        compile_func = COMPILE_FUNCTIONS.get(operation)
-        if not compile_func:
-            raise SQLCompilationError(
-                f"Unsupported SQL operation '{operation}' for dialect '{self.dialect}'"
-            )
-
         LOG.debug(f"Compiling '{operation}' for dialect '{self.dialect}'")
-        return compile_func(compiler=self, **ops_kwargs)
+        return SQLOperation.compile(operation, compiler=self, **ops_kwargs)
 
     def compile_expr(self, func_name: str, **kwargs: Any) -> str:
         """
@@ -144,7 +138,7 @@ class SQLCompiler:
         return str(val)
 
     def compile_conditions(
-        self, conditions: Predicate | list[Predicate] | None, clause: str = "WHERE"
+        self, conditions: Predicate | list[Predicate] | None, clause: str = ""
     ) -> str:
         """
         Generic WHERE clause generator using Python structural pattern matching.
@@ -313,21 +307,22 @@ class SQLCompiler:
         return components
 
     def _map_generic_type(self, raw_type: str) -> str:
-        """Maps an generic pipeline data type configuration to its physical target counterpart."""
+        """Maps an incoming type declaration (generic or dialect-specific) to the target database representation."""
+        from libs.database.dtypes import TypeResolver
+
         tokens = raw_type.strip().split()
         if not tokens:
             raise SQLCompilationError("Encountered empty column type declaration.")
 
-        generic_base = tokens[0].lower()
-        native_type = self.template.types.get(generic_base)
+        raw_base = tokens[0]
 
-        if not native_type:
-            LOG.warning(
-                f"Unknown generic data type '{generic_base}'. Direct passing through."
-            )
-            native_type = generic_base.upper()
+        # 1. Resolve raw_base (e.g. 'Nullable(Bool)', 'varchar(255)', or 'boolean') to a canonical generic type ('boolean')
+        generic_type = TypeResolver.db_to_generic_type(self.dialect, raw_base)
 
-        # Extract modifying rules (e.g. primary_key, unique, not_null)
+        # 2. Map generic type ('boolean') to target dialect type ('Nullable(Bool)' for ClickHouse)
+        native_type = TypeResolver.generic_to_db_type(self.dialect, generic_type)
+
+        # 3. Extract modifier keywords (e.g., PRIMARY KEY, NOT NULL)
         modifiers = []
         full_declaration = " ".join(tokens[1:]).lower()
 
@@ -338,7 +333,7 @@ class SQLCompiler:
             modifiers.append("PRIMARY KEY")
         if "not null" in full_declaration or "not_null" in full_declaration:
             modifiers.append("NOT NULL")
-        elif "unique" in full_declaration:
+        if "unique" in full_declaration:
             modifiers.append("UNIQUE")
 
         return f"{native_type} {' '.join(modifiers)}".strip()

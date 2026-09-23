@@ -14,10 +14,10 @@
 #     """Debug format handler detection."""
 #     logger.info(f"🔍 Debugging handler for: {path}")
 
-#     from libs.file.base import FileSystemSkills, create_fs_client
+#     from libs.file.base import FileSkill, create_fs_client
 
 #     client = create_fs_client(
-#         url=path, skills={FileSystemSkills.FILE}, options={}
+#         url=path, skills={FileSkill.FILE}, options={}
 #     )
 
 #     if hasattr(client, "get_handler"):

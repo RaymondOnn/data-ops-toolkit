@@ -3,30 +3,21 @@
 import io
 import logging
 import re
-from pathlib import Path
 from typing import Any
 
 import polars as pl
-import pyarrow.dataset as ds
+from upath import UPath
 
 from .base import FormatHandler
 
 LOG = logging.getLogger(__name__)
 
 
+@FormatHandler.register("json")
 class JSONHandler(FormatHandler):
     """Handler for JSON and NDJSON files."""
 
-    @property
-    def splittable(self) -> bool:
-        """Check if JSON files are splittable.
-
-        Returns:
-            bool: True if JSON files are splittable, False otherwise.
-        """
-        return False
-
-    def discover(self, path: Path | str, pattern: str | None = None) -> set[str]:
+    def discover(self, path: UPath | str, pattern: str | None = None) -> set[UPath]:
         """Discover JSON files.
 
         Args:
@@ -34,11 +25,11 @@ class JSONHandler(FormatHandler):
             pattern: The pattern to match.
 
         Returns:
-            set[str]: Set of discovered JSON files.
+            set[UPath]: Set of discovered JSON files.
         """
         return self._glob_files(path, pattern, "**/*.json*")
 
-    def to_df(self, path: Path | str, **kwargs: Any) -> pl.LazyFrame:
+    def to_df(self, path: UPath | str, **kwargs: Any) -> pl.LazyFrame:
         """Convert JSON files to Polars LazyFrame.
 
         Args:
@@ -52,66 +43,26 @@ class JSONHandler(FormatHandler):
         if not files:
             return pl.LazyFrame()
 
-        # Check format (NDJSON vs JSON array)
-        first_file = next(iter(files))
-        is_ndjson = self._is_ndjson(first_file)
-        skip_blank_lines = kwargs.get("skip_blank_lines", False)
-        infer_schema_length = kwargs.get("infer_schema_length", 1000)
-        ignore_errors = kwargs.get("ignore_errors", True)
+        first_file = files[0]
+        if self._is_ndjson(first_file):
+            return pl.scan_ndjson([str(f) for f in files], storage_options=self.options)
 
-        if is_ndjson:
-            lf = pl.scan_ndjson(
-                source=files,
-                storage_options=self.options,
-                infer_schema_length=infer_schema_length,
-                ignore_errors=ignore_errors,
-            )
-            if skip_blank_lines:
-                lf = lf.filter(pl.all_horizontal().is_not_null())
-            return lf
+        # Standard JSON array read
+        dfs = [pl.read_json(str(f)) for f in files]
+        return pl.concat([df.lazy() for df in dfs]) if dfs else pl.LazyFrame()
 
-        # Standard JSON
-        try:
-            resolved = [self.fs.resolve(f) for f in files]
-            dataset = ds.dataset(
-                resolved,
-                format="json",
-                filesystem=self.fs.fs,
-            )
-            lf = pl.from_arrow(dataset.to_table()).lazy()
-            if skip_blank_lines:
-                lf = lf.filter(pl.any_horizontal(pl.all().is_not_null()))
-            return lf
-        except Exception as err:
-            LOG.warning(
-                f"PyArrow JSON parse failed ({err}). Falling back to native reader."
-            )
-
-            # Fallback option: read and repair
-            lfs = []
-            for f in files:
-                size = self.fs.fs.size(f)
-                if size and size > 1.5 * 1024**3:
-                    LOG.warning(f"Large JSON file may cause OOM: {f}")
-
-                buffer = self.read_raw(f, **kwargs)
-                lfs.append(pl.read_json(buffer).lazy())
-
-            return pl.concat(lfs) if lfs else pl.LazyFrame()
-
-    def from_df(self, df: pl.LazyFrame | pl.DataFrame, path: Path | str) -> None:
+    def from_df(self, df: pl.LazyFrame | pl.DataFrame, path: UPath | str) -> None:
         """Write LazyFrame to JSON files.
 
         Args:
             df: The LazyFrame to write.
             path: The path to write the files to.
         """
-        if isinstance(df, pl.LazyFrame):
-            df.sink_ndjson(path)
-        else:
-            df.write_ndjson(path)
+        dst = UPath(path)
+        eager_df = df.collect() if isinstance(df, pl.LazyFrame) else df
+        eager_df.write_json(str(dst))
 
-    def read_raw(self, path: Path | str, **kwargs: Any) -> io.BytesIO:
+    def read_raw(self, path: UPath | str, **kwargs: Any) -> io.BytesIO:
         """Read raw data from path.
 
         Args:
@@ -128,32 +79,23 @@ class JSONHandler(FormatHandler):
 
         combined = b""
         for f in files:
-            with self.fs.open(f, "rb") as fp:
-                raw = fp.read()
-                if isinstance(raw, str):
-                    raw = raw.encode(encoding)
-
-                content = raw.decode(encoding, errors="ignore")
-                # Fix trailing commas in JSON
-                cleaned = re.sub(r",\s*([\]}])", r"\1", content)
-                if len(cleaned) != len(content):
-                    LOG.info(f"Fixed trailing commas in {f}")
-
-                combined += cleaned.encode(encoding)
+            raw = f.read_bytes()
+            content = raw.decode(encoding, errors="ignore")
+            cleaned = re.sub(r",\s*([\]}])", r"\1", content)
+            combined += cleaned.encode(encoding)
 
         return io.BytesIO(combined)
 
-    def write_raw(self, data: bytes, path: str) -> None:
+    def write_raw(self, data: bytes, path: UPath | str) -> None:
         """Write raw data to path.
 
         Args:
             data: The raw data to write.
             path: The path to write the data to.
         """
-        with self.fs.open(path, "wb") as f:
-            f.write(data)
+        UPath(path).write_bytes(data)
 
-    def _is_ndjson(self, path: str) -> bool:
+    def _is_ndjson(self, file_path: UPath) -> bool:
         """Check if file is NDJSON format.
 
         Args:
@@ -162,18 +104,16 @@ class JSONHandler(FormatHandler):
         Returns:
             bool: True if the file is NDJSON, False otherwise.
         """
-        if any(path.endswith(ext) for ext in [".ndjson", ".jsonl"]):
+        if file_path.suffix in [".ndjson", ".jsonl"]:
             return True
 
-        # Peek at first non-whitespace character
         try:
-            with self.fs.open(path, "rb") as f:
-                # Read initial chunk to inspect structural character
+            with file_path.open("rb") as f:
                 chunk = f.read(2048).strip()
-                if not chunk:
-                    return False
-                # If first character is '{', it's almost certainly NDJSON record-stream
-                # Standard JSON arrays start with '['
                 return chunk.startswith(b"{")
         except (OSError, UnicodeError):
             return False
+
+
+FormatHandler.register_item("jsonl", JSONHandler)
+FormatHandler.register_item("ndjson", JSONHandler)

@@ -2,23 +2,22 @@
 
 import io
 import logging
-from pathlib import Path
 from typing import Any
 
 import polars as pl
 import pyarrow.dataset as ds
+from upath import UPath
 
 from .base import FormatHandler
 
 LOG = logging.getLogger(__name__)
 
 
+@FormatHandler.register("parquet")
 class ParquetHandler(FormatHandler):
     """Handler for Apache Parquet files."""
 
-    splittable = True
-
-    def discover(self, path: Path | str, pattern: str | None = None) -> set[str]:
+    def discover(self, path: UPath | str, pattern: str | None = None) -> set[UPath]:
         """Discover Parquet files.
 
         Args:
@@ -30,75 +29,107 @@ class ParquetHandler(FormatHandler):
         """
         return self._glob_files(path, pattern, "**/*.parquet")
 
-    def to_df(self, path: Path | str, **kwargs: Any) -> pl.LazyFrame:
-        """Convert Parquet files to Polars LazyFrame.
+    def to_df(
+        self, path: UPath | str, pattern: str | None = None, **kwargs: Any
+    ) -> pl.LazyFrame:
+        """Convert Parquet files or directories to a Polars LazyFrame.
 
         Args:
-            path: The path to the Parquet file.
-            **kwargs: Additional keyword arguments.
+            path: Target directory or file path.
+            pattern: Optional glob pattern for file discovery (e.g. "**/*.parquet").
+            **kwargs: Overrides forwarded directly to `pl.scan_parquet`
+                (e.g., hive_partitioning=True, low_memory=True, row_index_name="__row_id").
 
         Returns:
-            pl.LazyFrame: The LazyFrame containing the Parquet data.
+            pl.LazyFrame: Polars LazyFrame query plan.
         """
-        files = list(self.discover(path))
-        if not files:
-            LOG.warning(f"No Parquet files found: {path}")
-            return pl.LazyFrame()
-        return pl.scan_parquet(list(files), storage_options=self.options)
+        target = UPath(path)
 
-    def from_df(self, df: pl.LazyFrame | pl.DataFrame, path: Path | str) -> None:
+        # 1. Merge defaults, handler options, and kwargs
+        scan_opts: dict[str, Any] = {
+            "hive_partitioning": True,  # Default to True
+            **self.options,
+            **kwargs,
+        }
+
+        # 2. Extract storage options safely
+        if (
+            "storage_options" not in scan_opts
+            and hasattr(self, "options")
+            and (storage_opts := self.options.get("storage_options"))
+        ):
+            scan_opts["storage_options"] = storage_opts
+
+        # 3. Strip write-only keys
+        for write_only_key in ("partition_cols", "compression", "max_rows_per_file"):
+            scan_opts.pop(write_only_key, None)
+
+        # 4. Handle single file vs directory scanning
+        if target.is_file():
+            # If target is a single file, turn off hive partitioning unless explicitly overridden
+            scan_opts.setdefault("hive_partitioning", False)
+            return pl.scan_parquet(str(target), **scan_opts)
+
+        glob_pattern = pattern or "**/*.parquet"
+        scan_path = str(target / glob_pattern)
+
+        if not self.discover(path, pattern=pattern):
+            LOG.warning(
+                f"No Parquet files found matching '{glob_pattern}' under: {path}"
+            )
+            return pl.LazyFrame()
+
+        # Pass all kwargs (including hive_partitioning) directly to scan_parquet
+        return pl.scan_parquet(scan_path, **scan_opts)
+
+    def from_df(self, df: pl.LazyFrame | pl.DataFrame, path: UPath | str) -> None:
         """Write LazyFrame to Parquet files.
 
         Args:
             df: The LazyFrame to write.
             path: The path to write the files to.
         """
-        if isinstance(df, pl.LazyFrame):
-            df.sink_parquet(path, compression="snappy", row_group_size=100_000)
-        else:
-            df.write_parquet(path, compression="snappy")
 
-    def write(
-        self,
-        df: pl.DataFrame | pl.LazyFrame,
-        target_path: str,
-        partition_cols: list[str] | None = None,
-        max_rows_per_file: int = 500_000,
-        compression: str = "zstd",
-    ) -> None:
-        """
-        Writes a Polars DataFrame out to disk/cloud storage using PyArrow Dataset
-        for advanced Hive-style partitioning and file size rolling.
-        """
-        resolved_dst = self.fs.resolve(target_path)
+        resolved_dst = UPath(path)
+        eager_df = df.collect() if isinstance(df, pl.LazyFrame) else df
 
-        # Ensure evaluation results strictly in a DataFrame
-        eager_df: pl.DataFrame
-        if isinstance(df, pl.LazyFrame):
-            res = df.collect()
-            eager_df = res.to_frame() if isinstance(res, pl.Series) else res
-        elif isinstance(df, pl.Series):
-            eager_df = df.to_frame()
-        else:
-            eager_df = df
+        partition_cols = self.options.get("partition_cols", [])
+        compression = self.options.get("compression", "snappy")
 
-        arrow_table = eager_df.to_arrow()
+        # Only extract max_rows_per_file if explicitly configured by the user
+        max_rows_per_file = self.options.get("max_rows_per_file")
 
-        # Write partitioned dataset via PyArrow
-        ds.write_dataset(
-            data=arrow_table,
-            base_dir=resolved_dst,
-            format="parquet",
-            filesystem=self.fs.fs,
-            partitioning=partition_cols,
-            max_rows_per_file=max_rows_per_file,  # Auto-rolls large files!
-            file_options=ds.ParquetFileFormat().make_write_options(
+        write_kwargs = {
+            "data": eager_df.to_arrow(),
+            "base_dir": str(resolved_dst),
+            "format": "parquet",
+            "filesystem": resolved_dst.fs,
+            "partitioning": partition_cols,
+            "file_options": ds.ParquetFileFormat().make_write_options(
                 compression=compression
             ),
-            existing_data_behavior="overwrite_or_ignore",
-        )
+            "existing_data_behavior": "overwrite_or_ignore",
+        }
 
-    def read_raw(self, path: Path | str, **kwargs: Any) -> io.BytesIO:
+        # Dynamically append file/group constraints only when explicitly requested
+        if max_rows_per_file:
+            write_kwargs["max_rows_per_file"] = max_rows_per_file
+            write_kwargs["max_rows_per_group"] = min(1_048_576, max_rows_per_file)
+
+        ds.write_dataset(**write_kwargs)
+
+    def read_raw(self, path: UPath | str, **kwargs: Any) -> io.BytesIO:
+        files = self.discover(path)
+        if not files:
+            return io.BytesIO(b"")
+
+        combined = b""
+        for f in files:
+            combined += f.read_bytes()
+
+        return io.BytesIO(combined)
+
+    def write_raw(self, data: bytes, path: UPath | str) -> None:
         """Read raw data from path.
 
         Args:
@@ -108,15 +139,4 @@ class ParquetHandler(FormatHandler):
         Returns:
             io.BytesIO: The raw data.
         """
-        files = self.discover(path)
-        if not files:
-            return io.BytesIO(b"")
-
-        combined = b""
-        for f in files:
-            with self.fs.open(f, "rb") as fp:
-                data = fp.read()
-                if isinstance(data, str):
-                    data = data.encode(kwargs.get("encoding", "utf-8"))
-                combined += data
-        return io.BytesIO(combined)
+        UPath(path).write_bytes(data)

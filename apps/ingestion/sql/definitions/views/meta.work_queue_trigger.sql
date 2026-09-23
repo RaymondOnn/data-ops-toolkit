@@ -41,7 +41,7 @@ SELECT
     , WATCH_FILE_PATH
     , cast(NULL, 'Nullable(String)') AS RUNTIME_OVERRIDES
     , cast(0, 'UInt8') AS RETRY_ATTEMPTS
-    , cast(NULL, 'Nullable(String)') AS SOURCE_ROW_COUNT
+    -- , cast(NULL, 'Nullable(String)') AS SOURCE_ROW_COUNT
     , cast(NULL, 'Nullable(UInt64)') AS FINAL_ROW_COUNT
     , cast(NULL, 'Nullable(String)') AS FINAL_MANIFEST
     , cast(NULL, 'Nullable(String)') AS REMARKS

@@ -1,20 +1,16 @@
 """In-memory cache of current state for active runs."""
 
 from threading import RLock
-from typing import Any
 
-import msgspec
 from libs.utils.dates import current_timestamp
 from loguru import logger
 
 from src.core.contexts.execution import ExecutionContext
 from src.core.models.task.enums import TaskIdentity
-from src.core.orchestrator.enums import (
-    TaskRecord,
-    TaskUpdate,
-    to_ch_datetime,
-)
+from src.core.models.task.status import ExecutionStatus
 from src.utils.constants import STRIP_TZ_FOR_DB
+
+from .models import TaskRecord, TaskUpdate
 
 LOG = logger
 
@@ -63,10 +59,7 @@ class StateStore:
             TaskRecord | None: The record if found, else None.
         """
         with self._lock:
-            record = self.records.get(run_id)
-            if record:
-                LOG.trace("Retrieved record from cache", run_id=run_id)
-            return record
+            return self.records.get(run_id)
 
     def add(self, task_identity: TaskIdentity) -> TaskRecord:
         """Registers a new task instance in the cache.
@@ -107,64 +100,101 @@ class StateStore:
             )
         return record
 
-    def update(self, run_id: str, updates: TaskUpdate | dict[str, Any]) -> bool:
-        """Applies updates to an existing record and returns True if state changed.
+    # def update(self, run_id: str, updates: TaskUpdate | dict[str, Any]) -> bool:
+    #     """Applies updates to an existing record and returns True if state changed.
 
-        Args:
-            run_id: Target run ID.
-            updates: Partial update object or dictionary.
+    #     Args:
+    #         run_id: Target run ID.
+    #         updates: Partial update object or dictionary.
 
-        Returns:
-            bool: True if the update resulted in a data change, False otherwise.
+    #     Returns:
+    #         bool: True if the update resulted in a data change, False otherwise.
 
-        Decision: Partial Merging.
-        By stripping None values from TaskUpdate structs, we allow
-        heartbeat updates (like just 'LAST_UPDATED_AT') without
-        accidentally overwriting static metadata like the PARTITION_DATE.
+    #     Decision: Partial Merging.
+    #     By stripping None values from TaskUpdate structs, we allow
+    #     heartbeat updates (like just 'LAST_UPDATED_AT') without
+    #     accidentally overwriting static metadata like the PARTITION_DATE.
+    #     """
+    #     with self._lock:
+    #         if isinstance(updates, TaskUpdate):
+    #             update_dict = {
+    #                 k: v
+    #                 for k, v in msgspec.to_builtins(updates).items()
+    #                 if v is not None
+    #             }
+    #         else:
+    #             update_dict = updates
+
+    #         if not (current := self.records.get(run_id)):
+    #             LOG.warning("Record not found for update. Creating...", run_id=run_id)
+    #             task_id = TaskIdentity(
+    #                 job_id=update_dict.get("job_id", ""),
+    #                 dataset_id=update_dict.get("dataset_id", ""),
+    #                 partition_date=update_dict.get("partition_date", ""),
+    #                 run_id=run_id,
+    #             )
+    #             current = self.add(task_id)
+
+    #         merged = {
+    #             **current.to_dict(),
+    #             **update_dict,
+    #             "LAST_UPDATED_AT_TS_LC": to_ch_datetime(
+    #                 current_timestamp(
+    #                     timezone=self.exec_ctx.timezone, naive=STRIP_TZ_FOR_DB
+    #                 )
+    #             ),
+    #         }
+
+    #         try:
+    #             new_record = msgspec.convert(merged, type=TaskRecord)
+    #             if current == new_record:
+    #                 LOG.trace("No changes detected", run_id=run_id)
+    #                 return False
+
+    #             self.records[run_id] = new_record
+    #             LOG.trace("Updated record in cache", run_id=run_id)
+    #             return True
+
+    #         except msgspec.ValidationError:
+    #             LOG.exception("Record validation failed", run_id=run_id)
+    #             return False
+
+    def update(self, run_id: str, update: TaskUpdate) -> bool:
+        """Applies a single TaskUpdate event to the targeted TaskRecord."""
+        with self._lock:
+            record = self.records.get(run_id)
+            if not record:
+                LOG.warning(f"No active record found in StateStore for RUN_ID={run_id}")
+                return False
+
+            return record.apply_update(update)
+
+    def upsert(self, new_records: dict[str, TaskRecord]) -> None:
+        """
+        Merges bulk TaskRecord snapshots polled from the database view.
+        Only overwrites local records if local status is non-terminal and DB timestamp is newer.
         """
         with self._lock:
-            if isinstance(updates, TaskUpdate):
-                update_dict = {
-                    k: v
-                    for k, v in msgspec.to_builtins(updates).items()
-                    if v is not None
-                }
-            else:
-                update_dict = updates
+            for run_id, db_rec in new_records.items():
+                local_rec = self.records.get(run_id)
 
-            if not (current := self.records.get(run_id)):
-                LOG.warning("Record not found for update. Creating...", run_id=run_id)
-                task_id = TaskIdentity(
-                    job_id=update_dict.get("job_id", ""),
-                    dataset_id=update_dict.get("dataset_id", ""),
-                    partition_date=update_dict.get("partition_date", ""),
-                    run_id=run_id,
-                )
-                current = self.add(task_id)
+                if not local_rec:
+                    self.records[run_id] = db_rec
+                    continue
 
-            merged = {
-                **current.to_dict(),
-                **update_dict,
-                "LAST_UPDATED_AT_TS_LC": to_ch_datetime(
-                    current_timestamp(
-                        timezone=self.exec_ctx.timezone, naive=STRIP_TZ_FOR_DB
-                    )
-                ),
-            }
+                # Guard 1: Never overwrite terminal local records
+                if (
+                    local_rec.JOB_STATUS
+                    and ExecutionStatus(local_rec.JOB_STATUS).is_terminal
+                ):
+                    continue
 
-            try:
-                new_record = msgspec.convert(merged, type=TaskRecord)
-                if current == new_record:
-                    LOG.trace("No changes detected", run_id=run_id)
-                    return False
+                # Guard 2: Timestamp ordering check
+                local_ts = local_rec.LAST_UPDATED_AT_TS_LC
+                db_ts = db_rec.LAST_UPDATED_AT_TS_LC
 
-                self.records[run_id] = new_record
-                LOG.trace("Updated record in cache", run_id=run_id)
-                return True
-
-            except msgspec.ValidationError:
-                LOG.exception("Record validation failed", run_id=run_id)
-                return False
+                if db_ts is None or (local_ts is not None and db_ts >= local_ts):
+                    self.records[run_id] = db_rec
 
     def remove(self, run_id: str) -> None:
         """Permanently removes a record from the in-memory store.

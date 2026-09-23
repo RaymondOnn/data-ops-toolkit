@@ -8,24 +8,30 @@ from pathlib import Path
 from typing import Any
 
 from cryptography.fernet import Fernet
+from libs.metaclasses.draft import ClassRegistry
 
 LOG = logging.getLogger(__name__)
 
 
-class SecretProvider(ABC):
+class SecretProvider(
+    ClassRegistry,
+    ABC,
+    registry_name="SecretRegistry",
+    auto_key=False,
+    instance_cache=False,
+):
     """Base class for secret management providers."""
 
     @abstractmethod
-    def get(self, secret_id: str) -> str:
+    def get_secret(self, secret_id: str) -> str:
         """Retrieve a secret value."""
-        pass
 
     @abstractmethod
-    def set(self, secret_id: str, value: Any) -> None:
+    def set_secret(self, secret_id: str, value: Any) -> None:
         """Store a secret value."""
-        pass
 
 
+@SecretProvider.register("local_file")
 class LocalSecretProvider(SecretProvider):
     """Local JSON file provider (development only)."""
 
@@ -42,18 +48,19 @@ class LocalSecretProvider(SecretProvider):
         with path.open() as f:
             return json.load(f) or {}
 
-    def get(self, secret_id: str) -> str:
+    def get_secret(self, secret_id: str) -> str:
         if secret_id and (value := self._secrets.get(secret_id)):
             return value
         return os.getenv(secret_id, "dev_fallback")
 
-    def set(self, secret_id: str, value: Any) -> None:
+    def set_secret(self, secret_id: str, value: Any) -> None:
         self._secrets[secret_id] = str(value)
         if self.path:
             with self.path.open("w") as f:
                 json.dump(self._secrets, f, indent=4)
 
 
+@SecretProvider.register("secure_file")
 class LocalEncryptedProvider(SecretProvider):
     """Encrypted local JSON provider."""
 
@@ -69,16 +76,17 @@ class LocalEncryptedProvider(SecretProvider):
         with path.open() as f:
             return json.load(f)
 
-    def get(self, secret_id: str) -> str:
+    def get_secret(self, secret_id: str) -> str:
         encrypted = self._secrets.get(secret_id)
         if not encrypted:
             raise ValueError(f"Secret {secret_id} not found")
         return self._fernet.decrypt(encrypted.encode()).decode()
 
-    def set(self, secret_id: str, value: Any) -> None:
+    def set_secret(self, secret_id: str, value: Any) -> None:
         raise NotImplementedError("Encrypted provider is read-only")
 
 
+@SecretProvider.register("aws_sm")
 class AWSSecretProvider(SecretProvider):
     """AWS Secrets Manager provider (production)."""
 
@@ -106,11 +114,11 @@ class AWSSecretProvider(SecretProvider):
         aws = AWSClient(config=aws_config)
         self._client = aws.get_client("secretsmanager", endpoint=sm_endpoint_url)
 
-    def get(self, secret_id: str) -> str:
+    def get_secret(self, secret_id: str) -> str:
         LOG.debug(f"Fetching secret from AWS: {secret_id}")
         response = self._client.get_secret_value(SecretId=secret_id)
         return response["SecretString"]
 
-    def set(self, secret_id: str, value: Any) -> None:
+    def set_secret(self, secret_id: str, value: Any) -> None:
         content = json.dumps(value) if isinstance(value, dict) else str(value)
         self._client.put_secret_value(SecretId=secret_id, SecretString=content)

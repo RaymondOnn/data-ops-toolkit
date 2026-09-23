@@ -1,9 +1,9 @@
 """Filesystem-based event detection for task orchestration."""
 
-import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, Protocol
 
+from libs.metaclasses.eventbus import EventBus
 from loguru import logger
 
 from src.core.models.task import TaskSignal
@@ -17,23 +17,6 @@ if TYPE_CHECKING:
     from src.core.contexts import ExecutionContext
 
 LOG = logger
-
-
-class EventBus:
-    """Thread-safe event bus for orchestrator synchronization."""
-
-    def __init__(self):
-        self._event = threading.Event()
-
-    def notify(self) -> None:
-        """Wake up waiting threads."""
-        self._event.set()
-
-    def wait(self, timeout: float | None = None) -> bool:
-        """Wait for trigger or timeout."""
-        signaled = self._event.wait(timeout=timeout)
-        self._event.clear()
-        return signaled
 
 
 class SignalEvent(NamedTuple):
@@ -73,7 +56,9 @@ class SignalScanner(EventBus):
                 continue
 
             try:
-                signal_type = TaskSignal(marker.suffix.casefold().strip("."))
+                # Strip the leading dot so '.fail' -> 'fail'
+                clean_signal = marker.suffix.lstrip(".").casefold()
+                signal_type = TaskSignal(clean_signal)
                 handler = self._handlers.get(signal_type)
 
                 if not handler:

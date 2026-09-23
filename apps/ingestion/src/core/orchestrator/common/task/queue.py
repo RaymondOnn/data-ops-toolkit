@@ -6,8 +6,8 @@ from libs.queue.priority.factory import QueueFactory
 from loguru import logger
 
 from src.core.models.task import ExecutionStatus
-from src.core.orchestrator.enums import TaskMetadata
-from src.core.stages.enums import Stage
+from src.core.orchestrator.common.task.types import TaskMetadata
+from src.core.stages.types import Stage
 
 LOG = logger
 

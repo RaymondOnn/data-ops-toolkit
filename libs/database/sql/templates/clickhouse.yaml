@@ -8,8 +8,8 @@
 
 
 identifiers:
-  quote_open: "'"
-  quote_close: "'"
+  quote_open: "" # "'"
+  quote_close: "" # "'"
   expected_parts: 2,
   naming_structure: "[SCHEMA.]TABLE" # Can resolve default database
   allowed_depths: [1, 2, 3]
@@ -33,8 +33,11 @@ core:
   drop_schema: "drop database if exists {schema}"
 
   describe_table: "describe table {table}"
-  like_table: create or replace {tgt_table} as {src_table}
-  clone_table: create or replace {tgt_table} clone as {src_table}
+  like_table: create or replace table {tgt_table} as {src_table}
+  # like_table: create or replace {tgt_table} engine = MergeTree() order by tuple() as {src_table}
+  clone_table: create or replace table {tgt_table} clone as {src_table}
+
+  add_column: "alter table {table} add column {column_name} {data_type}"
 
 # -----------------------------------------------------------------------------
 # 2. MERGE STRATEGIES
@@ -45,6 +48,11 @@ merge:
     insert into {tgt_table} ({insert_fields})
     select {src_fields}
     from {src_table}
+
+  merge_update:
+    UPDATE {tgt_table}
+    SET {set_values}
+    WHERE {where_cond};
 
   merge_insert: |
     insert into {tgt_table} ({insert_fields})

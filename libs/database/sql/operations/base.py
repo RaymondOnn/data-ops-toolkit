@@ -1,15 +1,14 @@
-import re
-from collections.abc import Callable
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from libs.database.sql.compile import ConfigurationValidationError
+from libs.database.sql.exceptions import SQLCompilationError
+from libs.metaclasses.draft import FunctionRegistry
 
 if TYPE_CHECKING:
     from libs.database.sql.compile import SQLCompiler
 
 
-class SQLOperation(StrEnum):
+class SQLOperationType(StrEnum):
     # core
     CREATE_TABLE = "create_table"
     CREATE_SCHEMA = "create_schema"
@@ -24,11 +23,14 @@ class SQLOperation(StrEnum):
     LIKE_TABLE = "like_table"
     CLONE_TABLE = "clone_table"
 
+    ADD_COLUMN = "add_column"
+
     # merge
     UPSERT = "upsert"
     MERGE_INSERT = "merge_insert"
     MERGE_DELETE = "merge_delete"
     MERGE_UPSERT = "merge_upsert"
+    MERGE_UPDATE = "merge_update"
 
     # metadata
     EXIST = "table_exists"
@@ -40,59 +42,38 @@ class SQLOperation(StrEnum):
     MINUS = "minus"
 
 
-# Central Compilation Registry Map
-COMPILE_FUNCTIONS: dict[SQLOperation | str, Callable] = {}
+class SQLOperation(
+    FunctionRegistry,
+    registry_name="SQLOperationRegistry",
+    auto_key=False,
+    package_paths="libs.database.sql.operations",
+):
+    @classmethod
+    def compile(
+        cls,
+        operation_type: SQLOperationType | str,
+        compiler: "SQLCompiler",
+        *args: Any,
+        **kwargs: Any,
+    ) -> str:
+        """Compiles a SQL query by invoking the registered function for the given operation.
 
+        Args:
+            operation_type: Target operation key or enum value.
+            compiler: SQLCompiler instance containing dialect and configuration.
+            *args: Positional arguments for the compilation function.
+            **kwargs: Keyword arguments for the compilation function.
 
-def register_compile_func(op_type: SQLOperation | str):
-    """Decorator to register compilation routines with the strategy engine."""
+        Returns:
+            The compiled SQL string.
 
-    def decorator(func: Callable):
-        COMPILE_FUNCTIONS[op_type] = func
-        return func
-
-    return decorator
-
-
-def format_table_ref(
-    compiler: "SQLCompiler",
-    table_or_query: str,
-    alias: str = "src",
-    enforce_qualified: bool = False,
-) -> str:
-    """
-    Guards table inputs. If given a full SELECT query, wraps it in parentheses
-    with an alias. If given a plain table identifier, returns the quoted name.
-
-    Examples:
-        "analytics.users" -> '"analytics"."users"'
-        "SELECT id, name FROM users" -> '(SELECT id, name FROM users) AS src'
-        "(SELECT * FROM users)" -> '(SELECT * FROM users) AS src'
-    """
-    if not table_or_query:
-        return ""
-
-    cleaned = table_or_query.strip()
-
-    # Check if input is a subquery
-    if re.match(r"^\s*\(?\s*select\b", cleaned, re.IGNORECASE):
-        if not (cleaned.startswith("(") and cleaned.endswith(")")):
-            cleaned = f"({cleaned})"
-        return f"{cleaned} AS {compiler.quote_identifier(alias)}" if alias else cleaned
-
-    # Table identifier validation check
-    parts = cleaned.split(".")
-    if enforce_qualified and len(parts) < 2:
-        raise ConfigurationValidationError(
-            f"Table identifier '{cleaned}' is not fully qualified. "
-            f"Expected '[schema].[table]', but got depth of {len(parts)}."
-        )
-
-    return compiler.quote_identifier(cleaned)
-
-
-def format_fields(compiler: "SQLCompiler", fields: list[str] | str) -> str:
-    """Helper to format string or list of column names cleanly."""
-    if isinstance(fields, list | tuple | set):
-        return ", ".join([compiler.quote_identifier(f) for f in fields])
-    return fields.strip() if fields else "*"
+        Raises:
+            SQLCompilationError: If operation_type is not registered or template is missing.
+        """
+        key = str(operation_type)
+        try:
+            return cls.invoke(key, compiler, *args, **kwargs)
+        except KeyError as e:
+            raise SQLCompilationError(
+                f"Unsupported SQL operation: '{key}' for dialect '{compiler.dialect}'."
+            ) from e

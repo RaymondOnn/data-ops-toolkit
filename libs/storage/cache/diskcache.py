@@ -7,11 +7,12 @@ from typing import Any
 
 import diskcache
 
-from .base import Cache
+from .base import Cache, CacheType
 
 LOG = logging.getLogger(__name__)
 
 
+@Cache.register(CacheType.DISKCACHE)
 class DiskCache(Cache):
     """DiskCache backend with internal transaction support.
 

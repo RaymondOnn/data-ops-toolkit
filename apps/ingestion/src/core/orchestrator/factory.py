@@ -5,9 +5,10 @@ from src.core.orchestrator.common import (
     SignalScanner,
     StateHub,
     TaskManager,
-    TimeoutMonitor,
 )
+from src.core.orchestrator.common.task.timeout import TimeoutMonitor
 from src.services.factory import ServiceFactory
+from src.services.repo.metadata import MetadataRepository
 
 from .modes import DaemonRuntime, TriggerRuntime
 
@@ -20,14 +21,13 @@ def assemble_runtime(
     This allows for manual wiring of dependencies and is not intended for general use.
     """
     exec_ctx.provider_config = builder.app_settings.get("secret_provider").to_dict()
-
     ServiceFactory.get_provider(exec_ctx.provider_config)
-    db_config = builder.app_settings.get("meta_db.connection", {}).to_dict()
+    meta_repo = MetadataRepository(**exec_ctx.metadata_db_config)
 
     # 1. Build common baseline infrastructure
     signal_processor = SignalScanner(exec_ctx=exec_ctx)
-    timeout_monitor = TimeoutMonitor(db_config=db_config)
-    base_state_store = StateHub(exec_ctx=exec_ctx, db_config=db_config)
+    timeout_monitor = TimeoutMonitor(meta_repo=meta_repo)
+    base_state_store = StateHub(exec_ctx=exec_ctx, meta_repo=meta_repo)
 
     if exec_ctx.always_on:
         from .modes.daemon import (

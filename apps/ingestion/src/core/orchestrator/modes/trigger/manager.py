@@ -4,11 +4,11 @@ import ray
 from loguru import logger
 
 from src.core.orchestrator.common.task.cache import TaskCache
+from src.core.orchestrator.common.task.types import TaskMetadata
 from src.core.orchestrator.contracts.policies import (
     AdmissionPolicy,
     MaintenancePolicy,
 )
-from src.core.orchestrator.enums import TaskMetadata
 
 if TYPE_CHECKING:
     from src.core.contexts.execution import ExecutionContext

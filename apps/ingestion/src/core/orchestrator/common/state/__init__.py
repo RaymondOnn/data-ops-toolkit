@@ -1,3 +1,4 @@
 from .hub import StateHub
+from .models import TaskRecord
 
-__all__ = ["StateHub"]
+__all__ = ["StateHub", "TaskRecord"]

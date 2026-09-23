@@ -7,7 +7,8 @@ from pathlib import Path
 from loguru import logger
 
 from .base import DBClient
-from .factory import DatabaseFactory
+
+# from .factory import DatabaseFactory
 
 # Get the absolute path of the current directory
 pkg_path = str(Path(__file__).parent)
@@ -30,7 +31,7 @@ logger.trace(f"Discovered service modules: {discovered}")
 
 __all__ = [
     "DBClient",
-    "DatabaseFactory",
+    # "DatabaseFactory",
     "clickhouse.ClickhouseClient",
     "duckdb.DuckDBClient",
     "oracle.OracleClient",

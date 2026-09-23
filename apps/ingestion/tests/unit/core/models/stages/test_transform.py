@@ -4,7 +4,7 @@ import polars as pl
 import pytest
 
 from src.core.models.stages.transform import TransformStage
-from src.core.stages.enums import Stage
+from src.core.stages.types import Stage
 from src.utils.exceptions import RollbackRequired
 
 

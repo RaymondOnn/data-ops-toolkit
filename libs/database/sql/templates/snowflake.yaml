@@ -16,15 +16,20 @@ core:
   truncate: "truncate table {table}"
   insert: "insert into {table} ({fields}) values ({values})"
 
-  # Snowflake-specific merge template for deduplication / incremental syncs
-  merge: |
-    merge into {tgt_table} as tgt
-    using {src_table} as src
-    on {join_cond}
-    when matched then
-      update set {set_values}
-    when not matched then
-      insert ({fields}) values ({values})
+  add_column: "alter table {table} add {column_name} {data_type}"
+
+# -----------------------------------------------------------------------------
+# 2. MERGE STRATEGIES
+# -----------------------------------------------------------------------------
+# Snowflake-specific merge template for deduplication / incremental syncs
+merge: |
+  merge into {tgt_table} as tgt
+  using {src_table} as src
+  on {join_cond}
+  when matched then
+    update set {set_values}
+  when not matched then
+    insert ({fields}) values ({values})
 
 metadata:
   tables: |

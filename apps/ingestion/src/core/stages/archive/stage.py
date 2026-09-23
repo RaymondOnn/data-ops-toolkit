@@ -4,8 +4,7 @@ from libs.utils.dates import current_timestamp
 from loguru import logger
 
 from src.core.models.task import Task, TaskSignal
-from src.core.stages.contracts.stage import ExecutionStage, ExecutionStageRegistry
-from src.core.stages.enums import Stage
+from src.core.stages.contracts.stage import ExecutionStage, Stage
 from src.services.factory import ServiceFactory
 
 from .config import ArchiveConfig
@@ -15,7 +14,7 @@ LOG = logger
 DEFAULT_RETENTION_DAYS = 2555  # 7 years
 
 
-@ExecutionStageRegistry.register(Stage.ARCHIVE.value)
+@ExecutionStage.register(key=Stage.ARCHIVE.value)
 class ArchiveStage(ExecutionStage[ArchiveConfig]):
     requires_disk_space: bool = False
     config_attribute = "archive"
@@ -60,7 +59,7 @@ class ArchiveStage(ExecutionStage[ArchiveConfig]):
                 retention_expiry=expiry_date,
             )
 
-            self.checkpoint(task, payload=payload)
+            self.save_stage_outcome(task, payload=payload)
             task.send_signal(TaskSignal.DONE)
 
             LOG.info(f"Archive complete for {task.run_id}")
@@ -68,7 +67,7 @@ class ArchiveStage(ExecutionStage[ArchiveConfig]):
 
         except Exception as e:
             LOG.exception("Archive failed")
-            self.checkpoint(task, error=e)
+            self.save_stage_outcome(task, error=e)
             raise
 
     def _archive_data(self, task: Task) -> str | None:

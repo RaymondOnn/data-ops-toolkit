@@ -12,14 +12,21 @@ from libs.utils.exceptions import (
 from loguru import logger
 
 from src.core.contexts import ExecutionContext
-from src.core.models.task import ExecutionStatus, Task
-from src.core.orchestrator.common.timeout import (
-    TimeoutContext,
-    TimeoutMonitor,
+from src.core.models.task import (
+    ExecutionStatus,
+    TaskManifest,
+    TaskManifestFile,
+    TaskWorkspace,
 )
-from src.core.orchestrator.enums import TaskMetadata, TaskRef
+from src.core.orchestrator.common.task.timeout import (
+    TimeoutContext,
+)
+from src.core.orchestrator.common.task.types import TaskMetadata, TaskRef
+from src.core.stages.contracts.stage import ExecutionStage
+from src.core.stages.types import StageContext
 from src.services.factory import ServiceFactory
 from src.services.health.monitor import ServiceMonitor
+from src.services.health.system import SystemMonitor
 from src.utils.constants import CACHE_TASK_NAMESPACE
 
 from .cache import TaskCache
@@ -64,8 +71,8 @@ class Executor:
             cache_config=cache_config, prefix=f"{CACHE_TASK_NAMESPACE}:"
         )
         self.queue = TaskQueue(self.exec_ctx.task_queue_config)
-        self.timeout = TimeoutMonitor()
         self.current_metadata: TaskMetadata | None = None
+        self.system = SystemMonitor(self.exec_ctx.workspace_dir)
 
         ServiceMonitor.setup(
             signal_dir=self.exec_ctx.signal_path,
@@ -107,28 +114,92 @@ class Executor:
             self.is_busy = True
             # 2. Execution Runtime Phase
             LOG.trace("[DISPATCH] execute running", run_id=task_ref.identity.run_id)
+
+            # 1. Instantiate workspace & initialize manifest ONCE
+            workspace = TaskWorkspace(
+                job_id=metadata.job_id,
+                dataset_id=metadata.dataset_id,
+                partition_date=metadata.partition_date,
+                run_id=metadata.run_id,
+                exec_ctx=self.exec_ctx,
+            )
+
+            # Load or create skeleton manifest pointing to actual step_id
+            manifest_path = TaskManifestFile.resolve_path(workspace)
+            if not manifest_path.is_file():
+                manifest = TaskManifest(
+                    job_id=metadata.job_id,
+                    run_id=metadata.run_id,
+                    dataset_id=metadata.dataset_id,
+                    current_step_id=task_ref.step_id,  # Uses 'extract' instead of fallback 'start'
+                    status=ExecutionStatus.UNKNOWN,
+                )
+                TaskManifestFile.save(manifest, workspace)
+            else:
+                manifest = TaskManifestFile.load(workspace)
+
             with (
-                TimeoutContext(metadata, self.timeout, metadata.timeout_state) as t_ctx,
+                TimeoutContext(
+                    step_id=metadata.current_step_id,
+                    timeout_state=metadata.timeout_state,
+                ) as t_ctx,
                 TaskSession(
-                    self.worker_id, self.exec_ctx, task_ref, LOG
+                    self.worker_id,
+                    exec_ctx=self.exec_ctx,
+                    task_ref=task_ref,
+                    log=LOG,
+                    manifest=manifest,
                 ) as session_task,
             ):
                 task = session_task
                 LOG.trace(
                     "[DISPATCH] execute session started",
                     run_id=task_ref.identity.run_id,
-                    workspace=str(task.workspace.path),
+                    workspace=self.exec_ctx.get_run_path(task_ref.identity, "ACTIVE"),
                 )
                 if self._should_use_pex():
                     LOG.trace(
                         "[DISPATCH] execute using PEX",
                         pex_path=str(self.exec_ctx.code_pex_path),
                     )
-                    self._run_via_pex(task, metadata, t_ctx)
+                    self._run_via_pex(task_ref.step_id, metadata, t_ctx)
                 else:
                     LOG.trace("[DISPATCH] execute direct", step=task_ref.step_id)
-                    task.stage.pre_flight(task)
-                    task.execute()
+
+                    # 1. Instantiate execution dependencies for direct run
+                    workspace = TaskWorkspace(
+                        job_id=metadata.job_id,
+                        dataset_id=metadata.dataset_id,
+                        partition_date=metadata.partition_date,
+                        run_id=metadata.run_id,
+                        exec_ctx=self.exec_ctx,
+                    )
+                    manifest = TaskManifestFile.load(workspace)
+
+                    step = task.context.get_step(task_ref.step_id)
+                    stage_ctx = StageContext(
+                        job_id=metadata.job_id,
+                        dataset_id=metadata.dataset_id,
+                        run_id=metadata.run_id,
+                        partition_date=metadata.partition_date,
+                        step_id=task_ref.step_id,
+                        next_step_id=task.context.get_next_step_id(task_ref.step_id)
+                        or "",
+                        # config=step.config,
+                        data_dir=workspace.get_data_path(task_ref.step_id),
+                        workspace_dir=workspace.path,
+                        task_context=task.context,
+                    )
+
+                    # 2. Execute stage directly
+                    stage = ExecutionStage.create(step.stage, step=step)
+                    stage.pre_flight(
+                        system=self.system,
+                        ctx=stage_ctx,
+                        workspace=workspace,
+                        manifest=manifest,
+                    )
+                    stage.execute(ctx=stage_ctx, workspace=workspace, manifest=manifest)
 
                 LOG.trace(
                     "[DISPATCH] execute stage completed",
@@ -164,7 +235,7 @@ class Executor:
 
     def _run_via_pex(
         self,
-        task: Task,
+        step_id: str,
         metadata: TaskMetadata,
         timeout_context: TimeoutContext | None = None,
     ) -> None:
@@ -193,22 +264,22 @@ class Executor:
             "--dataset",
             metadata.dataset_id,
             "--step-id",
-            task.task_ref.step_id,
+            step_id,  # Clean string reference
         ]
 
         timeout_secs = timeout_context.get_remaining() if timeout_context else None
 
-        try:
-            # Capture stdout and stderr to stream them through our logging session
-            process = subprocess.Popen(
-                cmd,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,  # Line buffered
-            )
+        # Capture stdout and stderr to stream them through our logging session
+        process = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,  # Line buffered
+        )
 
+        try:
             # Read streams concurrently without blocking
             # (In production, a select loop or thread reader is preferred to avoid deadlocks)
             while True:
@@ -221,14 +292,13 @@ class Executor:
                 if output:
                     LOG.info(f"[PEX-STDOUT] {output.strip()}")
 
-            rc = process.wait(timeout=timeout_secs)
-            if rc != 0:
-                if process.stderr:
-                    stderr_err = process.stderr.read()
+                rc = process.wait(timeout=timeout_secs)
+                if rc != 0:
+                    stderr_err = process.stderr.read() if process.stderr else ""
                     LOG.error(f"[PEX-STDERR] {stderr_err.strip()}")
-                raise subprocess.CalledProcessError(
-                    rc, cmd, output=output, stderr=stderr_err
-                )
+                    raise subprocess.CalledProcessError(
+                        rc, cmd, output=output, stderr=stderr_err
+                    )
 
         except subprocess.TimeoutExpired as e:
             process.kill()
@@ -249,21 +319,20 @@ def process_stage_task(
 
     from loguru import logger
 
-    try:
-        # Setup worker isolated logging
-        logger.remove()
-        logger.add(
-            sys.stdout,
-            level="DEBUG",
-            colorize=True,
-            format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-        )
-        install_exception_hooks()
-        logger.info(
-            f"Starting task processing for worker {worker_id}, key: {cache_key}"
-        )
+    # Setup worker isolated logging
+    logger.remove()
+    logger.add(
+        sys.stdout,
+        level="DEBUG",
+        colorize=True,
+        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+    )
+    install_exception_hooks()
+    logger.info(f"Starting task processing for worker {worker_id}, key: {cache_key}")
 
-        executor = Executor(worker_id, exec_ctx)
+    executor = Executor(worker_id, exec_ctx)
+
+    try:
         executor.execute_stage(cache_key)
         # Success scenario: return updated metadata to the driver
         return {

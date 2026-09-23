@@ -119,14 +119,58 @@ def set_nested_key(
     return target
 
 
-def deep_merge(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
-    """Deep merge two dictionaries (non-destructive)."""
+def deep_merge(
+    base: dict[str, Any],
+    updates: dict[str, Any],
+    ignore_case: bool = False,
+) -> dict[str, Any]:
+    """Deep merge two dictionaries (non-destructive).
+
+    Args:
+        base: The base dictionary.
+        updates: Dictionary containing overrides/updates.
+        ignore_case: If True, matches dictionary keys case-insensitively.
+
+    Returns:
+        dict[str, Any]: A new merged dictionary.
+    """
     result = base.copy()
-    for key, value in updates.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = deep_merge(result[key], value)
+
+    if not ignore_case:
+        for key, value in updates.items():
+            if (
+                key in result
+                and isinstance(result[key], dict)
+                and isinstance(value, dict)
+            ):
+                result[key] = deep_merge(result[key], value, ignore_case=False)
+            else:
+                result[key] = value
+        return result
+
+    # Case-insensitive merge branch
+    # Build lower-to-actual key mapping for base dict
+    base_key_map = {str(k).lower(): k for k in result}
+
+    for update_key, update_val in updates.items():
+        lookup_key = str(update_key).lower()
+
+        if lookup_key in base_key_map:
+            actual_base_key = base_key_map[lookup_key]
+            base_val = result[actual_base_key]
+
+            if isinstance(base_val, dict) and isinstance(update_val, dict):
+                result[actual_base_key] = deep_merge(
+                    base_val, update_val, ignore_case=True
+                )
+            else:
+                # Override existing value with update value
+                result[actual_base_key] = update_val
         else:
-            result[key] = value
+            # New key not present in base
+            result[update_key] = update_val
+            base_key_map[lookup_key] = update_key
+
     return result
 
 

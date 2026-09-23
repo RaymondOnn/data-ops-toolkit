@@ -1,17 +1,16 @@
 import logging
 from collections.abc import Generator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from libs.file.archive import ArchiveContext
-from libs.file.base import FileSystemSkills, create_fs_client
-from libs.file.mixins.data import FileReader
+from libs.file.clients.base import FileSystemClient
+from libs.file.skills.base import FileSkill
+
+if TYPE_CHECKING:
+    from libs.file.skills.archive import ArchiveSkill
+    from libs.file.skills.data import FileReader
 
 LOG = logging.getLogger(__name__)
-SKILL_REGISTRY: dict[FileSystemSkills, type] = {
-    FileSystemSkills.FILE: FileReader,
-    # FileSystemSkills.CAS: CASArchivalSkill,  # Plug in CAS skill when available
-}
 
 
 class FileSystemConnector:
@@ -20,63 +19,53 @@ class FileSystemConnector:
     and high-performance file-based SQL engine (via DuckDB-backed DatabaseConnector).
     """
 
-    def __init__(
-        self,
-        url: str,
-        skills: set[FileSystemSkills] | FileSystemSkills | None = None,
-        **conn_kwargs: Any,
-    ) -> None:
-        """
-        Initializes the FileSystemConnector.
+    def __init__(self, url: str, **conn_kwargs: Any) -> None:
+        self.url = url
+        self.conn_kwargs = conn_kwargs
 
-        Args:
-            fs_client: Storage client for S3, Azure, or Local Filesystem.
-            threads: DuckDB execution thread limit.
-            max_memory: DuckDB memory ceiling.
-        """
-        self.fs = create_fs_client(url, set(), **conn_kwargs)
+        # Pure storage client initialization (lightweight & instant)
+        self.fs = FileSystemClient.get_client(url, **conn_kwargs)
+        self._skills: dict[str, FileSkill] = {}
 
-        if isinstance(skills, FileSystemSkills):
-            self.active_skill_keys = {skills}
-        else:
-            self.active_skill_keys = skills or set()
-
-        self.skills: dict[FileSystemSkills, Any] = {}
-        for skill_key in self.active_skill_keys:
-            if skill_key in SKILL_REGISTRY:
-                strategy_cls = SKILL_REGISTRY[skill_key]
-                # Pass self as connector context
-                self.skills[skill_key] = strategy_cls(fs=self.fs)
+    def skill(self, name: str) -> Any:
+        """Lazily load and instantiate a skill bound to the underlying FileSystemClient."""
+        key = name.lower()
+        if key not in self._skills:
+            skill_cls = FileSkill.get_class(key)
+            # Instantiates skill with self.fs (NOT self)
+            self._skills[key] = skill_cls(fs=self.fs, **self.conn_kwargs)
+            LOG.debug(f"Loaded FileSkill '{key}' on demand.")
+        return self._skills[key]
 
     @property
-    def data(self) -> FileReader:
-        if not (data_processor := self.skills[FileSystemSkills.FILE]):
-            raise ValueError("FileReader is required but initialised...")
+    def data(self) -> "FileReader":
+        """Data streaming and DuckDB execution skill."""
+        return self.skill("data")
 
-        return data_processor
+    @property
+    def archive(self) -> "ArchiveSkill":
+        """Archive virtualization skill."""
+        return self.skill("archive")
 
-    def archive(
-        self, archive_path: str, temp_dir: str | Path | None = None
-    ) -> ArchiveContext:
-        """Factory method to instantiate an ArchiveContext bound to this connector."""
-        return ArchiveContext(
-            fs_client=self, archive_path=archive_path, temp_dir=temp_dir
-        )
+    # def archive(
+    #     self, archive_path: str, temp_dir: str | Path | None = None
+    # ) -> ArchiveContext:
+    #     """Factory method to instantiate an ArchiveContext bound to this connector."""
+    #     return ArchiveContext(
+    #         fs_client=self, archive_path=archive_path, temp_dir=temp_dir
+    #     )
 
-    @staticmethod
-    def is_archive(path: str) -> bool:
+    def is_archive(self, path: str) -> bool:
         """Checks if path matches known tape/tar archive extensions."""
-        return ArchiveContext.is_archive(path)
+        return self.archive.is_archive(path)
 
-    @staticmethod
-    def is_zip(path: str) -> bool:
+    def is_zip(self, path: str) -> bool:
         """Checks if path matches known ZIP archive extensions."""
-        return ArchiveContext.is_zip(path)
+        return self.archive.is_zip(path)
 
-    @staticmethod
-    def is_supported_archive(path: str) -> bool:
+    def is_supported_archive(self, path: str) -> bool:
         """Checks if path is any supported archive or compressed virtual protocol."""
-        return ArchiveContext.is_supported(path)
+        return self.archive.is_supported(path)
 
     # =========================================================================
     # 1. FILE SYSTEM OPERATIONS (Delegated to FileSystemClient)

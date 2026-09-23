@@ -2,21 +2,19 @@
 
 import os
 import shutil
-from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import msgspec
 from loguru import logger
 
 from src.core.models.task.enums import TaskIdentity
-from src.core.models.task.manifest import TaskManifest
-from src.core.models.task.status import ExecutionStatus
 from src.utils.constants import CONFIG_FILENAME, MANIFEST_FILENAME
 
 if TYPE_CHECKING:
     from src.core.contexts.execution import ExecutionContext
 
+    from .enums import TaskSignal
 
 LOG = logger
 
@@ -40,6 +38,7 @@ class TaskWorkspace:
 
     def __init__(
         self,
+        *,
         job_id: str,
         dataset_id: str,
         partition_date: str,
@@ -63,17 +62,7 @@ class TaskWorkspace:
         self.partition_date = partition_date
         self.run_id = run_id
         self.exec_ctx = exec_ctx
-        self._category = category
-
-    @property
-    def category(self) -> str:
-        """Returns the current workspace category (e.g., ACTIVE, FAILED)."""
-        return self._category
-
-    @category.setter
-    def category(self, value: str) -> None:
-        """Sets the workspace category, forcing uppercase for consistency."""
-        self._category = value.upper()
+        self.category = category.upper()
 
     @property
     def _identity(self):
@@ -109,17 +98,18 @@ class TaskWorkspace:
         """Returns the path to the config.json file."""
         return self.path / CONFIG_FILENAME
 
-    def get_data_path(self, step_id: str) -> Path:
+    def get_data_path(self, step_id: str, partition_date: str | None = None) -> Path:
         """
-        Constructs the data vault path for a specific pipeline stage.
+        Constructs the data vault path for a specific pipeline stage and optional partition date.
 
         Args:
-            stage: The name of the stage (e.g., 'extract').
+            step_id: The pipeline step identifier (e.g., 'extract').
+            partition_date: Optional specific sub-partition date (e.g., '2026-08-31').
 
         Returns:
-            Path: The path where stage-specific artifacts are stored.
+            Path: Stage data vault path or specific partition folder path.
         """
-        return (
+        base_path = (
             self.exec_ctx.data_path
             / self.job_id
             / self.dataset_id
@@ -127,6 +117,15 @@ class TaskWorkspace:
             / self.run_id
             / step_id
         )
+        if partition_date:
+            return base_path / f"partition_date={partition_date}"
+        return base_path
+
+    def get_partition_dir(self, step_id: str, partition_date: str) -> Path:
+        """Helper to retrieve and ensure a clean sub-partition directory."""
+        p_dir = self.get_data_path(step_id, partition_date=partition_date)
+        p_dir.mkdir(parents=True, exist_ok=True)
+        return p_dir
 
     def exists(self) -> bool:
         """
@@ -154,55 +153,76 @@ class TaskWorkspace:
 
         return str(self.config_file)
 
-    def load_manifest(self) -> "TaskManifest":
-        """
-        Loads the task manifest from disk.
+    # def load_manifest(self) -> "TaskManifest":
+    #     """
+    #     Loads the task manifest from disk.
 
-        If the file does not exist, a 'Skeleton' manifest is returned with
-        status set to UNKNOWN. This allows stages to perform a first-time
-        initialization safely.
+    #     If the file does not exist or is corrupted, a 'Skeleton' manifest is returned
+    #     with status set to UNKNOWN. This allows stages to perform a first-time
+    #     initialization safely.
 
-        Returns:
-            TaskManifest: The rehydrated or skeleton manifest object.
-        """
-        if not self.manifest_file.exists():
-            LOG.debug(f"Manifest not found. Initializing skeleton for {self.run_id}")
-            return TaskManifest(
-                job_id=self.job_id,
-                run_id=self.run_id,
-                dataset_id=self.dataset_id,
-                current_step_id="start",
-                bitmask=0,
-                status=ExecutionStatus.UNKNOWN,
-            )
+    #     Returns:
+    #         TaskManifest: The rehydrated or skeleton manifest object.
+    #     """
+    #     if not self.manifest_file.exists():
+    #         LOG.debug(f"Manifest not found. Initializing skeleton for {self.run_id}")
+    #         return TaskManifest(
+    #             job_id=self.job_id,
+    #             run_id=self.run_id,
+    #             dataset_id=self.dataset_id,
+    #             current_step_id="start",
+    #             bitmask=0,
+    #             status=ExecutionStatus.UNKNOWN,
+    #         )
 
-        return msgspec.json.decode(self.manifest_file.read_bytes(), type=TaskManifest)
+    #     try:
+    #         return msgspec.json.decode(
+    #             self.manifest_file.read_bytes(), type=TaskManifest
+    #         )
+    #     except (msgspec.DecodeError, msgspec.ValidationError) as err:
+    #         LOG.error(
+    #             f"Corrupted or incompatible manifest at {self.manifest_file}: {err}. Resetting to skeleton manifest."
+    #         )
+    #         return TaskManifest(
+    #             job_id=self.job_id,
+    #             run_id=self.run_id,
+    #             dataset_id=self.dataset_id,
+    #             current_step_id="start",
+    #             bitmask=0,
+    #             status=ExecutionStatus.UNKNOWN,
+    #         )
 
-    def save_manifest(self, data: dict[str, Any]) -> None:
-        """
-        Persists manifest data to disk atomically.
+    # def save_manifest(self, data: dict[str, Any]) -> None:
+    #     """
+    #     Persists manifest data to disk atomically.
 
-        Uses a temporary file and an atomic replace operation to ensure that
-        the manifest is never in a partially-written state if a crash occurs.
+    #     Uses a temporary file and an atomic replace operation to ensure that
+    #     the manifest is never in a partially-written state if a crash occurs.
 
-        Args:
-            data: The manifest data as a dictionary.
-        """
+    #     Args:
+    #         data: The manifest data as a dictionary.
+    #     """
+    #     from libs.utils.file import atomic_save
 
-        self.path.mkdir(parents=True, exist_ok=True)
+    #     # Ensure the directory exists (atomic_save does this too,
+    #     # but keeping it here makes it explicit for readability)
+    #     self.path.mkdir(parents=True, exist_ok=True)
 
-        tmp = self.manifest_file.with_suffix(".tmp")
+    #     with atomic_save(self.manifest_file, mode="wb") as f:
+    #         f.write(msgspec.json.encode(data))
+    #     # LOG.debug(f"Manifest file successfully updated: {self.manifest_file.resolve()}")
 
-        # Write to temporary file
-        with tmp.open("wb") as f:
-            f.write(msgspec.json.encode(data))
-            # fsync works on the open file handle, not the Path
-            with suppress(OSError):
-                os.fsync(f.fileno())
+    # def update_manifest(
+    #     self,
+    #     updates: dict[str, Any],
+    # ) -> None:
+    #     """Atomic update of manifest on disk."""
+    #     from libs.utils.dict import deep_merge
 
-        # Atomic replace
-        tmp.replace(self.manifest_file)
-        # LOG.debug(f"Manifest file successfully updated: {self.manifest_file.resolve()}")
+    #     manifest = self.load_manifest()
+    #     data = msgspec.to_builtins(manifest)
+    #     merged = deep_merge(data, updates)
+    #     self.save_manifest(merged)
 
     def relocate(self, new_category: str) -> str:
         """Move workspace to a new category folder."""
@@ -253,9 +273,21 @@ class TaskWorkspace:
     # Signal Helpers
     # =========================================================================
 
-    def send_signal(self, filename: str) -> None:
-        """Create a zero-byte signal file."""
-        (self.exec_ctx.signal_path / filename).touch(exist_ok=True)
+    def send_signal(self, signal: "TaskSignal", step_id: str | None = None) -> None:
+        """Emits an execution signal file to the global orchestrator signal folder."""
+        from libs.utils.dates import current_timestamp
+
+        ext = f".{signal.value}"
+        filename = self.exec_ctx.get_signal_name(self._identity, ext)
+        signal_file = self.exec_ctx.signal_path / filename
+        payload = {
+            "signal": signal.value,
+            "step_id": step_id,
+            "run_id": self.run_id,
+            "timestamp": current_timestamp(naive=True).isoformat(),
+        }
+        signal_file.write_text(msgspec.json.encode(payload).decode())
+        LOG.debug(f"Signal {signal.value} written to signal vault at {signal_file}")
 
     def create_marker(self, name: str) -> None:
         """Create a marker file in workspace."""

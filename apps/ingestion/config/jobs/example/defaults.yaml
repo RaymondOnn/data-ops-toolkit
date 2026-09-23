@@ -1,0 +1,91 @@
+# Dynaconf environments=True format:
+#   - 'default' keys apply to all environments
+#   - named env keys (local, production, etc.) override defaults
+
+version: "1.0"
+
+default:
+  workspace_dir: "./.workspace"
+  add_new_columns: true # default to false
+
+  meta_columns:
+    run_id: "_run_id"
+    run_date: "_partition"
+    source: "_source" # source identifier / file path
+    loaded_at: "_loaded_at_ts"
+
+  partition_date:
+    offset:
+      days: -1
+      months: 0
+      years: 0
+    format: "%Y-%m-%d"
+    wrap_quotes: false
+
+  # Global Feature Flag Defaults
+  feature_flags:
+    benchmark_mode: false       # Logic gate for ServiceFactory tool swapping
+    pre_prod_sim: false         # Enable environment mocks or shadow logic
+    shadow_write_enabled: false # concurrent writes to primary and experimental sinks
+    archive_first: false        # Default flow: Load -> Archive
+    dry_run: false              # Process but skip terminal DB/S3 commits
+
+  calls:
+    extract:
+      num_workers: 10
+      select:
+      where:
+      limit:
+      sql:
+
+      flatten: -1
+      columns: {}
+      null_if: [
+        # Standard string representations
+        "NA", "N/A", "na", "n/a", "N / A", "n / a",
+
+        # Literal null indicators
+        "NULL", "null", "Null", "\\N", "None", "NONE", "none",
+
+        # Common system/data placeholders
+        "NaN", "nan", "NAN", "UNDEFINED", "undefined", "UNKNOWN", "unknown",
+
+        # Punctuation/Empty markers
+        "-", ".", "?", "??", ""
+      ]
+
+      # ---- FILE ----
+      glob:
+      # header: true # true | false
+      # skip_blank_lines:
+      # encoding: utf-8
+
+    transform:
+      type: default
+      options: {}
+
+    archive:
+      retention_days: 2555  # 7-year default
+      enable_archival: true
+      archive_type: "standard_archive"
+
+
+local:
+ # This can be an env var name or plain text for local dev
+  # archive:
+  #   base_path: "s3://archive-vault"
+
+  timeouts:
+    multiplier: 4.0
+
+
+dev:
+
+  archive:
+    base_path: "s3://dev-vault/archival"
+
+
+prod:
+
+  archive:
+    base_path: "s3://prod-vault/archival"

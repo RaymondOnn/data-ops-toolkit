@@ -5,7 +5,7 @@ from typing import IO
 
 from upath import UPath
 
-from libs.file.formats.factory import FormatFactory
+from libs.file.formats.base import FormatHandler
 
 LOG = logging.getLogger(__name__)
 
@@ -17,7 +17,7 @@ def filter_files(
     Filters a list of files based on a glob pattern or supported extensions.
 
     Notes:
-    - If no pattern is provided, we only pick up files that our FormatFactory
+    - If no pattern is provided, we only pick up files that our FormatHandler
       actually knows how to handle, preventing 'Unknown Format' errors.
     """
     if pattern:
@@ -27,7 +27,7 @@ def filter_files(
         return matches
 
     # Filter by registered extensions (csv, parquet, etc)
-    data_exts = tuple(f".{e}" for e in FormatFactory.supported_extensions())
+    data_exts = tuple(f".{e}" for e in FormatHandler.supported_extensions())
     targets = [f for f in all_files if f.lower().endswith(data_exts)]
 
     if not targets:

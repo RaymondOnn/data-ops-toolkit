@@ -5,9 +5,16 @@ from contextlib import contextmanager
 from typing import Any
 
 from libs.database.pool.base import ConnectionPool, LockPool
+from libs.metaclasses.draft import ClassRegistry
 
 
-class DBClient(ABC):
+class DBClient(
+    ABC,
+    ClassRegistry,
+    registry_name="DBRegistry",
+    auto_key=False,
+    instance_cache=False,
+):
     """
     Abstract base class for database clients.
 
@@ -15,7 +22,7 @@ class DBClient(ABC):
     and data frame operations across various database engines.
     """
 
-    type: str
+    db_type: str
 
     def __init__(self, **config: Any) -> None:
         """
@@ -139,11 +146,7 @@ class DBClient(ABC):
 
     @abstractmethod
     def copy(
-        self,
-        table: str,
-        source_dir: str,
-        file_ext: str = "parquet",
-        audit_values: dict[str, Any] | None = None,
+        self, table: str, filepaths: str | list[str], file_format: str, **kwargs
     ) -> None:
         """High-throughput file ingestion directly into target tables."""
         raise NotImplementedError()

@@ -1,4 +1,5 @@
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 from msgspec import Struct, field
@@ -61,3 +62,40 @@ class SQLContext(Struct, kw_only=True):
     ctes: list[SelectQueryContext] = field(default_factory=list)
     main: SelectQueryContext | None = None
     sql: str | None = None  # Top-level full raw SQL override
+    sql_file: str | None = None  # Path to external .sql file
+
+    def __post_init__(self) -> None:
+        if self.sql_file is not None:
+            # 1. Mutual Exclusion: Cannot pass both `sql` string and `sql_file`
+            if self.sql is not None:
+                raise ValueError(
+                    "Ambiguous SQL context: Cannot specify both 'sql' and 'sql_file'."
+                )
+
+            # 2. Structural Conflict: Warn/raise if combining raw file with CTEs/main
+            if self.ctes or self.main is not None:
+                raise ValueError(
+                    "Ambiguous SQL context: Cannot combine 'sql_file' with structured 'ctes' or 'main'."
+                )
+
+            path = Path(self.sql_file)
+
+            # 3. Path & Existence Checks
+            if not path.exists():
+                raise FileNotFoundError(f"SQL file not found at path: {path.resolve()}")
+
+            if not path.is_file():
+                raise ValueError(f"Specified path is not a file: {path.resolve()}")
+
+            # 4. Read Content Safely
+            try:
+                content = path.read_text(encoding="utf-8").strip()
+            except Exception as e:
+                raise OSError(f"Failed to read SQL file '{path}': {e}") from e
+
+            # 5. Empty Content Validation
+            if not content:
+                raise ValueError(f"SQL file at '{path}' is empty.")
+
+            # 6. Populate `sql` attribute
+            self.sql = content

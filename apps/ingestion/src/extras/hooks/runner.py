@@ -1,14 +1,17 @@
 from typing import TYPE_CHECKING, Any
 
-from libs.utils.dict import flatten_dict
+import msgspec
+from libs.utils.template import TemplateEngine
 from loguru import logger
 from simpleeval import simple_eval
 
 from .enums import HookOnFailure
-from .hooks import HOOK_STRATEGIES
+from .hooks import Hook
 
 if TYPE_CHECKING:
-    from src.core.models.task import Task
+    from src.core.contexts.step import StepContext
+    from src.core.models.task import TaskManifest, TaskWorkspace
+    from src.core.stages.types import StageContext
     from src.extras.hooks.enums import HookAction
 
 LOG = logger
@@ -25,73 +28,47 @@ class HookRunner:
     rather than hard-coding side effects.
     """
 
-    def __init__(self, task: "Task"):
-        self.task = task
+    def __init__(
+        self,
+        ctx: "StageContext",
+        workspace: "TaskWorkspace",
+        manifest: "TaskManifest",
+    ):
+        self.ctx = ctx
+        self.workspace = workspace
+        self.manifest = manifest
         # Initialize the global runtime maps
         self.state_map: dict[str, Any] = {}
         self.store_map: dict[str, Any] = {}
 
     @property
-    def _eval_names(self) -> dict[str, Any]:
-        """Builds a nested dictionary namespace compatible with simpleeval."""
-        return {
-            "partition_date": str(self.task.partition_date),
-            "run_id": str(self.task.run_id),
-            "job_id": str(self.task.job_id),
-            "dataset_id": str(self.task.dataset_id),
+    def engine(self) -> TemplateEngine:
+        """Builds a generic TemplateEngine loaded with task telemetry and runtime state."""
+        manifest_data = msgspec.to_builtins(self.manifest)
+        context_data = msgspec.to_builtins(self.ctx.task_context)
+        ctx = {
+            "partition_date": self.ctx.partition_date,
+            "run_id": self.ctx.run_id,
+            "job_id": self.ctx.job_id,
+            "dataset_id": self.ctx.dataset_id,
+            "workspace_dir": self.ctx.workspace_dir,
             "state": self.state_map,
             "store": self.store_map,
-            # Expose raw structures directly for evaluation: e.g. "manifest.extract.file_count > 0"
-            "manifest": self.task.manifest,
-            "context": self.task.context,
+            "manifest": manifest_data,
+            "context": context_data,
         }
+        return TemplateEngine(context=ctx)
 
-    @property
-    def _template_vars(self) -> dict[str, Any]:
-        """Common template variables for hook string interpolation."""
-        import msgspec
-
-        # 1. Base metadata fields
-        template_dict = {
-            "partition_date": str(self.task.partition_date),
-            "run_id": str(self.task.run_id),
-            "job_id": str(self.task.job_id),
-            "dataset_id": str(self.task.dataset_id),
-        }
-
-        # 2. Dynamically flatten and inject state.* mapping context
-        for hook_id, telemetry in self.state_map.items():
-            flattened_telemetry = flatten_dict(telemetry, parent_key=f"state.{hook_id}")
-            template_dict.update(flattened_telemetry)
-
-        # 3. Inject store.* variables
-        for key, val in self.store_map.items():
-            template_dict[f"store.{key}"] = str(val) if val is not None else ""
-
-        # 4. Convert and flatten task manifest configurations
-        manifest_builtins = msgspec.to_builtins(self.task.manifest)
-        template_dict.update(flatten_dict(manifest_builtins, parent_key="manifest"))
-
-        # 5. Convert and flatten task runtime context configurations
-        context_builtins = msgspec.to_builtins(self.task.context)
-        template_dict.update(flatten_dict(context_builtins, parent_key="context"))
-
-        return template_dict
-
-    def run_hooks(
-        self,
-        step_id: str,
-        phase: str,  # "pre" or "post"
-    ) -> None:
-        """Execute all hooks for a given stage and phase."""
-        step_config = self.task.context.get_step(step_id)
+    def run_hooks(self, step: "StepContext", phase: str) -> None:
+        """Executes hooks associated with a given step and trigger ('pre' or 'post')."""
+        # step_context = self.task.context.get_step(step_id)
         hooks_config = None
 
-        if step_config and step_config.hooks:
-            hooks_config = step_config.hooks
-        else:
-            # 2. Fall back to task.context.hooks keyed by step_id
-            hooks_config = self.task.context.hooks.get(step_id)
+        if step and step.hooks:
+            hooks_config = step.hooks
+        # else:
+        #     # 2. Fall back to task.context.hooks keyed by step_id
+        #     hooks_config = self.task.context.hooks.get(step_id)
         if not hooks_config:
             return
 
@@ -99,28 +76,18 @@ class HookRunner:
         if not actions:
             return
 
-        LOG.info(f"Running {len(actions)} {phase}-hooks for step '{step_id}'")
+        LOG.info(f"Executing {len(actions)} {phase}-hooks for step '{step.id}'...")
+
         for i, action in enumerate(actions):
             if not self._should_run(action):
-                LOG.info(
-                    f"  ⏭️ Hook {i+1}/{len(actions)} ({action.type}) "
-                    "skipped via conditional expression."
-                )
-                if action.id:
-                    self.state_map[action.id] = {"status": "skipped"}
+                LOG.debug(f"Skipping hook {i+1} due to condition: {action.if_}")
                 continue
 
             try:
-                # 1. Execute the action
                 result = self._execute_action(action)
-
-                # 2. Record success in state mapping if hook has an ID
                 if action.id:
-                    self.state_map[action.id] = {"status": "success", **(result or {})}
-
-                LOG.success(f"  ✅ Hook {i+1}/{len(actions)} ({action.type}) succeeded")
+                    self.state_map[action.id] = {"status": "success", "result": result}
             except Exception as e:
-                # 2. Record success in state mapping if hook has an ID
                 if action.id:
                     self.state_map[action.id] = {"status": "failed", "error": str(e)}
 
@@ -133,24 +100,26 @@ class HookRunner:
                     case HookOnFailure.SKIP:
                         LOG.debug(f"  ⏭️ Hook {i+1} failed (skip): {e}")
 
-    def _should_run(self, action: "HookAction"):
+    def _should_run(self, action: "HookAction") -> bool:
         if action.if_:
             try:
-                names_context = self._eval_names
-                return simple_eval(action.if_, names=names_context)
-
-            except Exception as eval_err:
-                LOG.exception(
-                    f"  ❌ Error evaluating expression '{action.if_}': {eval_err}"
-                )
+                # Evaluates condition via simpleeval using the engine context namespace
+                return bool(simple_eval(action.if_, names=self.engine.context))
+            except Exception:
+                LOG.exception(f"Error evaluating expression '{action.if_}'")
                 raise
         return True
 
     def _execute_action(self, action: "HookAction", _depth: int = 0) -> Any:
-        """Dispatch execution to the registered strategy strategy handler."""
-        strategy_func = HOOK_STRATEGIES.get(action.type)
-        if not strategy_func:
-            raise ValueError(f"Unsupported hook type: {action.type}")
+        """Dispatch execution to the registered strategy handler after template rendering."""
+        # 1. Convert struct to builtins dict
+        raw_action = msgspec.to_builtins(action)
 
-        # Pass the runner instance, action schema, and current traversal depth context
-        return strategy_func(runner=self, action=action, _depth=_depth)
+        # 2. Render all template placeholders using TemplateEngine
+        rendered_action_dict = self.engine.render(raw_action)
+
+        # 3. Re-convert back to a validated HookAction object
+        rendered_action = msgspec.convert(rendered_action_dict, type=type(action))
+
+        # 4. Dispatch directly via Hook gateway
+        return Hook.run(action.type, runner=self, action=rendered_action, _depth=_depth)

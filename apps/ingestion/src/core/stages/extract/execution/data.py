@@ -2,22 +2,19 @@ from abc import abstractmethod
 from collections.abc import Generator, Sequence
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Generic, TypeVar
+from typing import Any
 
 import polars as pl
 import ray
 from loguru import logger
 
-from src.services.base import Source
 from src.services.database import DatabaseSource
 from src.services.file import FileSource
 
-from .base import ExtractContext, Extractor
+from .base import ExtractContext, Extractor, T_Source
 
 LOG = logger
 PART_FILENAME = "part_{i:04d}.parquet"
-
-T_Source = TypeVar("T_Source", bound=Source)
 
 
 def flatten_df(df: pl.DataFrame, flatten_val: int) -> pl.DataFrame:
@@ -37,7 +34,7 @@ def flatten_df(df: pl.DataFrame, flatten_val: int) -> pl.DataFrame:
                     df = df.with_columns(pl.col(col).str.json_decode(dtype=pl.Unknown))
 
     # Normalize depth boundaries: True or 0 both mean infinite depth
-    max_depth = float("inf") if flatten_val == 0 else int(flatten_val)
+    max_depth = float("inf") if flatten_val == 0 else flatten_val
     current_depth = 0
 
     while current_depth < max_depth:
@@ -81,7 +78,7 @@ def log_df_attributes(df) -> None:
     LOG.debug(f"Schema     : {dict(df.schema)}")
 
 
-class DataExtractor(Extractor[T_Source], Generic[T_Source]):
+class DataExtractor(Extractor[T_Source]):
     """Ray-based distributed extractor with streaming Parquet output.
 
     Instead of loading the entire dataset into memory, this extractor
@@ -102,11 +99,13 @@ class DataExtractor(Extractor[T_Source], Generic[T_Source]):
         processing via Ray.
         """
         yield from self._write_parquet(
-            self._ray_generator(source, context), output_folder
+            gen=self._ray_generator(source, context),
+            dest=output_folder,
+            update_key=context.update_key,
         )
 
     def _ray_generator(
-        self, source: Source, context: ExtractContext
+        self, source: T_Source, context: ExtractContext
     ) -> Generator[pl.DataFrame, None, None]:
         """Orchestrate the distributed extraction via Ray.
 
@@ -131,17 +130,22 @@ class DataExtractor(Extractor[T_Source], Generic[T_Source]):
         payloads = [{"unit": unit} for unit in work_units]
         ds = ray.data.from_items(payloads)
 
-        # 3. Worker task receives 'ctx' statically via fn_kwargs
-        def worker_task(batch: dict[str, list[Any]], ctx_ref: ray.ObjectRef) -> Any:
-            """Ray worker task to pull data for a single unit.
+        # 3. Worker task receives 'ctx' statically via fn_kwargs.
+        #    Declared as a generator (yields instead of returns) so Ray Data
+        #    streams each RecordBatch-sized chunk downstream independently,
+        #    keeping peak per-worker memory to one batch at a time.
+        def worker_task(
+            batch: dict[str, list[Any]], ctx_ref: ray.ObjectRef
+        ) -> Generator[Any, None, None]:
+            """Ray worker task to stream data for a single partition unit.
 
             Args:
-                batch: A single-item batch containing the work unit and context.
+                batch: A single-item batch containing the work unit.
+                ctx_ref: Ray object reference to the shared ExtractContext.
 
-            Returns:
-                pyarrow.Table: The extracted and schema-aligned data.
+            Yields:
+                pyarrow.Table: One schema-aligned RecordBatch per chunk.
             """
-
             import polars as pl
             from loguru import logger as worker_log
 
@@ -164,13 +168,36 @@ class DataExtractor(Extractor[T_Source], Generic[T_Source]):
             result = svc.pull(
                 unit, sql_context=ctx.sql_context, temp_folder=ctx.temp_folder
             )
-            df = result.collect() if isinstance(result, pl.LazyFrame) else result
 
-            worker_log.info(f"Extracted {df.height:_} rows")
-            df = flatten_df(df, ctx.flatten)
-            processed = apply_schema_contract(df, ctx)
-            log_df_attributes(processed)
-            return processed.to_arrow()
+            # Non-streaming sources (e.g. file-based) may return a LazyFrame or
+            # a single DataFrame — handle them as a one-shot yield.
+            if isinstance(result, pl.LazyFrame):
+                df = result.collect()
+                df = flatten_df(df, ctx.flatten)
+                processed = apply_schema_contract(df, ctx)
+                log_df_attributes(processed)
+                yield processed.to_arrow()
+                return
+
+            # Streaming path: pull() is a generator yielding one chunk per RecordBatch.
+            chunk_count = 0
+            total_rows = 0
+            for chunk in result:
+                if chunk.is_empty():
+                    continue
+                processed_chunk = flatten_df(chunk, ctx.flatten)
+                processed_chunk = apply_schema_contract(processed_chunk, ctx)
+                if chunk_count == 0:
+                    # Log schema/dimensions on the first chunk only — structure is
+                    # identical across all chunks, so one glimpse is sufficient.
+                    log_df_attributes(processed_chunk)
+                chunk_count += 1
+                total_rows += processed_chunk.height
+                yield processed_chunk.to_arrow()
+
+            worker_log.info(
+                f"Worker done: {total_rows:_} rows across {chunk_count} chunk(s)"
+            )
 
         ray_dataset = ds.map_batches(
             worker_task, fn_kwargs={"ctx_ref": context_ref}, batch_size=1
@@ -226,7 +253,9 @@ class DataExtractor(Extractor[T_Source], Generic[T_Source]):
 
     @staticmethod
     def _write_parquet(
-        gen: Generator[pl.DataFrame, None, None], dest: Path
+        gen: Generator[pl.DataFrame, None, None],
+        dest: Path,
+        update_key: str | None = None,
     ) -> Generator[dict[str, Any], None, None]:
         """Serialize generator output to snappy-compressed Parquet files.
 
@@ -238,13 +267,26 @@ class DataExtractor(Extractor[T_Source], Generic[T_Source]):
             dict[str, Any]: Manifest of the written file.
         """
         dest.mkdir(parents=True, exist_ok=True)
+
         for i, df in enumerate(gen):
             if df.is_empty():
                 continue
             path = dest / PART_FILENAME.format(i=i)
             df.write_parquet(path, compression="snappy")
             LOG.info(f"Wrote {df.height:_} rows to {path}")
-            yield {"path": path, "rows": df.height, "schema": df.schema}
+
+            # Calculate max value for the chunk if update_key exists
+            chunk_max = None
+            if update_key and update_key in df.columns:
+                max_val = df[update_key].max()
+                chunk_max = str(max_val) if max_val is not None else None
+
+            yield {
+                "path": path,
+                "rows": df.height,
+                "schema": df.schema,
+                "max_watermark": chunk_max,
+            }
 
     @abstractmethod
     def _get_work_units(
@@ -261,6 +303,7 @@ class DataExtractor(Extractor[T_Source], Generic[T_Source]):
         """
 
 
+@Extractor.register("file")
 class FileExtractor(DataExtractor[FileSource]):
     """Extractor specialized for filesystem-based storage."""
 
@@ -276,21 +319,33 @@ class FileExtractor(DataExtractor[FileSource]):
         Returns:
             list[Any]: A list of file-based work units.
         """
+        # 1. Resolve baseline target and glob filter for snapshot/standard runs
         target, pattern = self.resolve_file_params(context)
-        LOG.debug(f"Resolved target: {target}, pattern: {pattern}")
+
+        # 2. Extract Checkpoint-generated WHERE predicate (if incremental loading is active)
+        sql_where_clause = getattr(context, "incremental_predicate", None)
+
+        # If a multi-date partition query predicate was constructed, override the pattern
+        # to prevent double-filtering (pattern is now handled inside sql_where_clause)
+        if sql_where_clause and "path LIKE" in sql_where_clause:
+            pattern = None
+
+        LOG.debug(
+            f"Resolved file extraction params | target: '{target}' | "
+            f"pattern: '{pattern}' | sql_where: '{sql_where_clause}'"
+        )
+
+        # 3. Pass target and SQL condition to parallelize for single-pass extraction
         return source.parallelize(
             target=target,
             num_workers=context.num_workers,
             filter_condition=pattern,
+            sql_where=sql_where_clause,
             # archive kwargs
             # cleanup=context.tmp_cleanup,
             # temp_folder=context.task_folder,
             # data kwargs
             sql_context=context.sql_context,
-            # select=context.select,
-            # where=context.where,
-            # limit=context.limit,
-            # sql=context.sql,
             # file kwargs
             # skip_blank_lines=context.skip_blank_lines,
             # header=context.header,
@@ -324,6 +379,7 @@ class FileExtractor(DataExtractor[FileSource]):
         return target, glob
 
 
+@Extractor.register("database")
 class DatabaseExtractor(DataExtractor[DatabaseSource]):
     """Extractor specialized for SQL databases."""
 
@@ -346,5 +402,7 @@ class DatabaseExtractor(DataExtractor[DatabaseSource]):
             context.resource,
             num_workers=context.num_workers,
             sql_context=context.sql_context,
+            partition_fields=context.primary_keys,
+            incremental_predicate=context.incremental_predicate,
         )
         return list(units)

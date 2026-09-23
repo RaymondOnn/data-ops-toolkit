@@ -111,3 +111,29 @@ output "bucket_name" {
 output "ingestion_role_arn" {
   value = aws_iam_role.ingestion_worker_role.arn
 }
+
+# # main.tf
+# provider "aws" {
+#   region                      = var.aws_region
+#   access_key                  = "test"
+#   secret_key                  = "test"
+#   skip_credentials_validation = true
+#   skip_requesting_account_id  = true
+#   skip_metadata_api_check     = true
+#   s3_use_path_style           = true
+
+#   endpoints {
+#     s3             = "http://floci:4566"
+#     secretsmanager = "http://floci:4566"
+#     iam            = "http://floci:4566"
+#     logs           = "http://floci:4566"
+#   }
+# }
+
+# resource "aws_s3_bucket" "landing_zone" {
+#   bucket = var.landing_zone_bucket
+# }
+
+# resource "aws_secretsmanager_secret" "clickhouse_creds" {
+#   name = "ingestion/database/clickhouse"
+# }

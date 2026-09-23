@@ -3,10 +3,10 @@ from unittest.mock import MagicMock
 
 import pytest
 from fsspec import AbstractFileSystem
-from libs.file.base import (
+from libs.file.clients.base import (
+    FileSkill,
     FileSystemClient,
     FileSystemProtocol,
-    FileSystemSkills,
     create_fs_client,
 )
 
@@ -111,7 +111,7 @@ class TestFileSystemFactory:
         THEN the factory should return a dynamic class inheriting from both
         WHEN create_fs_client is invoked
         """
-        client = create_fs_client(url="/tmp/data", skills={FileSystemSkills.CAS})
+        client = create_fs_client(url="/tmp/data", skills={FileSkill.CAS})
 
         # Verify that the instance has methods from both base and mixin
         # (Using __class__.__name__ to verify ManagedLocalClient structure)

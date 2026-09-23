@@ -63,7 +63,7 @@ def test_streaming_memory_safety_limit(runtime, tmp_path):
 
     task = Task.from_path(task_path, runtime.exec_ctx)
     # Ensure the manifest captured the full 5M rows
-    assert task.manifest.extract.source_count == 5_000_000
+    assert task.manifest.extract.rows_processed == 5_000_000
 
     # Check that output files exist in the vault
     extract_data = task.workspace.get_data_path("extract")

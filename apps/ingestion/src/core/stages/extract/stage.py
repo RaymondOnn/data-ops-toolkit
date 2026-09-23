@@ -1,39 +1,54 @@
 import hashlib
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
 from libs.clients.base import ClientCantConnect
 from libs.resilience.circuit_breaker import CircuitOpen
-from libs.utils.dates import current_timestamp, seconds_diff
+from libs.utils.dates import current_timestamp
 from loguru import logger
 
-from src.core.stages.contracts.stage import ExecutionStage, ExecutionStageRegistry
-from src.core.stages.enums import Stage
+from src.core.stages.contracts.stage import ExecutionStage
+from src.core.stages.models import WriteMode
+from src.core.stages.types import Stage
+from src.core.stages.utils import merge_schemas
+from src.extras.checkpoints.checkpoint import (
+    Checkpoint,
+    CheckpointType,
+    build_incremental_filter,
+)
 from src.services.factory import ServiceFactory
 
 from .config import ExtractConfig
-from .enums import ExtractPayload, FileInfo
+from .enums import ExtractPayload, FileInfo, PartitionExtracted
 from .execution import (
     ExtractContext,
     Extractor,
-    ExtractorFactory,
 )
 
 if TYPE_CHECKING:
-    from src.core.models.task import Task
+    from src.core.models.task import TaskManifest, TaskWorkspace
+    from src.core.stages.types import StageContext
+    from src.services.health.system import SystemMonitor
 
 LOG = logger
 
 
-@ExecutionStageRegistry.register(Stage.EXTRACT.value)
+@ExecutionStage.register(key=Stage.EXTRACT.value)
 class ExtractStage(ExecutionStage[ExtractConfig]):
-    """Extract raw data using a registered Extractor."""
+    """Extract raw data partition-by-partition using a registered Extractor."""
 
     config_class = ExtractConfig
 
-    def pre_flight(self, task: "Task") -> None:
-        super().pre_flight(task)
+    def pre_flight(
+        self,
+        system: "SystemMonitor",
+        ctx: "StageContext",
+        workspace: "TaskWorkspace",
+        manifest: "TaskManifest",
+    ) -> None:
+        super().pre_flight(system, ctx, workspace, manifest)
         try:
             self.source = ServiceFactory.get_source(**self.config.connection)
             LOG.info(
@@ -43,126 +58,234 @@ class ExtractStage(ExecutionStage[ExtractConfig]):
             LOG.exception("PRE-FLIGHT: Failed to initialize source")
             raise
 
-    def _execute(self, task: "Task") -> str:
-        LOG.debug(f"EXECUTE: ExtractStage starting for task {task.run_id}")
+    def _execute(
+        self,
+        ctx: "StageContext",
+        workspace: "TaskWorkspace",
+        manifest: "TaskManifest",
+    ) -> str:
+        LOG.debug(f"EXECUTE: ExtractStage starting for task {ctx.run_id}")
         start_ts = current_timestamp(naive=True)
 
         try:
-            ctx = ExtractContext(
-                # kind=self.config.type,
-                resource=self.config.resource,
-                src_connection=self.config.connection,
-                num_workers=self.config.num_workers,
-                run_id=task.run_id,
-                partition_date=task.partition_date,
-                job_id=task.job_id,
-                workspace=str(task.exec_ctx.workspace_dir),
-                monitor_params={
-                    "signal_dir": str(task.exec_ctx.signal_path),
-                    "cache_config": task.exec_ctx.cache_config,
-                },
-                sql_context=self.config.sql_context,
-                columns=self.config.columns,
-                batch_size=self.config.batch_size,
-                null_if=self.config.null_if,
-                glob=self.config.glob,
-                flatten=self.config.flatten,
-                # select=self.config.select,
-                # where=self.config.where,
-                # limit=self.config.limit,
-                # compression=self.config.compression,
-                # header=self.config.header,
-                # skip_blank_lines=self.config.skip_blank_lines,
-                # temp_folder=str(task.workspace.path),
-                # tmp_cleanup=False,
+            meta_repo = self.get_meta_repo(workspace)
+            if not meta_repo:
+                raise Exception("Metadata Repository is required.")
+
+            checkpoint = Checkpoint.load_latest(
+                meta_repo=meta_repo,
+                job_id=ctx.job_id,
+                dataset_id=self.config.resource,
             )
 
-            # Get extractor
-            extractor = ExtractorFactory.get(self.config.connection["type"])
-            LOG.info(f"  Extractor type: {type(extractor).__name__}")
+            # 1. Determine target date partitions to extract (e.g. catch-up days)
+            target_partitions = self._resolve_target_partitions(
+                partition_date=ctx.partition_date,
+                checkpoint=checkpoint,
+            )
+            LOG.info(f"Target partitions to process: {target_partitions}")
 
-            # Get data folder
-            data_store = task.workspace.reset_data_dir(self.step_id)
-            LOG.info(f"  Data store: {data_store}")
+            extractor = Extractor.create(self.config.connection["type"])
+            data_dir = workspace.reset_data_dir(self.step_id)
 
-            # Extract and stream results
-            LOG.info("  Starting extraction...")
-            file_infos = []
+            partitions_payload: dict[str, PartitionExtracted] = {}
+            all_file_infos: list[FileInfo] = []
+            all_source_files: list[str] = []
             total_rows = 0
             schemas = []
 
-            for i, file_data in enumerate(
-                extractor.extract(self.source, ctx, data_store)
-            ):
-                path = file_data["path"]
-                rows = file_data["rows"]
-                LOG.info(f"  📄 File {i}: {path.name} ({rows:_} rows)")
+            # 2. Extract partition-by-partition in a clean loop
+            for p_date in target_partitions:
+                LOG.info(f"▶ Processing partition_date: {p_date}")
 
-                checksum = self._calculate_checksum(path)
-                schema = pl.read_parquet_schema(path)
-                schemas.append(schema)
+                # Record starting watermark boundary before extraction
+                partition_start = checkpoint.start_value or p_date
 
-                file_infos.append(
-                    FileInfo(
+                # Build incremental predicate ONLY for incremental load modes (e.g. DELTA, CDC)
+                # Skip for FULL_REFRESH and SNAPSHOT loads
+                if self.config.mode in (WriteMode.FULL_REFRESH, WriteMode.SNAPSHOT):
+                    incremental_predicate = None
+                else:
+                    incremental_predicate = build_incremental_filter(
+                        checkpoint=checkpoint,
+                        update_key=self.config.update_key,
+                        glob_template=self.config.glob,
+                        partition_date=p_date,
+                    )
+
+                extract_ctx = ExtractContext(
+                    resource=self.config.resource,
+                    src_connection=self.config.connection,
+                    num_workers=self.config.num_workers,
+                    run_id=ctx.run_id,
+                    partition_date=p_date,
+                    job_id=ctx.job_id,
+                    workspace=str(ctx.workspace_dir),
+                    monitor_params={
+                        "signal_dir": str(workspace.exec_ctx.signal_path),
+                        "cache_config": workspace.exec_ctx.cache_config,
+                    },
+                    sql_context=self.config.sql_context,
+                    columns=self.config.columns,
+                    batch_size=self.config.batch_size,
+                    null_if=self.config.null_if,
+                    glob=self.config.glob,
+                    flatten=self.config.flatten,
+                    update_key=self.config.update_key,
+                    primary_keys=self.config.primary_keys,
+                    incremental_predicate=incremental_predicate,
+                )
+
+                # Partition-specific staging folder
+                partition_dir = workspace.get_partition_dir(
+                    self.step_id, partition_date=p_date
+                )
+                partition_dir.mkdir(parents=True, exist_ok=True)
+
+                p_file_infos: list[FileInfo] = []
+                p_rows = 0
+                p_min_val = None
+                p_max_val = None
+
+                for file_data in extractor.extract(
+                    self.source, extract_ctx, partition_dir
+                ):
+                    path = file_data["path"]
+                    rows = file_data["rows"]
+                    chunk_min = file_data.get("min_checkpoint")
+                    chunk_max = file_data.get("max_checkpoint")
+
+                    if chunk_max:
+                        checkpoint.update_end_value(chunk_max)
+                        p_max_val = (
+                            chunk_max
+                            if p_max_val is None
+                            else max(p_max_val, chunk_max)
+                        )
+                    if chunk_min:
+                        p_min_val = (
+                            chunk_min
+                            if p_min_val is None
+                            else min(p_min_val, chunk_min)
+                        )
+
+                    checksum = self._calculate_checksum(path)
+                    schema = pl.read_parquet_schema(path)
+                    schemas.append(schema)
+
+                    file_info = FileInfo(
                         path=str(path),
                         checksum=checksum,
                         row_count=rows,
                         size_bytes=path.stat().st_size,
+                        max_checkpoint=chunk_max,
                     )
-                )
-                total_rows += rows
+                    p_file_infos.append(file_info)
+                    all_file_infos.append(file_info)
+                    p_rows += rows
+                    total_rows += rows
 
-                # Progress update every 5 files
-                if i % 5 == 0:  # checkpoint every 5 files
-                    elapsed = seconds_diff(start_ts, current_timestamp(naive=True))
-                    rate = total_rows / elapsed if elapsed > 0 else 0
-                    LOG.info(
-                        f"  📊 Progress: {i} files, {total_rows:_} rows "
-                        f"({rate:,.0f} rows/sec)"
-                    )
-                    task.update_manifest(
-                        {
-                            "extract": {
-                                "source_count": total_rows,
-                                "file_count": len(file_infos),
-                            }
-                        }
-                    )
-                LOG.info(
-                    f"  ✅ Extraction complete: {len(file_infos):_} files, "
-                    f"{total_rows:_} rows"
+                # Source files for this partition
+                p_sources = getattr(extractor, "source_files", [])
+                all_source_files.extend(p_sources)
+                audit_identity = self.resolve_resource_identify(extractor)
+
+                # Determine effective values for logging & checkpoint state
+                effective_start = str(p_min_val or partition_start)
+                effective_end = str(p_max_val or checkpoint.end_value or p_date)
+
+                # Ensure checkpoint metadata is fully updated and typed for cold-starts/new datasets
+                checkpoint = self.update_checkpoint(
+                    checkpoint=checkpoint,
+                    config=self.config,
+                    partition_date=ctx.partition_date,
+                    # start_value=target_partitions[0] if target_partitions else "",
+                    # end_value=target_partitions[-1] if target_partitions else "",
                 )
 
-            final_schema = self._merge_schemas(schemas)
-            audit_identity = self.resolve_resource_identify(extractor)
-            LOG.info(f"  Audit identity: {audit_identity}")
+                # 3. Store PartitionExtracted metadata with actual boundary values
+                # Checkpoint table will extract info from here
+                partitions_payload[p_date] = PartitionExtracted(
+                    partition_date=p_date,
+                    row_processed=p_rows,
+                    file_count=len(p_file_infos),
+                    source_files=p_sources,
+                    files=p_file_infos,
+                    checkpoint_type=checkpoint.type.value,
+                    checkpoint_start=effective_start,
+                    checkpoint_end=effective_end,
+                    checkpoint_state_payload=checkpoint.serialize_payload(),
+                    resource=audit_identity,
+                )
+
+                # Prepare start/end values for subsequent iterations
+                checkpoint.start_value = p_date
+                checkpoint.end_value = p_date
+                LOG.success(
+                    f"✓ Completed partition {p_date}: {p_rows:_} rows, {len(p_file_infos)} files"
+                )
+
+            final_schema = merge_schemas(schemas)
 
             payload = ExtractPayload(
                 step_id=self.step_id,
-                file_count=len(file_infos),
-                files=file_infos,
-                artifact_folder=str(data_store),
-                source_files=getattr(extractor, "source_files", []),
-                resource=audit_identity,
-                source_count=total_rows,
-                schema={k: str(v) for k, v in final_schema.items()},
+                artifact_folder=str(data_dir),
+                rows_processed=total_rows,
+                output_schema={k: str(v) for k, v in final_schema.items()},
                 start_time=start_ts.isoformat(sep=" "),
+                partitions=partitions_payload,
             )
 
-            self.checkpoint(task, data_folder=data_store, payload=payload)
-            LOG.info(
-                f"EXTRACT COMPLETED: {len(file_infos):_} files, {total_rows:_} rows"
+            self.save_stage_outcome(
+                workspace=workspace,
+                manifest=manifest,
+                data_folder=data_dir,
+                payload=payload,
             )
-            return self._next_step(task)
+            LOG.info(
+                f"EXTRACT COMPLETED: {len(target_partitions)} partitions, {total_rows:_} rows"
+            )
+            return self._next_step(ctx)
 
         except (ClientCantConnect, CircuitOpen) as e:
             LOG.warning(f"Extraction halted: {e}")
-            self.checkpoint(task, error=e)
+            self.save_stage_outcome(workspace=workspace, manifest=manifest, error=e)
             raise
         except Exception as e:
             LOG.exception("Extract failed")
-            self.checkpoint(task, error=e)
+            self.save_stage_outcome(workspace=workspace, manifest=manifest, error=e)
             raise
+
+    def _resolve_target_partitions(
+        self, partition_date, checkpoint: Checkpoint
+    ) -> list[str]:
+        """Calculates the list of discrete date partitions to process."""
+        end_date_str = partition_date
+
+        # 1. Non-incremental modes always process a single target partition
+        if self.config.mode != WriteMode.DELTA:
+            return [end_date_str]
+
+        # Incremental date catch-up
+        start_date_str = checkpoint.start_value
+        if not start_date_str:
+            return [end_date_str]
+
+        try:
+            start_dt = datetime.strptime(start_date_str, "%Y-%m-%d")
+            end_dt = datetime.strptime(end_date_str, "%Y-%m-%d")
+            if start_dt >= end_dt:
+                return [end_date_str]
+
+            dates = []
+            curr = start_dt + timedelta(days=1)
+            while curr <= end_dt:
+                dates.append(curr.strftime("%Y-%m-%d"))
+                curr += timedelta(days=1)
+            return dates or [end_date_str]
+        except ValueError:
+            # Fallback if start_value was a full timestamp or non-date string
+            return [end_date_str]
 
     @staticmethod
     def _calculate_checksum(path: Path) -> str:
@@ -172,29 +295,55 @@ class ExtractStage(ExecutionStage[ExtractConfig]):
                 hasher.update(chunk)
         return hasher.hexdigest()
 
-    def _merge_schemas(
-        self, schemas: list[dict[str, pl.DataType] | pl.Schema]
-    ) -> dict[str, pl.DataType]:
-        LOG.debug("  Merging schemas using Polars diagonal relaxed concat...")
-        if not schemas:
-            return {}
-
-        # Build empty DataFrames for each schema and concatenate diagonally
-        empty_dfs = [pl.DataFrame(schema=s) for s in schemas]
-        merged_schema = pl.concat(empty_dfs, how="diagonal_relaxed").schema
-
-        LOG.debug(f"  Final schema: {len(merged_schema)} columns")
-        return dict(merged_schema)
-
     def resolve_resource_identify(self, extractor: "Extractor") -> str:
-        """
-        Delegate to service for source-specific identity.
-
-        The service knows best how to name the source.
-        """
         source_files = getattr(extractor, "source_files", [])
-
-        # Pass additional context for better naming
         return self.source.resolve_identity(
-            target=str(self.config.resource), items=source_files, glob=self.config.glob
+            target=self.config.resource, items=source_files, glob=self.config.glob
+        )
+
+    def update_checkpoint(
+        self, checkpoint: Checkpoint, config: ExtractConfig, **kwargs: Any
+    ) -> Checkpoint:
+        load_mode = config.mode
+        conn_type = config.connection.get("type")
+        update_key = config.update_key
+        start_value = kwargs.get("start_value")
+        end_value = kwargs.get("end_value")
+        payload_dict = {}
+
+        if load_mode == WriteMode.CDC:
+            checkpoint_type = CheckpointType.LSN_OFFSET
+
+        elif load_mode in [WriteMode.SNAPSHOT, WriteMode.FULL_REFRESH]:
+            checkpoint_type = CheckpointType.UPDATE_KEY
+
+        elif load_mode == WriteMode.DELTA:
+            checkpoint_type = CheckpointType.UPDATE_KEY
+
+            if conn_type == "api":
+                checkpoint_type = CheckpointType.PAGE_OFFSET
+            elif conn_type == "file":
+                partition_date = kwargs.get("partition_date")
+                if update_key == "partition_date" and partition_date:
+                    end_value = str(partition_date)
+            else:
+                # Database sources (postgres, oracle, clickhouse, etc.)
+                checkpoint_type = CheckpointType.UPDATE_KEY
+
+        else:
+            raise NotImplementedError(f"Load mode '{load_mode}' not supported.")
+
+        match checkpoint_type:
+            case CheckpointType.UPDATE_KEY:
+                payload_dict = {"update_key": update_key}
+            case CheckpointType.PAGE_OFFSET:
+                payload_dict = {"limit": kwargs.get("limit")}
+            case CheckpointType.LSN_OFFSET:
+                pass
+
+        return Checkpoint(
+            type=checkpoint_type,
+            start_value=start_value or checkpoint.start_value,
+            end_value=end_value or checkpoint.end_value,
+            state_payload=payload_dict or checkpoint.state_payload,
         )

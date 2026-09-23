@@ -6,8 +6,10 @@ graph TB
     subgraph CLI ["CLI / Interface Layer"]
         C_START["start (Daemon Mode)"]
         C_RUN["run (Trigger Mode)"]
-        C_RESUME["resume / recover"]
-        C_CLEAN["clean"]
+        C_ADD["add (Queue Ad-Hoc)"]
+        C_RESUME["resume (Recover)"]
+        C_STOP["stop (Shutdown)"]
+        C_CLEAN["clean (Maintenance)"]
     end
 
     subgraph DAEMON ["Daemon Components (Always-On)"]
@@ -49,6 +51,9 @@ graph TB
 
     %% Daemon Loop Interactions
     C_START --> RT
+    C_STOP -- Writes STOP.cmd --> CMD
+    C_ADD -- Writes ADD.cmd --> CMD
+    C_RESUME -- Writes RESUME.cmd --> CMD
     RT --> TRIG
     RT --> CMD
     RT --> ORCH

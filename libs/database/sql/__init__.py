@@ -1,4 +1,10 @@
-from .compile import Dialect, DialectTemplate, SQLCompilationError, SQLCompiler
+from .compile import (
+    Dialect,
+    DialectTemplate,
+    Predicate,
+    SQLCompilationError,
+    SQLCompiler,
+)
 from .enums import Join, JoinConfig, SelectQueryContext, SQLContext
 
 __all__ = [
@@ -6,6 +12,7 @@ __all__ = [
     "DialectTemplate",
     "Join",
     "JoinConfig",
+    "Predicate",
     "SQLCompilationError",
     "SQLCompiler",
     "SQLContext",

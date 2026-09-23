@@ -24,6 +24,8 @@ core:
   replace: "insert into {table} ({fields}) values ({values}) on conflict ({pk}) do update"
   update_temp: "update {table} set {set_values} where {join_cond}"
 
+  add_column: "alter table {table} add {column_name} {data_type}"
+
 # -----------------------------------------------------------------------------
 # 2. MERGE STRATEGIES
 # -----------------------------------------------------------------------------

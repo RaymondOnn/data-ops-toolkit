@@ -1,77 +1,69 @@
-"""Secret provider factory with environment-aware selection."""
+# """Secret provider factory with environment-aware selection."""
 
-import logging
-import os
+# import logging
+# import os
 
-from .provider import (
-    AWSSecretProvider,
-    LocalEncryptedProvider,
-    LocalSecretProvider,
-    SecretProvider,
-)
+# from .provider import ProviderRegistry, SecretProvider
 
-LOG = logging.getLogger(__name__)
+# LOG = logging.getLogger(__name__)
 
-# Provider registry
-_PROVIDERS: dict[str, type[SecretProvider]] = {
-    "local_file": LocalSecretProvider,
-    "secure_file": LocalEncryptedProvider,
-    "aws_sm": AWSSecretProvider,
-}
-
-DEFAULT_SECRETS_PATH = ".secrets.json"
-DEFAULT_ENCRYPTED_PATH = ".secrets.enc"
-DEFAULT_MASTER_KEY_ENV = "MASTER_KEY"
+# DEFAULT_SECRETS_PATH = ".secrets.json"
+# DEFAULT_ENCRYPTED_PATH = ".secrets.enc"
+# DEFAULT_MASTER_KEY_ENV = "MASTER_KEY"
 
 
-class AuthFactory:
-    """Factory for creating secret providers."""
+# class AuthFactory:
+#     """Factory for creating secret providers."""
 
-    _instance: SecretProvider | None = None
+#     _instance: SecretProvider | None = None
 
-    @classmethod
-    def get_provider(cls, **config) -> SecretProvider:
-        """Get or create a secret provider singleton."""
-        if cls._instance:
-            return cls._instance
+#     @classmethod
+#     def get_provider(cls, **config) -> SecretProvider:
+#         """Get or create a secret provider singleton."""
+#         if cls._instance:
+#             return cls._instance
 
-        provider_type = config["key"].strip().casefold()
-        LOG.info(f"Creating secret provider: {provider_type}")
+#         provider_type = config["key"].strip().casefold()
+#         LOG.info(f"Creating secret provider: {provider_type}")
 
-        # Prepare config
-        match provider_type:
-            case "secure_file":
-                master_key = config.get(DEFAULT_MASTER_KEY_ENV.casefold()) or os.getenv(
-                    DEFAULT_MASTER_KEY_ENV
-                )
-                if master_key:
-                    raise ValueError("secure_file provider requires master_key")
+#         if provider_type not in ProviderRegistry:
+#             raise ValueError(
+#                 f"Unknown provider type: '{provider_type}'. "
+#                 f"Available providers: {ProviderRegistry.keys()}"
+#             )
 
-                config = {
-                    "secrets_json": config["secrets_json"],
-                    "master_key": master_key,
-                }
+#         provider_class = SecretProvider.get_provider_cls(provider_type)
 
-            case "local_file":
-                config = {
-                    "secrets_json": config["secrets_json"],
-                }
-            case "aws_sm":
-                config = {
-                    "region": config["region"],
-                    "sm_endpoint_url": config["sm_endpoint_url"],
-                    "sts_endpoint_url": config["sts_endpoint_url"],
-                    "role_arn": config["role_arn"],
-                    "profile": config["profile"],
-                    "aws_access_key_id": config["aws_access_key_id"],
-                    "aws_secret_access_key": config["aws_secret_access_key"],
-                }
-            case _:
-                raise ValueError(f"Unknown provider type: {provider_type}")
+#         # Prepare kwarg payload based on type
+#         match provider_type:
+#             case "secure_file":
+#                 master_key = config.get(DEFAULT_MASTER_KEY_ENV.casefold()) or os.getenv(
+#                     DEFAULT_MASTER_KEY_ENV
+#                 )
+#                 if not master_key:
+#                     raise ValueError("secure_file provider requires master_key")
 
-        # Instantiate
-        provider_class = _PROVIDERS.get(provider_type)
-        if not provider_class:
-            raise ValueError("Unable to find matching provider type.")
+#                 provider_kwargs = {
+#                     "secrets_json": config["secrets_json"],
+#                     "master_key": master_key,
+#                 }
 
-        return provider_class(**config)
+#             case "local_file":
+#                 provider_kwargs = {
+#                     "secrets_json": config["secrets_json"],
+#                 }
+#             case "aws_sm":
+#                 provider_kwargs = {
+#                     "region": config["region"],
+#                     "sm_endpoint_url": config["sm_endpoint_url"],
+#                     "sts_endpoint_url": config["sts_endpoint_url"],
+#                     "role_arn": config["role_arn"],
+#                     "profile": config.get("profile"),
+#                     "aws_access_key_id": config.get("aws_access_key_id"),
+#                     "aws_secret_access_key": config.get("aws_secret_access_key"),
+#                 }
+#             case _:
+#                 provider_kwargs = config
+
+#         cls._instance = provider_class(**provider_kwargs)
+#         return cls._instance

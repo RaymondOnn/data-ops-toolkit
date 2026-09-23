@@ -1,67 +1,74 @@
 """Base classes for pipeline execution stages."""
 
 import traceback
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Generic, Self, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import msgspec
+from libs.metaclasses.draft import ClassRegistry
 from loguru import logger
 
-from src.core.contexts.step import StepConfig
+from src.core.models.task.manifest import (
+    TaskManifest,
+    TaskManifestFile,
+    TaskManifestView,
+)
 from src.core.models.task.status import ExecutionStatus
 from src.core.stages.contracts.payload import BasePayload, ErrorInfo
-from src.core.stages.enums import NO_MORE_STAGES
+from src.core.stages.types import NO_MORE_STAGES
 from src.extras.hooks import HookRunner
 from src.services.health.system import SystemMonitor
-from src.utils.exceptions import OutOfDiskSpace
+from src.utils.exceptions import OutOfDiskSpace, RollbackRequired
 
 if TYPE_CHECKING:
-    from src.core.models.task.base import Task
-    from src.core.stages.types import StageConfig
+    from src.core.contexts.step import StepContext
+    from src.core.models.task.workspace import TaskWorkspace
+    from src.core.stages.types import StageConfig, StageContext
 
 LOG = logger
 
 T = TypeVar("T", bound="StageConfig | None")
 
 
-class ExecutionStage(ABC, Generic[T]):
+class ExecutionStage(
+    ClassRegistry,
+    Generic[T],
+    registry_name="ExecutionStageRegistry",
+    auto_key=True,
+    package_paths="src.core.stages",
+):
     """Base class for all pipeline stages."""
 
     requires_disk_space: bool = True
     config_class: type[T] | None = None
 
-    def __init__(self, step: StepConfig):
-        self.step: StepConfig = step
+    def __init__(
+        self,
+        step: "StepContext",
+    ):
+        self.step = step
         self.step_id: str = (
             step.id
-        )  # ID priority (fallback to stage name in StepConfig)
+        )  # ID priority (fallback to stage name in StepContext)
         self.name: str = step.stage
         self._config: T | None = None
-
-        # if isinstance(stage.value, str):
-        #     self.name: str = stage.value
-        #     self.bitmask = stage.bitmask
-        #     self._config: T | None = None
+        self._meta_repo = None
 
     @classmethod
-    def get_disk_free_stages(cls) -> list[type[Self]]:
-        """Get all subclasses that don't require disk space."""
+    def get_disk_free_stages(cls) -> list[type["ExecutionStage"]]:
+        """Get all stage classes that don't require disk space."""
+        stages = []
+        for stage_key in set(cls.keys()):
+            stage_cls = cls.get_class(stage_key)
+            if (
+                issubclass(stage_cls, ExecutionStage)
+                and not stage_cls.requires_disk_space
+            ):
+                stages.append(stage_cls)
+        return stages
 
-        def collect_subclasses(klass: type[Self]) -> list[type[Self]]:
-            result: list[type[Self]] = []
-            for subclass in klass.__subclasses__():
-                # Type check: ensure subclass is a subclass of ExecutionStage
-                if issubclass(subclass, ExecutionStage):
-                    result.append(subclass)
-                    result.extend(collect_subclasses(subclass))
-            return result
-
-        return [
-            stage for stage in collect_subclasses(cls) if not stage.requires_disk_space
-        ]
-
-    def _bind_config(self, task: "Task") -> None:
+    def _bind_config(self) -> None:
         """Bind stage config from task context."""
         if self.step.config is None:
             raise RuntimeError(
@@ -87,9 +94,18 @@ class ExecutionStage(ABC, Generic[T]):
             raise RuntimeError(f"Config not bound for stage '{self.name}'")
         return self._config
 
-    def _check_disk_space(self, task: "Task") -> None:
+    def get_meta_repo(self, workspace: "TaskWorkspace") -> Any:
+        """Retrieves or reuses the process-cached MetadataRepository for the task."""
+        if self._meta_repo is not None:
+            return self._meta_repo
+        from src.services.repo.metadata import MetadataRepository
+
+        # ServiceFactory hashes metadata_config and reuses the worker-level instance
+        return MetadataRepository(**workspace.exec_ctx.metadata_db_config)
+
+    def _check_disk_space(self, system: SystemMonitor) -> None:
         """Verify sufficient disk space before execution."""
-        system = SystemMonitor(task.exec_ctx.workspace_dir)
+        # system: Any = self._health_checker or SystemMonitor(task.exec_ctx.workspace_dir)
 
         if system.is_disk_blocked():
             health = system.report
@@ -100,7 +116,13 @@ class ExecutionStage(ABC, Generic[T]):
                 disk_usage=health.disk_usage_pct,
             )
 
-    def pre_flight(self, task: "Task") -> None:
+    def pre_flight(
+        self,
+        system: SystemMonitor,
+        ctx: "StageContext",
+        workspace: "TaskWorkspace",
+        manifest: "TaskManifest",
+    ) -> None:
         """
         Pre-execution checks and configuration binding.
 
@@ -110,32 +132,96 @@ class ExecutionStage(ABC, Generic[T]):
         execution. Binding it to self.stage_config simplifies subclass logic.
         """
         if self.requires_disk_space:
-            self._check_disk_space(task)
-        self._bind_config(task)
+            self._check_disk_space(system)
+        self._bind_config()
+
+    @staticmethod
+    def render_placeholders(target: str, manifest: "TaskManifest", step_id: str) -> Any:
+        """Renders string templates, expressions, and environment variables within `target`."""
+        from libs.utils.template import TemplateEngine
+
+        # Populate steps dictionary: { "steps": { "<step_id>": payload_dict } }
+        view = TaskManifestView(manifest)
+        steps_ctx = {
+            p.step_id: msgspec.to_builtins(p) for p in manifest.payloads if p.step_id
+        }
+
+        # 2. Resolve 'upstream' payload relative to current step
+        upstream_ctx = {}
+        if upstream_id := view.get_upstream_step_id(step_id):
+            upstream_ctx = steps_ctx.get(upstream_id, {})
+
+        ctx = {"steps": steps_ctx, "upstream": upstream_ctx}
+        engine = TemplateEngine(context=ctx)
+        return engine.render(target)
 
     # @abstractmethod
-    def execute(self, task: "Task") -> str:
+    def execute(
+        self,
+        ctx: "StageContext",
+        workspace: "TaskWorkspace",
+        manifest: "TaskManifest",
+    ) -> str:
         """Execute stage logic. Returns next stage name."""
-        runner = HookRunner(task)
-        runner.run_hooks(self.step_id, "pre")
-        next_stage = self._execute(task)
-        runner.run_hooks(self.step_id, "post")
+        runner = HookRunner(ctx=ctx, workspace=workspace, manifest=manifest)
+        runner.run_hooks(self.step, "pre")
+        next_stage = self._execute(ctx=ctx, workspace=workspace, manifest=manifest)
+        runner.run_hooks(self.step, "post")
         return next_stage
 
     @abstractmethod
-    def _execute(self, task: "Task") -> str:
+    def _execute(
+        self,
+        ctx: "StageContext",
+        workspace: "TaskWorkspace",
+        manifest: "TaskManifest",
+    ) -> str:
         """Execute stage logic. Returns next stage name."""
 
-    def _next_step(self, task: "Task") -> str:
+    def validate_row_count(
+        self, manifest: "TaskManifest", row_count: int, dep_step_id: str | None = None
+    ) -> bool:
+        """Validate stage row count.
+
+        If row_count == 0 on the first attempt, raises RollbackRequired to force a re-attempt.
+        If row_count == 0 persists after a re-attempt, sets task.manifest.is_empty_result_set = True
+        and returns True.
+
+        Returns:
+            bool: True if empty result set confirmed, False if rows exist.
+        """
+        if row_count > 0:
+            return False
+
+        target_step = dep_step_id or self.step_id
+        rollback_count = manifest.rollback_stack.count(target_step)
+
+        if rollback_count == 0:
+            LOG.warning(
+                f"0 rows detected on first attempt for step '{target_step}'. Triggering re-attempt."
+            )
+            raise RollbackRequired(
+                target_step,
+                "Zero rows detected on first attempt; triggering re-attempt",
+            )
+
+        LOG.info(
+            f"0 rows confirmed on re-attempt for step '{target_step}'. Flagging TaskManifest.is_empty_result_set=True."
+        )
+        manifest.is_empty_result_set = True
+        return True
+
+    def _next_step(self, ctx: "StageContext") -> str:
         """Get next stage in pipeline."""
-        next_step_id = task.context.get_next_step_id(self.step_id)
+        next_step_id = ctx.next_step_id
         if not next_step_id:
             return NO_MORE_STAGES
         return next_step_id
 
-    def checkpoint(
+    def save_stage_outcome(
         self,
-        task: "Task",
+        workspace: "TaskWorkspace",
+        manifest: "TaskManifest",
         data_folder: Path | None = None,
         payload: BasePayload | None = None,
         error: Exception | None = None,
@@ -149,20 +235,22 @@ class ExecutionStage(ABC, Generic[T]):
         loop halts immediately and the Orchestrator can provide a
         detailed post-mortem.
         """
+
         if error:
             err_payload = ErrorInfo(
-                stage=self.name,
                 step_id=self.step_id,
+                stage=self.step.stage,
                 error_type=type(error).__name__,
                 message=str(error),
                 traceback=traceback.format_exc(),
             )
             # Record failure immediately
-            task.update_manifest(
-                {
+            TaskManifestFile.update(
+                workspace=workspace,
+                updates={
                     "error": msgspec.to_builtins(err_payload),
                     "status": ExecutionStatus.FAILED.value,
-                }
+                },
             )
             return
 
@@ -171,86 +259,21 @@ class ExecutionStage(ABC, Generic[T]):
 
         # Create symlink to data folder if provided
         if data_folder:
-            task.workspace.create_symlink(self.step_id, data_folder)
+            workspace.create_symlink(self.step_id, data_folder)
 
-        # Update manifest with results
-        payloads = msgspec.to_builtins(task.manifest.payloads)
-        payloads.append(msgspec.to_builtins(payload))
-        task.update_manifest(
-            {
-                "payloads": msgspec.to_builtins(payloads),
-            }
+        # 1. Update manifest using clean object references
+        updated_payloads = [*manifest.payloads, payload]
+        TaskManifestFile.update(
+            workspace=workspace,
+            updates={
+                "payloads": updated_payloads,
+            },
         )
+
+        # 2. IMMEDIATE VALIDATION GATE:
+        # Re-load manifest from disk right away to ensure the schema and
+        # tagged payload union structures deserialize without error.
+        TaskManifestFile.load(workspace)
 
 
 DISK_FREE_STAGES = set(ExecutionStage.get_disk_free_stages())
-
-
-class ExecutionStageRegistry:
-    """Encapsulates stage class registration and lookup logic."""
-
-    _stages: ClassVar[dict[str, type[ExecutionStage]]] = {}
-
-    @classmethod
-    def register(cls, stage_name: str):
-        """Decorator to register a stage class in the registry."""
-
-        def decorator(stage_cls: type[ExecutionStage]):
-            cls._stages[stage_name] = stage_cls
-            return stage_cls
-
-        return decorator
-
-    @classmethod
-    def _discover(cls) -> None:
-        """Discover and import all stage modules to populate _stages."""
-        import importlib
-
-        stages_dir = Path(__file__).parent.parent
-        # apps/ingestion root dir (parent of src)
-        app_root = stages_dir.parent.parent.parent
-
-        for py_file in stages_dir.rglob("*.py"):
-            try:
-                rel_path = py_file.relative_to(app_root)
-                mod_parts = rel_path.with_suffix("").parts
-                leaf_name = mod_parts[-1]
-                if leaf_name not in (
-                    "base",
-                    "utils",
-                    "contracts",
-                    "__init__",
-                    "enums",
-                    "config",
-                    "payload",
-                ):
-                    modname = ".".join(mod_parts)
-                    importlib.import_module(modname)
-            except Exception as e:
-                logger.warning(f"Failed to discover stage module {py_file}: {e}")
-
-    @classmethod
-    def get(cls, stage_name: str) -> type[ExecutionStage]:
-        """Given a stage name, return the corresponding ExecutionStage class."""
-        if stage_name not in cls._stages:
-            cls._discover()
-
-        if stage_name not in cls._stages:
-            raise ValueError(f"Unknown stage: {stage_name}: {list(cls._stages.keys())}")
-
-        return cls._stages[stage_name]
-
-    @classmethod
-    def clear(cls) -> None:
-        """Clear registered stages (primarily for testing)."""
-        cls._stages.clear()
-
-    @classmethod
-    def registered_stages(cls) -> list[str]:
-        """Return list of currently registered stage names."""
-        return list(cls._stages.keys())
-
-
-# Aliases for backwards compatibility
-stage = ExecutionStageRegistry.register
-register_stage = ExecutionStageRegistry.register

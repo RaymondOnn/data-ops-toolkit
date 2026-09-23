@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import polars as pl
 import pytest
 from fsspec import AbstractFileSystem
-from libs.file.mixins.cas import CASArchiveMixin, calculate_sha256
+from libs.file.skills.cas import CASArchiveMixin, calculate_sha256
 
 
 class MockCASClient(CASArchiveMixin):
@@ -48,7 +48,7 @@ class TestCASArchiveMixin:
         expected = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
         assert calculate_sha256("/tmp/test.txt") == expected
 
-    @patch("libs.file.mixins.cas.calculate_sha256")
+    @patch("libs.file.skills.cas.calculate_sha256")
     def test_archive_to_cas_new_file(self, mock_hash, client, mock_fs):
         """
         GIVEN a new file and a job ID
@@ -71,7 +71,7 @@ class TestCASArchiveMixin:
         mock_fs.put.assert_called_once()
         mock_fs.mv.assert_called_once()
 
-    @patch("libs.file.mixins.cas.calculate_sha256")
+    @patch("libs.file.skills.cas.calculate_sha256")
     def test_archive_to_cas_deduplication(self, mock_hash, client, mock_fs):
         """
         GIVEN a file hash that already exists in the vault

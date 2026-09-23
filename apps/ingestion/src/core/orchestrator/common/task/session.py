@@ -2,12 +2,23 @@
 
 # 143 ->
 import time
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from src.core.contexts import ExecutionContext
-from src.core.models.task import ExecutionStatus, Task
-from src.core.models.task.enums import TaskRef
+from src.core.models.task import (
+    BLOCKED_MARKER,
+    RETRY_MARKER,
+    ExecutionStatus,
+    Task,
+    TaskManifest,
+    TaskManifestFile,
+    TaskWorkspace,
+)
+
+if TYPE_CHECKING:
+    from src.core.contexts import ExecutionContext
+    from src.core.models.task.enums import TaskRef
 
 
 class TaskSession:
@@ -18,7 +29,12 @@ class TaskSession:
     """
 
     def __init__(
-        self, worker_id: str, exec_ctx: ExecutionContext, task_ref: TaskRef, log
+        self,
+        worker_id: str,
+        exec_ctx: "ExecutionContext",
+        task_ref: "TaskRef",
+        manifest: "TaskManifest",
+        log,
     ):
         """Initializes the task session.
 
@@ -35,6 +51,7 @@ class TaskSession:
         self.worker_id = worker_id
         self.exec_ctx = exec_ctx
         self.task_ref = task_ref
+        self.manifest = manifest
         self.log = log
         self.task: Task | None = None
         self._handler_id: int | None = None
@@ -84,6 +101,18 @@ class TaskSession:
         try:
             self.log.info(f"Session initialized for task: {run_id}")
 
+            self.workspace = TaskWorkspace(
+                job_id=self.task_ref.identity.job_id,
+                dataset_id=self.task_ref.identity.dataset_id,
+                partition_date=self.task_ref.identity.partition_date,
+                run_id=run_id,
+                exec_ctx=self.exec_ctx,
+            )
+            if not self.workspace.exists():
+                raise FileNotFoundError(
+                    f"Task workspace missing: {self.workspace.path}"
+                )
+
             self.task = Task(
                 task_ref=self.task_ref.with_updates(status=ExecutionStatus.RUNNING),
                 worker_id=self.worker_id,
@@ -91,21 +120,25 @@ class TaskSession:
             )
 
             # Verify workspace exists
-            if not self.task.workspace.exists():
+            if not self.workspace.exists():
                 raise FileNotFoundError(
-                    f"Task workspace missing: {self.task.workspace.path}"
+                    f"Task workspace missing: {self.workspace.path}"
                 )
 
-            # Initialize
-            self.task.check_in(self.task_ref.step_id)
+            # Check-in and update workspace state
+            updates: dict[str, Any] = {
+                "current_step_id": self.task_ref.step_id,
+                "status": ExecutionStatus.RUNNING.value,
+            }
 
-            if (self.task.workspace.path / ".retrying").exists():
-                self.task.update_manifest(
-                    {"retry_count": self.task.manifest.retry_count + 1}
+            if (self.workspace.path / RETRY_MARKER).exists():
+                updates["retry_count"] = self.manifest.retry_count + 1
+                self.manifest = TaskManifestFile.update(
+                    workspace=self.workspace, updates=updates
                 )
-                self.task.workspace.remove_marker(".retrying")
+                self.workspace.remove_marker(RETRY_MARKER)
 
-            self.task.workspace.remove_marker(".blocked")
+            self.workspace.remove_marker(BLOCKED_MARKER)
             self.log.info(f"Step '{self.task_ref.step_id}' started")
             return self.task
 

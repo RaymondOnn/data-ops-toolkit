@@ -7,8 +7,9 @@ from libs.utils.dates import current_timestamp
 from loguru import logger
 
 from src.core.contexts import ExecutionContext, TaskContext
-from src.core.models.task import ExecutionStatus, TaskManifest
-from src.core.orchestrator.enums import TaskUpdate, to_ch_datetime
+from src.core.models.task import ExecutionStatus, TaskManifest, TaskManifestView
+
+from .models import TaskUpdate, to_ch_datetime
 
 if TYPE_CHECKING:
     from .store import StateStore
@@ -61,7 +62,8 @@ class StateSource:
                 manifest, context, status
             )
             start_time, end_time = self._extract_timestamps(manifest)
-            source_row_count, final_row_count = self._extract_row_counts(manifest)
+            # source_row_count, final_row_count = self._extract_row_counts(manifest)
+            final_row_count = self._extract_row_counts(manifest)
             remarks = self._build_remarks(manifest, status, metadata)
 
             # Get record and resolve context info
@@ -103,7 +105,7 @@ class StateSource:
                 LAST_UPDATED_AT_TS_LC=current_timestamp().isoformat(sep=" "),
                 START_TIMESTAMP_LC=start_time,
                 END_TIMESTAMP_LC=end_time,
-                SOURCE_ROW_COUNT=source_row_count,
+                # SOURCE_ROW_COUNT=source_row_count,
                 FINAL_ROW_COUNT=final_row_count,
                 RUNTIME_OVERRIDES=overrides,
                 FINAL_MANIFEST=(
@@ -188,7 +190,8 @@ class StateSource:
         total_active_count = len(active_step_ids)
 
         # 2. Match completed step IDs against active step scope
-        completed_ids = set(manifest.completed_step_ids)
+        view = TaskManifestView(manifest)
+        completed_ids = set(view.completed_step_ids)
         completed_count = sum(1 for sid in active_step_ids if sid in completed_ids)
 
         # 3. Calculate ordinal step position
@@ -231,33 +234,35 @@ class StateSource:
         return start_time, end_time
 
     @staticmethod
-    def _extract_row_counts(manifest: TaskManifest) -> tuple[str | None, int | None]:
+    # def _extract_row_counts(manifest: TaskManifest) -> tuple[str | None, int | None]:
+    def _extract_row_counts(manifest: TaskManifest) -> int | None:
         """Extracts per-source row counts as a JSON string and identifies final output count."""
-        from src.core.stages.extract.enums import ExtractPayload
+        # from src.core.stages.extract.enums import ExtractPayload
         from src.core.stages.publish.enums import PublishPayload
         from src.core.stages.write.enums import WritePayload
 
-        source_counts: dict[str, int] = {}
+        # source_counts: dict[str, int] = {}
         final_count = None
 
         for payload in manifest.payloads:
             # 1. Map each extract step/resource to its specific row count
-            if isinstance(payload, ExtractPayload):
-                # Prefers resource/source identifier, falls back to step_id
-                source_key = payload.resource or payload.step_id or "unknown_source"
-                source_counts[source_key] = payload.source_count
+            # if isinstance(payload, ExtractPayload):
+            #     # Prefers resource/source identifier, falls back to step_id
+            #     source_key = payload.resource or payload.step_id or "unknown_source"
+            #     source_counts[source_key] = payload.rows_processed
 
             # 2. Get the final output count from Publish or Write payload
-            if isinstance(payload, PublishPayload):
-                final_count = payload.final_count
-            elif isinstance(payload, WritePayload) and final_count is None:
-                final_count = payload.write_count
+            if isinstance(payload, PublishPayload) or (
+                isinstance(payload, WritePayload) and final_count is None
+            ):
+                final_count = payload.rows_processed
 
         # Convert dictionary to JSON string if any sources were extracted
-        source_counts_json = (
-            msgspec.json.encode(source_counts).decode("utf-8")
-            if source_counts
-            else None
-        )
+        # source_counts_json = (
+        #     msgspec.json.encode(source_counts).decode("utf-8")
+        #     if source_counts
+        #     else None
+        # )
 
-        return source_counts_json, final_count
+        # return source_counts_json, final_count
+        return final_count

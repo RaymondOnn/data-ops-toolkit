@@ -1,3 +1,6 @@
+
+
+
 # Resilience Playbook: Operational Recovery & Incident Response
 
 This document defines how the Ingestion Engine handles infrastructure failures, silent process deaths, and temporal boundaries. It serves as a guide for SREs and developers to understand the automated self-healing mechanisms and manual intervention points.
@@ -98,10 +101,13 @@ If the issue was a configuration error (e.g., bad credentials) that is now fixed
 
 ```bash
 # Resume from the point of failure
-python -m ingestion run resume {run_id}
+python -m ingestion resume {run_id}
 
 # Force a rewind to a specific stage
-python -m ingestion run resume {run_id} --from extract
+python -m ingestion resume {run_id} --from extract
+
+# Apply config overrides during recovery (e.g. bad credentials now fixed)
+python -m ingestion resume {run_id} --set timeout=600
 ```
 
 ### Stage 4: Service Restoration
@@ -114,7 +120,7 @@ python -m ingestion doctor connect {service_name}
 ```
 
 ---
-<!--
+
 ## 🛡️ Self-Healing Configuration
 
 Key settings in `app.yaml` that control these behaviors:
@@ -123,12 +129,12 @@ Key settings in `app.yaml` that control these behaviors:
 resilience:
   max_retries: 3
   midnight_kill_enabled: true
-  zombie_heartbeat_threshold_sec: 300
+  zombie_heartbeat_threshold_sec: 300  # 5 minutes
   circuit_breaker:
     failure_threshold: 3
-    timeout_secs_sec: 300
+    timeout_secs: 300
 
 janitor:
   default_ttl_days: 7
-  incremental_expiry_protection: true
-``` -->
+  incremental_expiry_protection: true  # Protects tasks with completed EXTRACT stage
+```

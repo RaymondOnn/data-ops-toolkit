@@ -1,8 +1,9 @@
 import shutil
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from libs.metaclasses.draft import FunctionRegistry
 from loguru import logger
-from upath import UPath
 
 from src.services.factory import ServiceFactory
 
@@ -14,14 +15,9 @@ if TYPE_CHECKING:
 LOG = logger
 MAX_ROUTINE_DEPTH = 5
 
-# Define strategy registry map
-HOOK_STRATEGIES = {}
-
 
 def resolve_src_paths(src_raw: str, active_src: Any | None) -> list[str]:
     """Discover source files safely handling wildcards and literal matches."""
-    from upath import UPath
-
     if active_src:
         if "*" in src_raw:
             return active_src.glob(src_raw, recursive=True)
@@ -34,49 +30,57 @@ def resolve_src_paths(src_raw: str, active_src: Any | None) -> list[str]:
         return []
 
     # Local filesystem fallback
-    src_upath = UPath(src_raw)
+    src_upath = Path(src_raw)
     if "*" in src_raw:
         return [str(p) for p in src_upath.parent.glob(src_upath.name)]
     return [src_raw] if src_upath.exists() else []
 
 
-def register_strategy(hook_type):
-    def decorator(func):
-        HOOK_STRATEGIES[hook_type] = func
-        return func
+class Hook(
+    FunctionRegistry,
+    registry_name="HookRegistry",
+    auto_key=False,
+):
+    """Gateway API for registering and executing stage hook actions."""
 
-    return decorator
+    @classmethod
+    def run(
+        cls,
+        key: HookType | str,
+        runner: "HookRunner",
+        action: HookAction,
+        **kwargs: Any,
+    ) -> Any:
+        """Executes the hook action logic using the registered function."""
+        return cls.invoke(str(key), runner=runner, action=action, **kwargs)
 
 
-@register_strategy(HookType.STORE)
-def _run_store(runner: "HookRunner", action: "HookAction", **kwargs):
+@Hook.register(HookType.STORE)
+def _run_store(runner: "HookRunner", action: "HookAction", **kwargs: Any) -> None:
     if not action.key:
         raise ValueError("STORE hook requires a 'key' field.")
-    rendered_value = (
-        action.value.format(**runner._template_vars) if action.value else ""
-    )
+    rendered_value = action.value if action.value else ""
     runner.store_map[action.key] = rendered_value
     LOG.debug(f"Stored mapping: store.{action.key} = '{rendered_value}'")
 
 
-@register_strategy(HookType.QUERY)
-def _run_query(runner: "HookRunner", action: "HookAction", **kwargs):
+@Hook.register(HookType.QUERY)
+def _run_query(runner: "HookRunner", action: "HookAction", **kwargs: Any) -> Any:
     """Execute a SQL query hook."""
     if not action.query or not action.connection:
         raise ValueError("Query hook requires 'query' and 'connection'")
+
     # Template substitution
-    query = action.query.format(**runner._template_vars)
+    query = action.query
     # Support file:// references
     if query.startswith("file://"):
-        from upath import UPath
-
-        query = UPath(query.removeprefix("file://")).read_text()
+        query = Path(query.removeprefix("file://")).read_text()
     sink = ServiceFactory.get_sink(action.connection)
     sink.command(query)
 
 
-@register_strategy(HookType.HTTP)
-def _run_http(runner: "HookRunner", action: "HookAction", **kwargs):
+@Hook.register(HookType.HTTP)
+def _run_http(runner: "HookRunner", action: "HookAction", **kwargs: Any) -> Any:
     """Execute an HTTP webhook hook."""
     import niquests
 
@@ -84,10 +88,10 @@ def _run_http(runner: "HookRunner", action: "HookAction", **kwargs):
         raise ValueError("HTTP hook requires 'url'")
 
     payload = {
-        "job_id": runner.task.job_id,
-        "run_id": runner.task.run_id,
-        "step": runner.task.target_step_id,
-        "partition_date": runner.task.partition_date,
+        "job_id": runner.ctx.job_id,
+        "run_id": runner.ctx.run_id,
+        "step": runner.ctx.step_id,
+        "partition_date": runner.ctx.partition_date,
     }
     resp = niquests.post(action.url, json=payload, timeout=action.timeout_seconds)
 
@@ -100,8 +104,8 @@ def _run_http(runner: "HookRunner", action: "HookAction", **kwargs):
     return {"response": {"status_code": resp.status_code, "json": resp_json}}
 
 
-@register_strategy(HookType.SCRIPT)
-def _run_script(runner: "HookRunner", action: "HookAction", **kwargs):
+@Hook.register(HookType.SCRIPT)
+def _run_script(runner: "HookRunner", action: "HookAction", **kwargs: Any) -> None:
     """Execute a shell script hook."""
     import subprocess
 
@@ -113,15 +117,15 @@ def _run_script(runner: "HookRunner", action: "HookAction", **kwargs):
         check=True,
         timeout=action.timeout_seconds,
         env={
-            "TASK_RUN_ID": runner.task.run_id,
-            "TASK_JOB_ID": runner.task.job_id,
-            "TASK_PARTITION_DATE": runner.task.partition_date,
+            "TASK_RUN_ID": runner.ctx.run_id,
+            "TASK_JOB_ID": runner.ctx.job_id,
+            "TASK_PARTITION_DATE": runner.ctx.partition_date,
         },
     )
 
 
-@register_strategy(HookType.COPY)
-def _run_copy(runner: "HookRunner", action: "HookAction", **kwargs):
+@Hook.register(HookType.COPY)
+def _run_copy(runner: "HookRunner", action: "HookAction", **kwargs: Any) -> None:
     """Transfer files between storage locations.
 
     Automatically discovers files using centralized globbing, detects directory
@@ -131,16 +135,16 @@ def _run_copy(runner: "HookRunner", action: "HookAction", **kwargs):
     if not action.from_path or not action.to_path:
         raise ValueError("Copy hook requires 'from_path' and 'to_path'")
 
-    src_raw = action.from_path.format(**runner._template_vars)
-    dst_raw = action.to_path.format(**runner._template_vars)
+    src_raw = action.from_path
+    dst_raw = action.to_path
 
     src_client = (
-        ServiceFactory.get(**action.from_connection).connector
+        ServiceFactory.get(role=None, **action.from_connection).connector
         if action.from_connection
         else None
     )
     dst_client = (
-        ServiceFactory.get(**action.to_connection).connector
+        ServiceFactory.get(role=None, **action.to_connection).connector
         if action.to_connection
         else None
     )
@@ -153,13 +157,13 @@ def _run_copy(runner: "HookRunner", action: "HookAction", **kwargs):
             f"No source objects matched the path criteria: {src_raw}"
         )
 
-    dst_upath = UPath(dst_raw)
+    dst_upath = Path(dst_raw)
     is_dst_dir = dst_raw.endswith("/") or not dst_upath.suffix
 
     try:
         for src_path in src_paths:
             current_dst = dst_raw
-            src_item_upath = UPath(src_path)
+            src_item_upath = Path(src_path)
 
             is_file = (
                 active_src.is_file(active_src.resolve(src_path))
@@ -167,7 +171,7 @@ def _run_copy(runner: "HookRunner", action: "HookAction", **kwargs):
                 else src_item_upath.is_file()
             )
             if is_file and is_dst_dir:
-                current_dst = str(UPath(dst_raw) / src_item_upath.name)
+                current_dst = str(Path(dst_raw) / src_item_upath.name)
 
             if (
                 (action.from_connection or action.to_connection)
@@ -180,7 +184,7 @@ def _run_copy(runner: "HookRunner", action: "HookAction", **kwargs):
                     recursive=not is_file,
                 )
             else:
-                local_dst = UPath(current_dst)
+                local_dst = Path(current_dst)
                 if is_file:
                     local_dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(str(src_item_upath), str(local_dst))
@@ -197,6 +201,30 @@ def _run_copy(runner: "HookRunner", action: "HookAction", **kwargs):
         raise
 
 
+@Hook.register(HookType.DELETE)
+def _run_delete(runner: "HookRunner", action: "HookAction", **kwargs: Any) -> None:
+    """Remove files or directories at a storage location.
+
+    If location points to a directory, it deletes the directory container.
+    If location points to a file or wildcard pattern, it targets individual files.
+    """
+    if not action.location:
+        raise ValueError("Delete hook requires 'location'")
+
+    loc_raw = action.location
+    client = (
+        ServiceFactory.get(**action.connection).connector if action.connection else None
+    )
+
+    is_directory_target = loc_raw.endswith("/") or (
+        "*" not in loc_raw and not Path(loc_raw).suffix
+    )
+    if is_directory_target:
+        _delete_directory(loc_raw, action.recursive, client)
+    else:
+        _delete_files_by_pattern(loc_raw, client)
+
+
 def _delete_directory(path_raw: str, recursive: bool, client: Any | None) -> None:
     """Handles removing a full directory container or prefix."""
     if client:
@@ -204,7 +232,7 @@ def _delete_directory(path_raw: str, recursive: bool, client: Any | None) -> Non
         if client.exists(resolved):
             client.rm(resolved, recursive=recursive)
     else:
-        path = UPath(path_raw)
+        path = Path(path_raw)
         if path.exists() and path.is_dir():
             if recursive:
                 shutil.rmtree(str(path))
@@ -225,44 +253,25 @@ def _delete_files_by_pattern(path_raw: str, client: Any | None) -> None:
             if client.exists(resolved):
                 client.rm(resolved, recursive=False)
         else:
-            path = UPath(target)
+            path = Path(target)
             if path.is_file():
                 path.unlink()
 
 
-@register_strategy(HookType.DELETE)
-def _run_delete(runner: "HookRunner", action: "HookAction", **kwargs):
-    """Remove files or directories at a storage location.
-
-    If location points to a directory, it deletes the directory container.
-    If location points to a file or wildcard pattern, it targets individual files.
-    """
-    if not action.location:
-        raise ValueError("Delete hook requires 'location'")
-
-    loc_raw = action.location.format(**runner._template_vars)
-    client = (
-        ServiceFactory.get(**action.connection).connector if action.connection else None
-    )
-
-    is_directory_target = loc_raw.endswith("/") or (
-        "*" not in loc_raw and not UPath(loc_raw).suffix
-    )
-    if is_directory_target:
-        _delete_directory(loc_raw, action.recursive, client)
-    else:
-        _delete_files_by_pattern(loc_raw, client)
-
-
-@register_strategy(HookType.ROUTINE)
-def _run_routine(runner: "HookRunner", action: "HookAction", _depth: int = 0, **kwargs):
+@Hook.register(HookType.ROUTINE)
+def _run_routine(
+    runner: "HookRunner", action: "HookAction", _depth: int = 0, **kwargs: Any
+) -> None:
     """Execute a reusable sequence of hook actions from a YAML file.
 
     Routine files are YAML lists of HookAction definitions. Supports
     nesting up to _MAX_ROUTINE_DEPTH levels to prevent infinite loops.
     """
-    import msgspec
-    import yaml
+    from pathlib import Path
+
+    import msgspec.yaml
+
+    from .enums import HookAction as HookActionStruct
 
     if not action.routine_path:
         raise ValueError("Routine hook requires 'routine_path'")
@@ -273,20 +282,17 @@ def _run_routine(runner: "HookRunner", action: "HookAction", _depth: int = 0, **
             f"{action.routine_path}"
         )
 
-    path = UPath(action.routine_path.format(**runner._template_vars))
+    path = Path(action.routine_path)
     if not path.exists():
         raise FileNotFoundError(f"Routine file not found: {path}")
 
-    raw = yaml.safe_load(path.read_text())
-    if not isinstance(raw, list):
-        raise ValueError(f"Routine file must contain a YAML list of actions: {path}")
-
-    from .enums import HookAction as HookActionStruct
-
-    # Convert raw dicts into validated HookAction structs
-    routine_actions: list[HookActionStruct] = msgspec.convert(
-        raw, type=list[HookActionStruct]
-    )
+    # Directly decode and validate YAML into a list of HookAction structs
+    try:
+        routine_actions = msgspec.yaml.decode(
+            path.read_bytes(), type=list[HookActionStruct]
+        )
+    except Exception as e:
+        raise TypeError(f"Failed to parse routine file '{path}': {e}") from e
 
     LOG.info(
         f"Running routine '{path.name}' with {len(routine_actions)} actions "

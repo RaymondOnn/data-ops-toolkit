@@ -8,8 +8,7 @@ services:
     environment:
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-password}
-      - CH_HOST=localhost
-      - LOCALSTACK_HOST=localstack
+      # - CH_HOST=localhost
     volumes:
       - ../../../sql:/sql
       - ./clickhouse/clickhouse_settings.xml:/etc/clickhouse-server/config.d/clickhouse_settings.xml
@@ -24,8 +23,8 @@ services:
       nofile:
         soft: 262144
         hard: 262144
-    networks:
-      - ch_ntw
+    # networks:
+    #   - ch_ntw
 
   # prometheus:
   #   image: prom/prometheus:latest
@@ -53,30 +52,53 @@ services:
   #   networks:
   #     - ch_ntw
 
-  localstack:
-    image: localstack/localstack:4.4.0
-    container_name: localstack
+  # --- AWS Emulator ---
+  floci:
+    image: floci/floci:latest-compat
+    container_name: floci
     ports:
-      - "4566:4566"            # LocalStack Edge Proxy
+      - "4566:4566" # Edge Proxy (LocalStack parity)
     environment:
-      - SERVICES=iam,s3,secretsmanager,sts,logs,cloudwatch
-      - DEBUG=1 # Better than SERVICES; tells you what's happening in logs
-      - ACTIVATE_PRO=0 # Community version: No physical files, things stored in memory
-      - DOCKER_HOST=unix:///var/run/docker.sock
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-ap-southeast-1}
       - LANDING_ZONE_BUCKET=${LANDING_ZONE_BUCKET:-landing-zone}
       - ARCHIVE_VAULT_BUCKET=${ARCHIVE_VAULT_BUCKET:-archive-vault}
       - CAS_VAULT_BUCKET=${CAS_VAULT_BUCKET:-cas-vault}
+      - FLOCI_HOSTNAME=floci
+      - QUARKUS_LOG_LEVEL=DEBUG
+      - FLOCI_STORAGE_MODE=persistent
+      - SERVICES=s3,secretsmanager
+      # - DISABLE_CORS_CHECKS=1
+      # - EXTRA_CORS_ALLOWED_ORIGINS=http://localhost:8080
+      # - FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK=ch_ntw # Tells Floci what network to spin child container runtimes on
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock"
-      - "./.tmp/localstack:/var/lib/localstack"
-      - "./localstack/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh" # Mount the init scripts
+      - "./.tmp/floci:/app/data"
+      - "./floci/init-aws.sh:/etc/floci/init/ready.d/init-aws.sh" # Init-script compatibility
     networks:
-      - ch_ntw
+      - floci_ntw
+
+  # --- Visual S3 Operations UI ---
+  floci-ui:
+    image: floci/floci-ui:latest
+    container_name: floci-ui
+    ports:
+      - "8080:4500"
+    environment:
+      - FLOCI_HOST=floci # Directs UI engine orchestration traffic to the backend host
+      - AWS_ENDPOINT_URL=http://localhost:4566
+      - AWS_ENDPOINT_URL_EXTERNAL=http://localhost:4566
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-ap-southeast-1}
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+    depends_on:
+      - floci
+    networks:
+      - floci_ntw
+
 
 volumes:
   clickhouse_data:
 
 networks:
-  ch_ntw:
+  floci_ntw:
     driver: bridge

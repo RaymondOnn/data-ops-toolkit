@@ -24,7 +24,7 @@ class Secret:
         if not self._value or force:
             if not self._provider:
                 raise ValueError(f"No provider for secret: {self.secret_id}")
-            self._value = self._provider.get(self.secret_id)
+            self._value = self._provider.get_secret(self.secret_id)
             # if self._value:
             #     mask_in_logs(self._value)
             # else:
@@ -73,7 +73,7 @@ class RotatingSecret(Secret):
             if not self._value or (now - self._last_fetch) >= self.ttl:
                 if not self._provider:
                     raise ValueError(f"No provider for secret: {self.secret_id}")
-                self._value = self._provider.get(self.secret_id)
+                self._value = self._provider.get_secret(self.secret_id)
                 # Add jitter to prevent thundering herd
                 jitter = self.ttl * 0.1 * random.uniform(-1, 1)
                 self._last_fetch = time.time() + jitter
@@ -85,6 +85,6 @@ class RotatingSecret(Secret):
         """Update secret in provider and invalidate cache."""
         if not self._provider:
             raise ValueError(f"No provider for secret: {self.secret_id}")
-        self._provider.set(self.secret_id, new_value)
+        self._provider.set_secret(self.secret_id, new_value)
         self._value = None
         self._last_fetch = 0

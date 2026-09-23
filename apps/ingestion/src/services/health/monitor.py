@@ -10,7 +10,6 @@ from libs.resilience.circuit_breaker import (
     CircuitOpen,
 )
 from libs.storage.cache.base import Cache
-from libs.storage.cache.factory import CacheFactory
 from loguru import logger
 
 LOG = logger
@@ -56,7 +55,7 @@ class ServiceMonitor:
         """Initialize the health registry."""
         if cls.__cache is None:
             cls._signal_dir = Path(signal_dir)
-            cls.__cache = CacheFactory.create(
+            cls.__cache = Cache.create(
                 key=cache_config["key"],
                 directory=cache_config["directory"],
                 namespace=REGISTRY_CACHE_NAMESPACE,

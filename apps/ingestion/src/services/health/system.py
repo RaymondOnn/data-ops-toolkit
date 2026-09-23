@@ -4,10 +4,10 @@
 import time
 from enum import Enum
 from pathlib import Path
-from typing import ClassVar, Self
 
 import msgspec
 import psutil
+from libs.metaclasses.singleton import Singleton
 from loguru import logger
 
 LOG = logger
@@ -159,7 +159,7 @@ class SystemHealth(msgspec.Struct):
         return self.memory_status == HealthStatus.BLOCKED
 
 
-class SystemMonitor:
+class SystemMonitor(Singleton):
     """
     System health monitoring singleton.
 
@@ -176,40 +176,24 @@ class SystemMonitor:
             pass
     """
 
-    _instance: ClassVar["SystemMonitor| None"] = None
-    _workspace_dir: ClassVar[Path | None] = None
-    _initialized: ClassVar[bool] = False
-
-    # Lazy-loading TTL cache configurations
-    _report: ClassVar[SystemHealth | None] = None
-    _report_expires_at: ClassVar[float] = 0.0
-    _report_ttl_secs: ClassVar[float] = 10.0
+    _report_ttl_secs: float = 10.0
 
     # Hard Resource Constraint Circuit Breaker
-    _disk_blocked_until: ClassVar[float] = 0.0
-    _cooldown_secs: ClassVar[float] = 300.0
-
-    def __new__(cls, workspace_dir: Path) -> Self:
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._workspace_dir = Path(workspace_dir)
-        return cls._instance
+    _cooldown_secs: float = 300.0
 
     def __init__(self, workspace_dir: Path):
-        # Only initialize once
-        if not self.__class__._initialized:
-            self.__class__._workspace_dir = Path(workspace_dir)
-            self.__class__._initialized = True
-            # Perform initial check
-            self.check()
+        # Prevent re-initialization if already instantiated
+        if getattr(self, "_initialized", False):
+            return
 
-    @classmethod
-    def reset(cls) -> None:
-        """Reset singleton (for testing)."""
-        cls._instance = None
-        cls._workspace_dir = None
-        cls._report = None
-        cls._initialized = False
+        self.workspace_dir: Path = Path(workspace_dir)
+        self._report: SystemHealth | None = None
+        self._report_expires_at: float = 0.0
+        self._disk_blocked_until: float = 0.0
+        self._initialized: bool = True
+
+        # Initial health check
+        self.check()
 
     @property
     def report(self) -> SystemHealth:
@@ -217,7 +201,7 @@ class SystemMonitor:
         now = time.time()
         if self._report is None or now >= self._report_expires_at:
             # Cache missed or expired; trigger a fresh system diagnostic run
-            self.check()
+            return self.check()
         return self._report
 
     def check(self) -> SystemHealth:
@@ -227,21 +211,12 @@ class SystemMonitor:
         Returns:
             SystemHealth: Current health snapshot.
         """
-        if self.__class__._workspace_dir is None:
-            return SystemHealth(
-                0.0,
-                0.0,
-                HealthStatus.HEALTHY,
-                HealthStatus.HEALTHY,
-                HealthStatus.HEALTHY,
-            )
-
         try:
             now = time.time()
             vitals = get_system_vitals()
             mem_pct = vitals.get("mem_pct", 0.0)
 
-            disk_pct = get_disk_usage(self.__class__._workspace_dir)
+            disk_pct = get_disk_usage(self.workspace_dir)
 
             disk_status = HealthStatus.evaluate(
                 disk_pct,
@@ -274,12 +249,12 @@ class SystemMonitor:
             )
 
             # Update cache timestamps
-            self.__class__._report = report
-            self.__class__._report_expires_at = now + self.__class__._report_ttl_secs
+            self._report = report
+            self._report_expires_at = now + self._report_ttl_secs
 
             # If disk pressure is critical or worse, trip the 5-minute circuit breaker window
             if disk_status in (HealthStatus.CRITICAL, HealthStatus.BLOCKED):
-                self.__class__._disk_blocked_until = now + self.__class__._cooldown_secs
+                self._disk_blocked_until = now + self._cooldown_secs
                 LOG.error(
                     f"System disk pressure CRITICAL ({disk_pct:.1f}%). "
                     f"Tripping health circuit breaker for {self._cooldown_secs}s."
@@ -306,7 +281,7 @@ class SystemMonitor:
         """
         now = time.time()
         # Fast-path check: Is the circuit breaker currently tripped?
-        if now < self.__class__._disk_blocked_until:
+        if now < self._disk_blocked_until:
             return True
 
         # Inspect via the lazy-loaded property (will trigger check() internally if expired)
@@ -338,9 +313,9 @@ class SystemMonitor:
         Returns:
             Optional[float]: Disk usage percentage or None if not available.
         """
-        if self.__class__._report is None:
+        if self._report is None:
             return None
-        return self.__class__._report.disk_usage_pct
+        return self._report.disk_usage_pct
 
     def get_memory_usage(self) -> float | None:
         """
@@ -349,14 +324,15 @@ class SystemMonitor:
         Returns:
             Optional[float]: Memory usage percentage or None if not available.
         """
-        if self.__class__._report is None:
+        if self._report is None:
             return None
-        return self.__class__._report.memory_usage_pct
+        return self._report.memory_usage_pct
 
     @classmethod
     def force_refresh(cls) -> SystemHealth | None:
         """Bypasses active cache intervals to force an immediate raw device check."""
-        if cls._instance is not None:
-            cls._report_expires_at = 0.0  # Invalidate current cache window instantly
-            return cls._instance.report
+        inst = cls.instance()
+        if inst is not None:
+            inst._report_expires_at = 0.0
+            return inst.report
         return None

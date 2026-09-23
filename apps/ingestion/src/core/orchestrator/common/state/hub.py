@@ -1,19 +1,22 @@
 """Central hub coordinating all state operations."""
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 from loguru import logger
 
 from src.core.contexts import ExecutionContext, TaskContext
-from src.core.models.task import TaskManifest
-from src.core.orchestrator.enums import TaskUpdate
+from src.core.models.task import TaskManifestFile
 from src.utils.common import find_path
 
+from .models import TaskUpdate
 from .sink import StateSink
 from .source import StateSource
 from .store import StateStore
+
+if TYPE_CHECKING:
+    from src.services.repo.metadata import MetadataRepository
 
 LOG = logger
 
@@ -33,7 +36,7 @@ class StateHub:
     correctly mirrored to the log stream and the database.
     """
 
-    def __init__(self, db_config: dict, exec_ctx: ExecutionContext):
+    def __init__(self, meta_repo: "MetadataRepository", exec_ctx: "ExecutionContext"):
         """Initializes the Hub and its underlying state components.
 
         Args:
@@ -46,27 +49,10 @@ class StateHub:
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
 
         self.store = StateStore(exec_ctx)
-        self.sink = StateSink(db_config, self.workspace_dir)
+        self.sink = StateSink(meta_repo, self.workspace_dir)
         self.source = StateSource(self.store, exec_ctx)
 
         LOG.trace("StateHub initialized", workspace=str(self.workspace_dir))
-
-    # def add_task(self, task_ref: TaskRef) -> None:
-    #     """Registers a new task in both the cache and the log stream.
-
-    #     Args:
-    #         task_ref: Routing and identity handle for the task.
-    #     """
-    #     run_id = task_ref.identity.run_id
-    #     LOG.debug("Adding task to state tracking", run_id=run_id)
-
-    #     self.store.update(task_ref)
-    #     record = self.store.get(run_id)
-    #     if record:
-    #         print(record)
-    #         initial_event = TaskUpdate.from_record(record)
-    #         self.sink.append(initial_event)
-    #         LOG.debug("Task added to sink buffer", run_id=run_id)
 
     def update_task(self, run_id: str, updates: TaskUpdate | dict[str, Any]) -> None:
         """Applies partial updates to a task and flushes to the sink.
@@ -126,7 +112,7 @@ class StateHub:
                 return
             resolved_path = resolved
 
-        task_manifest = TaskManifest.from_path(folder_path=resolved_path)
+        task_manifest = TaskManifestFile.load(folder_path=resolved_path)
         task_context = TaskContext.from_path(folder_path=resolved_path)
 
         task_update = self.source.parse_update(
@@ -156,9 +142,9 @@ class StateHub:
     def flush(self) -> None:
         """Forces a flush of all buffered sink data to ClickHouse."""
         LOG.info("Flushing state to database")
-        self.sink.send()
+        self.sink.flush_to_db()
 
     def close(self) -> None:
         """Gracefully shuts down the Hub and closes active streams."""
         LOG.trace("Closing StateHub")
-        self.sink.close()
+        self.sink.flush_to_db()

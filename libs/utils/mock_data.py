@@ -74,7 +74,7 @@ def generate_simulation_artifacts(
             for _ in range(rows)
         ],
         "status": [
-            fake.random_element(elements=("active", "pending", "closed"))
+            fake.random_element(elements=("ACTIVE", "pending", "closed"))
             for _ in range(rows)
         ],
         "updated_at": [datetime(2024, 1, 1, 12, 0, 0)] * rows,

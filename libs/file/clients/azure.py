@@ -2,7 +2,7 @@ import logging
 from typing import Any
 
 import fsspec
-from libs.file.base import FileSystemClient
+from libs.file.clients.base import FileSystemClient
 
 LOG = logging.getLogger(__name__)
 

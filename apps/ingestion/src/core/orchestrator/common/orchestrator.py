@@ -10,9 +10,14 @@ from libs.utils.dates import current_timestamp
 from loguru import logger
 
 from src.core.contexts import TaskContextBuilder
-from src.core.models.task import ExecutionStatus, Task, TaskSignal
-from src.core.models.task.enums import TaskIdentity
-from src.core.orchestrator.enums import TaskRef
+from src.core.models.task import (
+    ExecutionStatus,
+    Task,
+    TaskManifestFile,
+    TaskSignal,
+    TaskWorkspace,
+)
+from src.core.models.task.enums import TaskIdentity, TaskRef
 from src.services.factory import ServiceFactory
 from src.services.health import SystemMonitor
 from src.utils.constants import (
@@ -67,7 +72,7 @@ class Orchestrator:
         """Verify critical infrastructure before starting."""
         LOG.info("Running pre-flight checks...")
         try:
-            _ = self.state.sink.db
+            _ = self.state.sink.meta_repo
         except Exception as e:
             LOG.critical(f"Database unreachable: {e}")
             self.state.close()  # Clean up only on failure
@@ -95,14 +100,19 @@ class Orchestrator:
         traceback_str = None
         if event.folder_path:
             with suppress(Exception):
-                task = Task.from_path(event.folder_path, self.exec_ctx)
-                if task:
-                    err = task.manifest.error
-                    if err:
-                        error_context = (
-                            f" | Stage: {err.stage.upper()} | Error: {err.message}"
-                        )
-                        traceback_str = err.traceback
+                # Construct workspace directly from the event payload/path
+                workspace = TaskWorkspace(
+                    job_id=event.identity.job_id,
+                    dataset_id=event.identity.dataset_id,
+                    partition_date=event.identity.partition_date,
+                    run_id=event.identity.run_id,
+                    exec_ctx=self.exec_ctx,
+                )
+                manifest = TaskManifestFile.load(workspace)
+
+                if manifest and manifest.error:
+                    error_context = f" | Stage: {manifest.error.stage.upper()} | Error: {manifest.error.message}"
+                    traceback_str = manifest.error.traceback
 
         log_fn(
             f"Task {'completed' if success else 'failed'}: "
@@ -114,26 +124,28 @@ class Orchestrator:
         if event.folder_path:
             self.state.sync_manifest(event.folder_path, deep_sync=True)
 
-            # Ensure we have the rehydrated task to check its terminal status
-            if not task:
-                with suppress(Exception):
-                    task = Task.from_path(event.folder_path, self.exec_ctx)
-
             if success:
+                task = Task.from_path(event.folder_path, self.exec_ctx)
                 self.janitor.cleanup_task(task)
-            elif task and task.manifest.status != ExecutionStatus.BLOCKED:
+            elif task and manifest.status != ExecutionStatus.BLOCKED:
                 self.janitor.quarantine(event.folder_path, "FAILED")
 
     def _on_task_sync(self, event: SignalEvent) -> None:
         """Handle SYNC signals - both progress and blocked tasks."""
         if event.folder_path:
             # Check if task is blocked - pass metadata if needed
-            task = None
             metadata = None
             with suppress(Exception):
-                task = Task.from_path(event.folder_path, self.exec_ctx)
-                if task and task.manifest.status == ExecutionStatus.BLOCKED:
-                    blocked_by = getattr(task.manifest, "blocked_by", None)
+                workspace = TaskWorkspace(
+                    job_id=event.identity.job_id,
+                    dataset_id=event.identity.dataset_id,
+                    partition_date=event.identity.partition_date,
+                    run_id=event.identity.run_id,
+                    exec_ctx=self.exec_ctx,
+                )
+                manifest = TaskManifestFile.load(workspace)
+                if manifest and manifest.status == ExecutionStatus.BLOCKED:
+                    blocked_by = getattr(manifest, "blocked_by", None)
                     if blocked_by:
                         metadata = {"blocked_by": blocked_by}
 
@@ -211,14 +223,19 @@ class Orchestrator:
                     "LAST_UPDATED_AT_TS_LC": current_timestamp().isoformat(sep=" "),
                 },
             )
-            task = Task(
-                task_ref=task_ref, worker_id="orchestrator", exec_ctx=self.exec_ctx
+
+            workspace = TaskWorkspace(
+                job_id=ctx.job_id,
+                dataset_id=ctx.dataset_id,
+                partition_date=ctx.partition_date,
+                run_id=ctx.run_id,
+                exec_ctx=self.exec_ctx,
             )
-            new_config_path = task.workspace.create(config_path)
+            new_config_path = workspace.create(config_path)
             LOG.trace(
                 "[DISPATCH] workspace created",
                 run_id=ctx.run_id,
-                path=str(task.workspace.path),
+                path=str(workspace.path),
             )
 
             # Queue for execution
@@ -255,12 +272,19 @@ class Orchestrator:
     ) -> None:
         """Abort a running job."""
         LOG.error(f"Aborting job {task.job_id}: {status}", reason=reason)
-
-        task.update_manifest(
-            {"status": status, "current_stage": ExecutionStatus.CANCELLED}
+        workspace = TaskWorkspace(
+            job_id=task.job_id,
+            dataset_id=task.dataset_id,
+            partition_date=task.partition_date,
+            run_id=task.run_id,
+            exec_ctx=self.exec_ctx,
         )
-        task.send_signal(TaskSignal.DONE)
-        self.state.sync_manifest(task.workspace.path)
+        TaskManifestFile.update(
+            workspace=workspace,
+            updates={"status": status, "current_stage": ExecutionStatus.CANCELLED},
+        )
+        workspace.send_signal(TaskSignal.DONE)
+        self.state.sync_manifest(workspace.path)
 
         if status == ExecutionStatus.EXPIRED:
             self.janitor.cleanup_task(task)

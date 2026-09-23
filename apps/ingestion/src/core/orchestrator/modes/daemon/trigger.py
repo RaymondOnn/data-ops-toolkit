@@ -8,12 +8,12 @@ from loguru import logger
 
 from src.core.contexts.task import TaskContext, load_context
 from src.core.models.states import ExpiredState
-from src.core.models.task import ExecutionStatus
 from src.core.models.task.enums import TaskIdentity
+from src.core.models.task.status import ExecutionStatus
 from src.utils.constants import CONFIG_FILENAME, STRIP_TZ_FOR_DB
 
 if TYPE_CHECKING:
-    from src.core.orchestrator.enums import TaskRecord
+    from src.core.orchestrator.contracts.state import TaskStateView
 
 LOG = logger
 
@@ -23,7 +23,7 @@ class TriggerDecision(msgspec.Struct):
 
     action: Literal["trigger", "purge", "wait"]
     reason: str
-    record: "TaskRecord"
+    record: "TaskStateView"
     context: TaskContext | None = None
 
 
@@ -33,7 +33,7 @@ class TriggerManager:
     def __init__(self, exec_ctx):
         self.exec_ctx = exec_ctx
 
-    def evaluate(self, job_records: list["TaskRecord"]) -> list[TriggerDecision]:
+    def evaluate(self, job_records: list["TaskStateView"]) -> list[TriggerDecision]:
         """Iterates through all pending records and calculates actions."""
         # Check shutdown first
         if self.exec_ctx.stop_at_ts is not None:
@@ -44,7 +44,7 @@ class TriggerManager:
 
         decisions = []
         for record in job_records:
-            if ExecutionStatus.PENDING.value != record.JOB_STATUS:
+            if ExecutionStatus.PENDING.value != record.status:
                 continue
 
             # Check purge conditions (expiry policy)
@@ -74,34 +74,32 @@ class TriggerManager:
 
         return decisions
 
-    def _should_purge(self, record: "TaskRecord") -> bool:
+    def _should_purge(self, record: "TaskStateView") -> bool:
         """Check if job should be purged based on temporal expiry policies."""
         return ExpiredState.matches(task=None, record=record, exec_ctx=self.exec_ctx)
 
-    def _should_trigger(self, record: "TaskRecord", now) -> bool:
+    def _should_trigger(self, record: "TaskStateView", now) -> bool:
         """Check if job should be triggered based on its type."""
         # 1. Check scheduled time
-        scheduled = parse_timestamp(
-            record.SCHEDULED_TIMESTAMP_LC, naive=STRIP_TZ_FOR_DB
-        )
+        scheduled = parse_timestamp(record.scheduled_at, naive=STRIP_TZ_FOR_DB)
         return now >= scheduled
 
-    def _try_load_context(self, record: "TaskRecord") -> TaskContext | None:
+    def _try_load_context(self, record: "TaskStateView") -> TaskContext | None:
         """Load task context from disk.
 
         if config file, task already triggered before.
         """
         identity = TaskIdentity(
-            job_id=record.JOB_ID,
-            dataset_id=record.DATASET_ID,
-            partition_date=str(record.PARTITION_DATE),
-            run_id=record.RUN_ID,
+            job_id=record.job_id,
+            dataset_id=record.dataset_id,
+            partition_date=str(record.partition_date),
+            run_id=record.run_id,
         )
 
         run_path = self.exec_ctx.get_run_path(identity)
         pending_path = (
             self.exec_ctx.active_path
-            / f"{identity.key}:{record.RUN_ID}_{CONFIG_FILENAME}"
+            / f"{identity.key}:{record.run_id}_{CONFIG_FILENAME}"
         )
         if run_path.exists():
             return load_context(run_path)
@@ -111,7 +109,7 @@ class TriggerManager:
                 return msgspec.json.decode(f.read(), type=TaskContext)
 
         # Log ghost tasks without caching complexity
-        if record.RUN_ID and self.exec_ctx.get_run_path(identity).exists():
-            LOG.warning(f"Ghost task detected: {record.RUN_ID}")
+        if record.run_id and self.exec_ctx.get_run_path(identity).exists():
+            LOG.warning(f"Ghost task detected: {record.run_id}")
 
         return None

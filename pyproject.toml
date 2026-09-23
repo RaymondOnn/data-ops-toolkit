@@ -36,6 +36,8 @@ cloud = { workspace = true }
 storage = { workspace = true }
 queue = { workspace = true }
 network = { workspace = true }
+alerts = { workspace = true }
+metaclasses = { workspace = true }
 
 [tool.uv.workspace]
 # Define the workspace members

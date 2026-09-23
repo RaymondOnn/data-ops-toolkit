@@ -1,0 +1,124 @@
+# JOB-LEVEL CONFIG (Applies to all datasets in this job)
+# ── JOB-LEVEL DEFAULTS ────────────────────────────────────────────────────────
+job:
+  source: # table name / file name /
+    service_ref: "some_folder" # for credential lookup
+
+  target:
+    service_ref: "clickhouse"
+
+
+  # ── Action & Stage Level Defaults ──────────────────────────────────────────
+  # Global output envelope applied to all step executions
+  mode: incremental # Loading Strategy: delta (update_key) | append | truncate | cdc | backfill
+  update_key: last_updated_ts
+  soft_delete_missing: False
+
+  # Standard parameter defaults injected when `call: <action>` matches
+  calls:
+    extract:
+      num_workers: 16
+      batch_size: 100000
+      hooks:
+        pre:
+          - type: copy
+            from: { service_ref: "some_folder", path: "sample_orders.csv" }
+            to: "s3_archive://archive-vault/{job_id}/{partition_date}/{run_id}/raw/"
+            on_failure: abort
+        post:
+          - type: delete
+            location: "{step.object}"
+            on_failure: warn
+
+    write:
+      write_strategy: skeleton_clone
+      working_table: "{dataset.destination}_STG_{YYYY}{MM}{DD}"
+      target: {dataset.destination}
+      object: "{upstream.artifact_folder}"         # Auto-binds output from previous step
+      column_case_type: upper
+      column_case_style: snake
+      expected_count: "{upstream.rows_processed}"
+      column_types: {}
+      create_table_ddl:
+
+    publish:
+      target: "@destination"
+      staging_location: "{steps.stage_{dataset_id}_data.working_table}"
+      # staging_location: "@upstream.working_table" # Auto-binds working_table from write step
+
+
+# ── DATASET CONFIGURATIONS ───────────────────────────────────────────────────
+datasets:
+  # DATASET 1: Standard 50M row import
+  orders: # dataset_id
+    destination: "TEST.ORDERS" # file: "s3://bucket/processed/orders/"
+    primary_key: []
+
+    steps:
+      - id: extract_{job_id}.{dataset_id}_data
+        call: extract
+        with:
+          object: "s3://bucket/path/orders_{partition_date}.csv"
+
+      - id: normalize_{dataset_id}_data
+        call: transform
+        inputs:
+          extract_orders: "{steps.extract_{job_id}.{dataset_id}_data.artifact_folder}"
+        with:
+          steps:
+            # Sub-step 1: SQL transform referencing Extract Step 1
+            - id: clean_orders
+              type: sql
+              sources:
+                raw_orders: extract_orders
+              cte:
+                - name: formatted_orders
+                  sql:
+                  from: raw_orders
+                  select: ["order_id", "user_id", "amount"]
+
+            # Sub-step 2: Custom Python transform referencing Extract Step 2
+            - id: enrich_users
+              type: custom
+              sources:
+                raw_users: extract_users
+              module_path: "my_project.processors.users.clean_user_data"
+              params:
+                filter_inactive: true
+
+            # Sub-step 3: SQL transform joining the outputs of Sub-step 1 and Sub-step 2
+            - id: join_orders_and_users
+              type: sql
+              sources:
+                # References internal intermediate outputs from previous sub-steps!
+                clean_orders_data: clean_orders
+                enrich_users_data: enrich_users
+              cte:
+                - name: final_dataset
+                  from: clean_orders_data
+                  join:
+                    - table: enrich_users_data
+                      on: "clean_orders_data.user_id = enrich_users_data.id"
+                      type: inner
+
+
+      - id: stage_{dataset_id}_data
+        call:
+        with:
+          object: cleaned_orders
+
+      - id: promote_{dataset_id}_data
+        call: publish
+
+  inventory: # dataset_id
+    destination: "TEST.INVENTORY" # file: "s3://bucket/processed/orders/"
+    primary_key: []
+
+    steps:
+      - call: extract
+        with:
+          object: "s3://bucket/path/inventory_{partition_date}.zip"
+          glob: "*.csv"
+
+      - call: write
+      - call: publish

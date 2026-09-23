@@ -2,8 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.core.stages.contracts.stage import ExecutionStage
-from src.core.stages.enums import Stage
+from src.core.stages.contracts.stage import ExecutionStage, Stage
 
 
 class MockStage(ExecutionStage):

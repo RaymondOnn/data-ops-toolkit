@@ -1,7 +1,17 @@
 # JOB-LEVEL CONFIG (Applies to all datasets in this job)
 job:
   name: daily_ingestion_sync # job_id
-  raw:
+  source: # table name / file name /
+    service_ref: "some_folder" # for credential lookup
+
+
+  target:
+    service_ref: "clickhouse"
+    column_case_type: upper
+    column_case_style: snake
+
+
+  extract:
     num_workers: 16
   archive:
     enable_archival: true
@@ -10,27 +20,33 @@ job:
 datasets:
   # DATASET 1: Standard 50M row import
   orders: # dataset_id
+
     mode: delta # Loading Strategy: delta (update_key) | append | truncate | cdc | backfill
-    partition_on:
+    update_key:
+    primary_key: []
+    meta_columns:
+      run_id: "_run_id"
+      run_date: "_partition"
+      source: "_source"  # source identifier / file path
+      loaded_at: "_loaded_at_ts"
+
     steps:
       - id: extract_orders_data
         stage: extract
-        resource: # table name / file name /
-          object: "s3://bucket/path/orders_{{partition_date}}.csv"
-          service_ref: "some_folder" # for credential lookup
+        object: "s3://bucket/path/orders_{{partition_date}}.csv"
 
-          # ---- FILE ----
-          glob: "s3://bucket/path/orders_{{partition_date}}.csv"
-          header: # true | false
-          skip_blank_lines:
-          encoding:
+        # ---- FILE ----
+        glob: "s3://bucket/path/orders_{{partition_date}}.csv"
+        header: # true | false
+        skip_blank_lines:
+        encoding:
 
-          # ---- API ----
-          endpoint:
-          headers:
-          params:
-            include_deleted: false
-            region: "EMEA"
+        # ---- API ----
+        endpoint:
+        headers:
+        params:
+          include_deleted: false
+          region: "EMEA"
 
         sql:
         select: []
@@ -39,7 +55,7 @@ datasets:
         batch_size: 100000
         null_if:
         flatten:
-        columns: # schema override
+        column_types: # schema override
           col1: dtype1
           col2: dtype2
 
@@ -65,7 +81,6 @@ datasets:
 
 
         file_pattern: "s3://bucket/path/orders_{{partition_date}}.csv"
-
       - id: normalize
         stage: transform
         steps:
@@ -105,37 +120,25 @@ datasets:
                   type: inner
                 select: ["*"]
 
-      - id: load
+      - id: stage_orders_data
         stage: load
         object: "TEST.ORDERS" # file: "s3://bucket/processed/orders/"
-        service_ref: "clickhouse"
-        add_new_columns: # true / false
-        hooks:
-          pre:
-            - id: ensure_table_exists
-              type: copy
-              from:
-                service_ref: mock_data_folder
-                location: sample_orders.csv
+        source:
 
+        add_new_columns: true # default to false
+        create_table_ddl:
+        write_strategy: skeleton_clone        # Creates working_table & loads data
+        working_table: TEST.ORDERS_CLONE_V1   # Isolated workspace/clone
+        use_bulk: true  # batched INSERTS if false
+        column_types:
 
-      - id: publish
+      - id: promote_to_prod
         stage: publish
-        object:
-        primary_key: []
-        delete_missing: # hard | soft
-        hooks:
-          post:
-            - id: notify_team
-              type: notify
-              channels:
-                - email: "team@example.com"
-
-            - id: cleanup_files
-              type: delete
-              location:
-              recursive: true
-              on_failure: warn
+        staging_location: "{steps.stage_orders_data.working_table}"
+        target: "{dataset.target}"
+        promote_to_target: true
+        merge_strategy: # delete_insert / merge_upsert
+        soft_delete_missing: # hard | soft
 
 
     # audit:

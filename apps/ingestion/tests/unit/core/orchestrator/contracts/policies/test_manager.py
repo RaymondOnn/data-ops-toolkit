@@ -4,10 +4,10 @@ import pytest
 import ray
 
 from src.core.models.task import ExecutionStatus, TaskSignal
+from src.core.orchestrator.common.task.types import TaskMetadata
 from src.core.orchestrator.contracts.policies.manager import (
     MaintenancePolicy,
 )
-from src.core.orchestrator.enums import TaskMetadata
 
 
 class MockMaintenancePolicy(MaintenancePolicy):

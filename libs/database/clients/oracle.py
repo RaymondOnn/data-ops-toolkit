@@ -7,16 +7,14 @@ from oracledb import Connection
 
 from libs.database.clients.base import DBClient
 
-from .factory import DatabaseFactory
-
 LOG = logging.getLogger(__name__)
 
 # Note: Running on Thin mode; no instant client required
 
 
-@DatabaseFactory.register
+@DBClient.register(key="oracle")
 class OracleClient(DBClient):
-    type: str = "oracle"
+    db_type = "oracle"
 
     def __init__(self, **config: Any) -> None:
         super().__init__(**config)

@@ -1,6 +1,7 @@
 """Filesystem-based service layer for storage backends."""
 
 import time
+from collections.abc import Generator
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -8,10 +9,9 @@ from typing import Any
 import polars as pl
 from libs.auth.secret import Secret
 from libs.clients.base import ClientCantConnect
-from libs.database.sql import SQLContext
 from libs.file import (
+    FileSkill,
     FileSystemConnector,
-    FileSystemSkills,
     filter_files,
     get_file_ext,
 )
@@ -20,11 +20,10 @@ from libs.utils.dict import find_keys_by_pattern, set_nested_key
 from loguru import logger
 from msgspec import Struct, field
 
-from src.services.base import Archive, Service, Sink, Source
+from src.services.base import Service
+from src.services.contracts import Archive, Sink, Source
 from src.services.health.monitor import monitor
 from src.utils.exceptions import TryAgainLater
-
-from .factory import ServiceFactory
 
 LOG = logger
 MIN_BLOCK = 50 * 1024 * 1024  # 50MB
@@ -37,14 +36,14 @@ breaker = CircuitBreaker(
 )
 
 
-@ServiceFactory.register(source_type="file")
+@Service.register()
 class FileService(Service):
     """Base storage service with filesystem client."""
 
     def __init__(
         self,
         url: str,
-        skills: set[FileSystemSkills],
+        skills: set[FileSkill] | None = None,
         name: str | None = None,
         **config,
     ):
@@ -76,7 +75,6 @@ class FileService(Service):
     @property
     def connector(self) -> FileSystemConnector:
         """Lazy-initialized filesystem client."""
-        skills = {FileSystemSkills(skill_name) for skill_name in self.skills}
         resolved_config = {}
         for path, value in find_keys_by_pattern(
             self._config, pattern="secret|password", ignore_case=True
@@ -86,7 +84,7 @@ class FileService(Service):
                     self._config, path=path, new_value=value.resolve(url_encode=True)
                 )
 
-        return FileSystemConnector(url=self.url, skills=skills, **resolved_config)
+        return FileSystemConnector(url=self.url, **resolved_config)
 
     @property
     def fs(self):
@@ -140,33 +138,157 @@ class FileService(Service):
             return 0
 
 
-@ServiceFactory.register(source_type="file", role="source")
+@Service.register()
 class FileSource(FileService, Source):
     """File-based data source."""
 
     def resolve_identity(
         self, target: str, items: list[str] | None = None, **kwargs
     ) -> str:
+        """Resolve human-readable resource identity label for file sources.
+
+        Rules & Formatting Cases:
+        1. Single File:
+            Format: "<filepath>"
+            Example: "/data/orders.csv"
+
+        2. Archive File:
+            - Single file inside: "<archive_path>::<inner_filepath>"
+            - Multiple files/pattern: "<archive_path>::<inner_pattern_or_glob>"
+            Examples:
+            - "/data/exports.zip::orders_jan.csv"
+            - "/data/exports.zip::*.parquet"
+
+        3. Data Folder:
+            - Single file in folder: "<folder_path>/<single_filename>"
+            - Pattern or glob: "<folder_path>/<glob_pattern>"
+            - Multiple files fallback: "<folder_path>/*"
+            Examples:
+            - "/data/inbox/order_123.json"
+            - "/data/inbox/*.parquet"
+
+        Args:
+            target: Target directory, file path, or archive path.
+            items: List of resolved file paths matching the work unit.
+            **kwargs: Additional parameters, such as 'glob'.
+
+        Returns:
+            str: Formatted string representation of the source resource identity.
+        """
         items = items or []
         glob = kwargs.get("glob")
 
-        if glob:
-            # Archive with internal pattern
-            return f"📦 {Path(target).name} → {glob}"
+        # Clean protocol prefixes if present
+        clean_target = target.replace("zip://", "").replace("archive://", "")
+
+        # --- CASE 1: ARCHIVE FILE ---
+        if "!!" in clean_target or self.connector.is_supported_archive(clean_target):
+            if "!!" in clean_target:
+                archive_path, inner_spec = clean_target.split("!!", 1)
+            else:
+                archive_path, inner_spec = clean_target, (glob or "*")
+
+            # Single file inside archive
+            if len(items) == 1:
+                inner_name = Path(items[0].split("!!")[-1]).name
+                return f"{archive_path}::{inner_name}"
+
+            return f"{archive_path}::{inner_spec}"
+
+        # --- CASE 2: DIRECT SINGLE FILE ---
+        if (
+            len(items) == 1
+            and not glob
+            and self.connector.is_file(self.connector.resolve(items[0]))
+        ):
+            return f"{items[0]}"
+
+        # --- CASE 3: DATA FOLDER ---
+        folder_path = clean_target.rstrip("/")
         if len(items) == 1:
-            # Single file
-            return f"📄 {Path(items[0]).name}"
-        if len(items) > 1:
-            # Multiple files
-            return f"📁 {Path(target).name} ({len(items)} files)"
-        # Fallback
-        return f"📂 {Path(target).name or target}"
+            file_name = Path(items[0]).name
+            return f"{folder_path}/{file_name}"
+
+        if glob:
+            pattern = glob.lstrip("/")
+            return f"{folder_path}/{pattern}"
+
+        return f"{folder_path}/*"
+
+    def _list_files_metadata(
+        self, target: str, sql_where: str | None = None
+    ) -> pl.DataFrame:
+        """Collect file metadata into a Polars DataFrame.
+
+        Possible fields available in fsspec info() dictionary depending on filesystem:
+        - name / path (str): Full path or key of the object (e.g., "bucket/path/to/file.parquet").
+        - size (int): File size in bytes.
+        - type (str): Entry type ("file" or "directory").
+        - mtime / created / updated (float|datetime):
+            * mtime: Modified time epoch float (Local POSIX, S3, GCS).
+            * created: Creation timestamp epoch float.
+            * LastModified / updated: ISO/datetime object (Cloud stores like S3/GCS).
+        - ETag / md5 / check_name (str): Content hash identifier.
+        - storageClass (str): Object storage tier (e.g., "STANDARD", "GLACIER" on S3/GCS).
+        - islink (bool): True if target is a symbolic link (POSIX).
+
+        Args:
+            target: Target filesystem path or directory.
+
+        Returns:
+            pl.DataFrame: DataFrame containing standardized path, name, size, and last_modified columns.
+        """
+        resolved_target = self.connector.resolve(target)
+
+        # 1. Fetch metadata records
+        if self.fs.fs.isfile(resolved_target):
+            info = self.fs.fs.info(resolved_target)
+            records = [
+                {
+                    "path": resolved_target,
+                    "name": Path(resolved_target).name,
+                    "last_modified": info.get("mtime", 0.0),
+                    "size": info.get("size", 0),
+                }
+            ]
+        else:
+            all_paths = self.connector.find(resolved_target)
+            records = []
+            for path in all_paths:
+                info = self.fs.fs.info(path)
+                records.append(
+                    {
+                        "path": path,
+                        "name": Path(path).name,
+                        "last_modified": info.get("mtime", 0.0),
+                        "size": info.get("size", 0),
+                    }
+                )
+
+        if not records:
+            return pl.DataFrame(
+                schema={
+                    "path": pl.String,
+                    "name": pl.String,
+                    "last_modified": pl.Float64,
+                    "size": pl.Int64,
+                }
+            )
+
+        df = pl.DataFrame(records)
+
+        # 2. Apply SQL WHERE filtering directly on the Polars DataFrame
+        if sql_where:
+            # SQL supports LIKE ('%2024-01-02%') or REGEXP_MATCHES(name, 'pattern')
+            ctx = pl.SQLContext(files_meta=df)
+            df = ctx.execute(f"SELECT * FROM files_meta WHERE {sql_where}").collect()
+
+        return df
 
     @monitor(breaker)
     def parallelize(
         self,
         target: str,
-        sql_context: SQLContext,
         num_workers: int | None = None,
         filter_condition: str | None = None,
         **kwargs,
@@ -183,88 +305,64 @@ class FileSource(FileService, Source):
             list[dict]: A list of work unit definitions.
         """
         resolved_target = self.connector.resolve(target)
+        sql_where = kwargs.get("sql_where")
         # temp_folder = kwargs.get("temp_folder")
         # cleanup = kwargs.get("cleanup", True)
         # temp_dir = None
 
-        # try:
-        # 1. Use ArchiveContext classmethod for clean format detection
+        # --- CASE 1: ARCHIVE FILES ---
         if self.connector.is_supported_archive(resolved_target):
-            # 2. Inspect contents using ArchiveContext as a context manager
-            with self.connector.archive(resolved_target) as archive:
+            with self.connector.archive.open(resolved_target) as archive:
                 archive_files = archive.list_contents()
 
-            # Construct virtual path pointers
-            files_with_sizes = [
-                (f"zip://{resolved_target}!!{row['filename']}", row["size"])
+            # Convert archive entries to Polars DataFrame for metadata filtering
+            records = [
+                {
+                    "path": f"zip://{resolved_target}!!{row['filename']}",
+                    "name": Path(row["filename"]).name,
+                    "size": row["size"],
+                    "last_modified": row.get("mtime", 0.0),
+                }
                 for row in archive_files
             ]
+            df_meta = pl.DataFrame(records)
 
+            # Apply SQL/Glob conditions
             if filter_condition:
-                files_with_sizes = [
-                    (p, s)
-                    for p, s in files_with_sizes
-                    if Path(p.split("!!")[-1]).match(filter_condition)
-                ]
+                df_meta = df_meta.filter(
+                    pl.col("name").str.contains(filter_condition.replace("*", ".*"))
+                )
 
-            files = [p for p, _ in files_with_sizes]
-            total_bytes = sum(s for _, s in files_with_sizes)
+            if sql_where:
+                ctx = pl.SQLContext(files_meta=df_meta)
+                df_meta = ctx.execute(
+                    f"SELECT * FROM files_meta WHERE {sql_where}"
+                ).collect()
+
+            files = df_meta["path"].to_list()
+            total_bytes = df_meta["size"].sum() if not df_meta.is_empty() else 0
+
+        # --- CASE 2: DIRECT FILESYSTEM PATHS ---
         else:
-            if self.fs.fs.isfile(resolved_target):
-                # Single file
-                files = [resolved_target]
-                LOG.info(f"Single file mode: {resolved_target}")
-            else:
-                # Directory
-                all_files = list(self.connector.find(resolved_target))
-                files = filter_files(all_files, filter_condition, target)
-                LOG.info(f"Directory mode: found {len(files)} files in {target}")
+            df_meta = self._list_files_metadata(target, sql_where=sql_where)
 
-            # Metadata-driven scaling
-            total_bytes = sum(self.fs.fs.size(f) for f in files)
+            # Apply traditional glob filter if supplied
+            if filter_condition and not df_meta.is_empty():
+                regex_glob = filter_condition.replace(".", r"\.").replace("*", ".*")
+                df_meta = df_meta.filter(pl.col("path").str.contains(regex_glob))
+
+            files = df_meta["path"].to_list()
+            total_bytes = df_meta["size"].sum() if not df_meta.is_empty() else 0
 
         if not files:
             raise TryAgainLater(
-                reason=f"Resource not found: {target} (pattern: {filter_condition})",
+                reason=f"Resource not found or empty: {target}",
                 service_name=self.name,
                 wait_seconds=self._config.get("missing_file_retry_sec", 600),
             )
 
-        # Detect format from first file (for splittable check)
-        # ext = Path(files[0]).suffix.lstrip(".").lower()
-        # handler = FormatFactory.get(ext, self.fs, self.fs.options)
-
-        # Coalesce small files (Setup cost > Processing cost)
-        # if total_bytes < MIN_BYTES_PER_WORKER:
-        #     LOG.info(f"Coalescing small files ({total_bytes/1024:.1f}KB)")
-        #     units = [{"files": files}]
-
-        num_workers = max(1, num_workers or (total_bytes // MIN_BYTES_PER_WORKER))
-
-        # A few large files vs many workers
-        # if len(files) < num_workers and handler.splittable:
-        #     LOG.debug(f"Intra-file slicing with {num_workers} workers")
-        #     units = self._slice_files(files, num_workers, handler)
-
-        # Default: Greedy File-level sharding
-        # LOG.debug(f"File-level greedy sharding with {active} workers")
+        num_workers = int(max(1, num_workers or (total_bytes // MIN_BYTES_PER_WORKER)))
         return self._balance_workload(files, min(num_workers, len(files)))
-
-        # sql_configs = {
-        #     "sql_context": sql_context
-        #     # "skip_blank_lines": kwargs.get("skip_blank_lines"),
-        #     # "header": kwargs.get("header"),
-        # }
-        # for unit in units:
-        #     unit.update(sql_configs)
-
-        # return units
-
-        # finally:
-        #     if temp_dir and cleanup:
-        #         import shutil
-
-        #         shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _balance_workload(self, files: list[str], num_workers: int) -> list[dict]:
         """Distributes files across workers to balance the total byte-load.
@@ -309,8 +407,21 @@ class FileSource(FileService, Source):
         return [{"files": b.files} for b in buckets if b.files]
 
     @monitor(breaker)
-    def pull(self, unit: dict | list | str, **kwargs: Any) -> pl.DataFrame:
-        """Fetch data for a work unit."""
+    def pull(
+        self, unit: dict | list | str, **kwargs: Any
+    ) -> Generator[pl.DataFrame, None, None]:
+        """Stream data for a work unit as a single-chunk generator.
+
+        File sources must fully materialise the LazyFrame (no native row-level
+        streaming exists for filesystem reads), but yield it as one chunk so the
+        caller can treat all Source implementations uniformly as generators.
+
+        Args:
+            unit: A file path string, list of paths, or a dict with a ``files`` key.
+
+        Yields:
+            pl.DataFrame: The fully collected dataset for this work unit.
+        """
         # Normalize incoming unit structures up front
         unit_dict = unit if isinstance(unit, dict) else {}
         paths = (
@@ -324,18 +435,17 @@ class FileSource(FileService, Source):
             unit_dict.get("temp_folder") if isinstance(unit_dict, dict) else None
         )
 
-        # 2. Delegate path formatting, archive staging, and query evaluation to FileReader
+        # Delegate path formatting, archive staging, and query evaluation to FileReader
         lazy_frame = self.connector.data.extract(
             source=paths,
             sql_context=sql_context,
             temp_folder=temp_folder,
         )
 
-        # 3. Materialize final collected result into an eager Polars DataFrame
-        return lazy_frame.collect()
+        yield lazy_frame.collect()
 
 
-@ServiceFactory.register(source_type="file", role="sink")
+@Service.register()
 class FileSink(FileService, Sink):
     """File-based data sink."""
 
@@ -345,8 +455,7 @@ class FileSink(FileService, Sink):
         source_dir: Path,
         target: str,
         expected_count: int,
-        file_ext: str = "parquet",
-        audit_values: dict[str, Any] | None = None,
+        file_format: str = "parquet",
         **kwargs,
     ) -> tuple[str, int]:
         """Phase 1: Write dataset into a temporary staging location."""
@@ -355,7 +464,7 @@ class FileSink(FileService, Sink):
         resolved_staging = self.connector.resolve(staging_dir)
 
         LOG.info(
-            f"Phase 1: Staging data from {resolved_source} -> {resolved_staging} (Target Format: {file_ext})"
+            f"Phase 1: Staging data from {resolved_source} -> {resolved_staging} (Target Format: {file_format})"
         )
 
         # 1. Discover source files
@@ -365,7 +474,7 @@ class FileSink(FileService, Sink):
 
         # Detect source format dynamically from the first file
         src_format = get_file_ext(source_files[0])
-        tgt_format = file_ext.lower().lstrip(".")
+        tgt_format = file_format.lower().lstrip(".")
 
         # 2. Same Format: Perform direct storage copy (Zero-copy pass-through)
         if src_format == tgt_format:
@@ -379,12 +488,11 @@ class FileSink(FileService, Sink):
             LOG.info(
                 f"Format mismatch detected ({src_format} -> {tgt_format}). Executing DuckDB format conversion."
             )
-            file_reader = self.connector.skills[FileSystemSkills.FILE]
 
             # Destination path inside staging directory
             dst_file = f"{resolved_staging}/data_0.{tgt_format}"
 
-            file_reader._convert_format(
+            self.connector.data._convert_format(
                 source_path=resolved_source,
                 target_path=dst_file,
                 source_format=src_format,
@@ -408,20 +516,22 @@ class FileSink(FileService, Sink):
     @monitor(breaker)
     def promote(
         self,
-        staging: str,
-        target: str,
+        source: str,
+        destination: str,
         expected_count: int,
         partition_on: str | None = None,
         partition_value: str | None = None,
     ) -> None:
         """Phase 2: Promote staged directory contents into production location atomically."""
-        resolved_staging = self.connector.resolve(staging)
+        resolved_staging = self.connector.resolve(source)
 
         # 1. Resolve Target Destination & Hive Partition Pathing
         if partition_on and partition_value:
-            final_target_path = f"{target.rstrip('/')}/{partition_on}={partition_value}"
+            final_target_path = (
+                f"{destination.rstrip('/')}/{partition_on}={partition_value}"
+            )
         else:
-            final_target_path = target
+            final_target_path = destination
 
         resolved_target = self.connector.resolve(final_target_path)
 
@@ -448,7 +558,7 @@ class FileSink(FileService, Sink):
             # 3. Destination Preparation & Target Cleanup (Atomic Overwrite)
             if self.connector.exists(resolved_target):
                 LOG.info(
-                    f"Target destination exists. Cleaning target location prior to swap: {resolved_target}"
+                    f"Target destination exists. Cleaning destination location prior to swap: {resolved_target}"
                 )
                 self.connector.rm(resolved_target, recursive=True)
 
@@ -462,7 +572,7 @@ class FileSink(FileService, Sink):
         finally:
             # 5. Guaranteed Staging Cleanup
             if self.connector.exists(resolved_staging):
-                LOG.debug(f"Cleaning residual staging path: {resolved_staging}")
+                LOG.debug(f"Cleaning residual source path: {resolved_staging}")
                 self.connector.rm(resolved_staging, recursive=True)
 
     @monitor(breaker)
@@ -478,7 +588,7 @@ class FileSink(FileService, Sink):
             LOG.info(f"Dropped: {target}")
 
 
-@ServiceFactory.register(source_type="file", role="archive")
+@Service.register()
 class FileArchive(FileService, Archive):
     """Data archival service."""
 

@@ -7,7 +7,7 @@ This document defines the authoritative lifecycle of an ingestion task within th
 To ensure 100% reliability and observability, the engine synchronizes state across four layers:
 
 1.  **The Physical Layer (`active/`)**: The source of truth on disk. Contains `manifest.json` (progress) and `config.json` (parameters).
-2.  **The Hot Cache (`StateStore`)**: An in-memory RLock-protected registry in the Orchestrator for sub-millisecond scheduling decisions.
+2.  **The Hot Cache (`StateHub`)**: An in-memory RLock-protected registry in the Orchestrator for sub-millisecond scheduling decisions.
 3.  **The Event Bus (`signals/`)**: Zero-byte files (`.sync`, `.done`, `.fail`) that facilitate asynchronous IPC between workers and the controller.
 4.  **The Telemetry Tier (`ClickHouse`)**: Persistent SQL-based audit logs for long-term reporting and dashboarding.
 
@@ -32,7 +32,7 @@ The `Orchestrator` generates a deterministic `run_id` and creates the physical w
 
 ### 3.1 Resource Costing
 The `Compute` manager assigns a `WorkloadClass` to the stage:
-- **EXTRACT/LOAD**: `IO_INTENSIVE` (High IO slots, low CPU).
+- **EXTRACT/WRITE**: `IO_INTENSIVE` (High IO slots, low CPU).
 - **TRANSFORM**: `CPU_INTENSIVE` (1.0 CPU, high Memory).
 
 ### 3.2 The Admission Heuristic
@@ -79,7 +79,7 @@ The Orchestrator's `SignalScanner` detects the file:
 
 ### 6.1 Zombie Recovery (ADR 010)
 If a worker process is killed (`SIGKILL`) and fails to drop a `.fail` signal:
-1.  The `MaintenancePolicy` compares `StateStore` (RUNNING) tasks against Ray's `active_tasks`.
+1.  The `MaintenancePolicy` compares `StateHub` (RUNNING) tasks against Ray's `active_tasks`.
 2.  Discrepancies are declared "Zombies".
 3.  The Janitor moves the task back to `active/`, clears the `RUNNING` status, and re-queues it for execution.
 
@@ -87,6 +87,19 @@ If a worker process is killed (`SIGKILL`) and fails to drop a `.fail` signal:
 If a service (e.g., Snowflake) is down:
 1.  The first worker to fail "trips" the global breaker in the shared cache.
 2.  The Orchestrator detects the `BLOCKED` status and moves pending tasks to the `HOLD/` vault.
+
+### 6.3 Task Retries (Exponential Backoff)
+If a transient error (network blip, file lock) prevents a step from completing:
+1.  The `Executor` identifies a retriable exception and moves the task to `RETRY` state.
+2.  A `.retrying` marker is written to disk containing the `retry_at` timestamp.
+3.  Backoff uses $2^{n} \times 30s$, capped at 10 minutes.
+4.  **Midnight Kill**: If the next retry falls after 23:59:59, the task is automatically transitioned to `FAILED`.
+
+### 6.4 Task Expiry (TTL Management)
+If a triggered task has been waiting in the queue past its TTL:
+1.  `ExpiredState` checks the `EXPIRATION_THRESHOLD` in the metadata database.
+2.  **Sunk Cost Protection**: Tasks with a completed `extract` step are **not** expired — the expensive data acquisition work is preserved.
+3.  Stale tasks are moved to `EXPIRED` status and their local workspace is purged by the `Janitor`.
 
 ---
 

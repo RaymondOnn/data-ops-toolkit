@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from src.core.contexts.execution import ExecutionContext
-from src.core.models.task import ExecutionStatus
+from src.core.models.task.status import ExecutionStatus
 from src.utils.constants import CACHE_TASK_NAMESPACE
 
 if TYPE_CHECKING:
@@ -103,8 +103,7 @@ class TriggerRuntime:
         2. Database registry (final state)
         3. Default to SUCCESS (cleanup)
         """
-        from src.core.models.task.enums import TaskIdentity
-        from src.core.orchestrator.enums import TaskRef
+        from src.core.models.task.enums import TaskIdentity, TaskRef
 
         identity = TaskIdentity(
             job_id=job_id,

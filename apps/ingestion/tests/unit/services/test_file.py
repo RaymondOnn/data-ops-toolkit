@@ -2,7 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pytest
-from libs.file import FileSystemSkills
+from libs.file import FileSkill
 
 from src.services.file import (
     FileSink,
@@ -20,7 +20,7 @@ class TestStorageServiceService:
         return StorageServiceService(
             name="test-fs",
             url="s3://bucket",
-            skills={FileSystemSkills.FILE},
+            skills={FileSkill.FILE},
             storage_options={},
         )
 
@@ -63,7 +63,7 @@ class TestStorageSource:
         return FileSource(
             name="source-fs",
             url="s3://source",
-            skills={FileSystemSkills.FILE},
+            skills={FileSkill.FILE},
             storage_options={},
         )
 
@@ -152,7 +152,7 @@ class TestStorageSink:
         return FileSink(
             name="sink-fs",
             url="s3://sink",
-            skills={FileSystemSkills.FILE},
+            skills={FileSkill.FILE},
             storage_options={},
         )
 

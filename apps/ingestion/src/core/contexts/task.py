@@ -7,8 +7,8 @@ import msgspec
 from loguru import logger
 from msgspec import Struct, field
 
-from src.core.contexts.step import StepConfig
-from src.core.stages.enums import Stage
+from src.core.contexts.step import StepContext
+from src.core.stages.types import Stage
 from src.extras.flags import FeatureFlags
 from src.extras.hooks.enums import StageHooks
 from src.utils.constants import CONFIG_FILENAME
@@ -26,7 +26,7 @@ class TaskContext(Struct, kw_only=True):
     """Complete pipeline configuration for a task run."""
 
     # Ordered list of steps for this dataset (new canonical structure)
-    steps: list[StepConfig] = field(default_factory=list)
+    steps: list[StepContext] = field(default_factory=list)
     hooks: dict[str, StageHooks] = field(default_factory=dict)
 
     # Identity
@@ -39,8 +39,9 @@ class TaskContext(Struct, kw_only=True):
     from_step: str = "start"  # step id to start from (inclusive)
     to_step: str = ""  # step id to stop at (inclusive)
     mode: str | None = None  # append | incremental | truncate | CDC
-    partition_on: list[str] = field(default_factory=list)
+    update_key: str | None = None
     primary_keys: list[str] = field(default_factory=list)
+    is_backfill: bool = False
 
     # Paths
     output_path: str = ""
@@ -57,6 +58,13 @@ class TaskContext(Struct, kw_only=True):
 
     def __post_init__(self) -> None:
         """Validates and normalizes execution boundaries after initialization."""
+        # 0. Ensure pipeline has steps defined
+        # if not self.steps:
+        #     raise ValueError(
+        #         f"TaskContext for dataset '{self.dataset_id}' in job '{self.job_id}' "
+        #         f"has no steps configured. Pipeline execution cannot proceed."
+        #     )
+
         all_ids = self.get_step_ids()
 
         # 1. Default empty boundaries
@@ -82,9 +90,15 @@ class TaskContext(Struct, kw_only=True):
                 f"occurs after to_step '{self.to_step}'."
             )
 
-    def get_step(self, step_id: str) -> "StepConfig | None":
+    def get_step(self, step_id: str) -> "StepContext":
         """Look up a step by its id."""
-        return next((s for s in self.steps if s.id == step_id), None)
+        if step_id == "start":
+            return StepContext(id="start", stage="start")
+
+        step = next((s for s in self.steps if s.id == step_id), None)
+        if not step:
+            raise ValueError(f"Step '{step_id}' not found in TaskContext.")
+        return step
 
     def get_step_ids(
         self,
@@ -122,7 +136,7 @@ class TaskContext(Struct, kw_only=True):
 
         return all_ids[start_idx:end_idx]
 
-    # def get_active_steps(self) -> list[StepConfig]:
+    # def get_active_steps(self) -> list[StepContext]:
     #     """Return steps within from_step..to_step boundaries (inclusive).
 
     #     Falls back to all steps if no boundaries are set.
@@ -147,7 +161,7 @@ class TaskContext(Struct, kw_only=True):
     #             return idx
     #     return None
 
-    # def get_prev_step(self, step_id: str) -> StepConfig | None:
+    # def get_prev_step(self, step_id: str) -> StepContext | None:
     #     """Get the step executing immediately before the current step_id."""
     #     idx = self.get_step_index(step_id)
     #     if idx is not None and idx > 0:

@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from src.core.models.task import ExecutionStatus, Task
-from src.core.stages.enums import Stage
+from src.core.stages.types import Stage
 
 
 def test_janitor_recovery_dry_run(runtime, tmp_path, caplog):

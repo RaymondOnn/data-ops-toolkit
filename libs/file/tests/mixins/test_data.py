@@ -4,10 +4,10 @@ from unittest.mock import MagicMock, patch
 import polars as pl
 import pytest
 from fsspec import AbstractFileSystem
-from libs.file.mixins.data import FileMixin
+from libs.file.skills.data import FileReader
 
 
-class MockDataClient(FileMixin):
+class MockDataClient(FileReader):
     """Concrete class to test the Data Ingestion Mixin."""
 
     def __init__(self, fs):
@@ -50,7 +50,7 @@ class TestFileMixin:
         mock_fs.size.return_value = 0
         assert client.is_file_readable(mock_fs, "empty.csv") is False
 
-    @patch("libs.file.mixins.data.fsspec.filesystem")
+    @patch("libs.file.skills.data.fsspec.filesystem")
     def test_mount_archive_fs_zip(self, mock_fsspec, client, mock_fs):
         """
         GIVEN a path to a .zip archive
@@ -107,7 +107,7 @@ class TestFileMixin:
         _, encoding = client._get_encoded_stream(mock_fs, "test.txt")
         assert encoding == "latin-1"
 
-    @patch("libs.file.mixins.data.FormatFactory.get_handler")
+    @patch("libs.file.skills.data.FormatFactory.get_handler")
     def test_fetch_df_integration(self, mock_get_handler, client, mock_fs):
         """
         GIVEN a list of CSV files

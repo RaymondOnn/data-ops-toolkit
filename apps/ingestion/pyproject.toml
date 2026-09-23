@@ -12,6 +12,8 @@ dependencies = [
     "storage", # Depends on libs/storage
     "queue", # Depends on libs/queue
     "network", # Depends on libs/network
+    "alerts", # Depends on libs/network
+    "metaclasses", # Depends on libs/network
     "ray[default]<=2.48.0", # 2.39.0
     "polars",
     "pandas", # Required by Ray Data
@@ -22,7 +24,6 @@ dependencies = [
     "filelock",
     "dynaconf",
     "apscheduler",
-    "simpleeval",
     "numpy",
 ]
 requires-python = ">=3.11"

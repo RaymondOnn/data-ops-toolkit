@@ -26,7 +26,7 @@ def test_workspace_paths(workspace, exec_ctx):
     """
     expected_run = (
         exec_ctx.workspace_dir
-        / "active"
+        / "ACTIVE"
         / "unit_job:unit_ds:2024-01-01"
         / "run_test_001"
     )

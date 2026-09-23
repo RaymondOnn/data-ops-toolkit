@@ -5,12 +5,13 @@ from pathlib import Path
 from typing import Any
 
 from libs.cloud.aws import AWSClient, AWSConfig
-from libs.file.base import FileSystemClient
+from libs.file.clients.base import FileSystemClient
 from s3fs import S3FileSystem
 
 LOG = logging.getLogger(__name__)
 
 
+@FileSystemClient.register("s3")
 class S3Client(FileSystemClient):
     """
     S3 client for AWS, MinIO, or LocalStack.

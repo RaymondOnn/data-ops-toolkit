@@ -67,7 +67,7 @@ class CircuitBreaker:
         if self.state != BreakerState.OPEN:
             return
 
-        elapsed = time.time() - (self.last_failure or 0)
+        elapsed = time.monotonic() - (self.last_failure or 0)
         if elapsed >= self.timeout:
             self.state = BreakerState.HALF_OPEN
         else:
@@ -85,4 +85,4 @@ class CircuitBreaker:
 
         if self.state == BreakerState.HALF_OPEN or self.failures >= self.failure_limit:
             self.state = BreakerState.OPEN
-            self.last_failure = time.time()
+            self.last_failure = time.monotonic()

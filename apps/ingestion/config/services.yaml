@@ -30,8 +30,8 @@ x-s3-source-base: &s3_source_base
   skills: [file]
 
 x-s3-archive-base: &s3_archive_base
-  key: "standard_archive"
-  skills: [archive]
+  name: "s3_archive"
+  # skills: [archive]
   type: file
   storage_options:
     s3_storage_class: "DEEP_ARCHIVE"
@@ -44,10 +44,9 @@ x-s3-cas-base: &s3_cas_base # key: "cas_archive"
 
 local:
   mock_data_folder:
-    # key: flat_file
     type: file
     url: ./mock_data
-    skills: [file]
+    skills: [data]
   clickhouse: # Now pointing to a Docker container
     type: database
     db_type: clickhouse
@@ -56,6 +55,7 @@ local:
     user: default
     password: secret://CLICKHOUSE_PASSWORD
     secure: false
+
 
   s3_source:
     <<: [*s3_source_base, *localstack_base]
@@ -70,9 +70,6 @@ local:
     url: s3://cas-vault
 
 dev:
-  file:
-    key: flat_file
-    type: file
   clickhouse: # Now pointing to a Docker container
     type: database
     db_type: clickhouse

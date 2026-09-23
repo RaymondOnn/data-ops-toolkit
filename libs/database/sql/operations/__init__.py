@@ -1,13 +1,16 @@
 # Importing submodules causes all @register_compile_func decorators to run
 from . import analysis, core, merge, metadata
-from .base import COMPILE_FUNCTIONS, SQLOperation, register_compile_func
+from .base import (
+    SQLOperation,
+    SQLOperationType,
+)
 
 __all__ = [
-    "COMPILE_FUNCTIONS",
     "SQLOperation",
-    "register_compile_func",
+    "SQLOperationType",
     "analysis",
     "core",
     "merge",
     "metadata",
+    "register_compile_func",
 ]

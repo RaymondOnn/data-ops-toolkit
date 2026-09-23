@@ -1,4 +1,6 @@
 import shutil
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from libs.database.clients.duckdb import DuckDBClient
 from libs.database.sql import SQLCompiler, SQLContext
@@ -7,27 +9,33 @@ from loguru import logger
 from src.core.stages.transform.execution.base import (
     StandardTransformer,
     TransformContext,
+    Transformer,
 )
-from src.core.stages.transform.execution.factory import TransformFactory
+
+if TYPE_CHECKING:
+    from src.core.stages.transform.config import TransformStep
 
 LOG = logger
 
 
-@TransformFactory.register("sql")
+@Transformer.register("sql")
 class SQLTransformer(StandardTransformer):
     """
     A simple wrapper for DuckDB SQL transformations. This processor takes a SQL query and applies it to the incoming Arrow RecordBatchReader.
     """
 
+    duckdb: DuckDBClient
+
     def __init__(
         self,
-        context: TransformContext,
+        config: "TransformStep",
+        sources: dict[str, str],
+        output_dir: Path,
+        file_format: str,
     ):
-        self.config = context.sub_step
-        self.output_dir = context.target
-        self.source_paths = context.sources
+        super().__init__(config, sources, output_dir, file_format=file_format)
         self.duckdb = DuckDBClient()
-        self.sql = SQLCompiler(dialect="duckdb")
+        self.sql: SQLCompiler = SQLCompiler(dialect="duckdb")
 
     def setup(self, context: TransformContext) -> None:
         temp_dir = context.target / "_duckdb_temp"
@@ -44,8 +52,8 @@ class SQLTransformer(StandardTransformer):
 
     def execute(self, data: None = None) -> None:
         # 1. Register multiple input sources using wildcard parquet paths
-        for alias, src_dir in self.source_paths.items():
-            self.duckdb.register_source_view(alias, src_dir, ext="parquet")
+        for alias, src_dir in self.sources.items():
+            self.duckdb.register_source_view(alias, src_dir, ext=self.format)
 
         # 2. Compile query using SQLContext or raw SQL fallback
         sql_ctx = getattr(self.config, "sql_context", None)

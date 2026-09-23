@@ -3,16 +3,59 @@
 # ── Task-level defaults (apply to all datasets in this job) ──────────────────
 default:
   job:
-    extract:
+    source:
       service_ref: mock_data_folder
-    transform:
-      type: default
-    load:
+
+    target:
       service_ref: clickhouse
-    num_workers: 1
-    archive:
-      enable_archival: true
-      service_ref: "s3_archive"
+
+    mode: snapshot
+
+    calls:
+      extract:
+        hooks:
+          post:
+            - id: archive_src_files
+              type: copy
+              from:
+                service_ref: "{job.source.service_ref}"
+                path: sample_orders.csv
+                # path: "@format {this.datasets.orders.extract.object}"
+              to:
+                service_ref: s3_archive
+                # path: "{job_id}/{partition_date}/{run_id}/raw/"
+                path: s3://archive-vault/{job_id}/{partition_date}/{run_id}/raw
+              on_failure: abort # abort | warn | skip
+              single_file: true
+              timeout_secs:
+
+            # - id: cleanup_src_file
+            #   type: delete
+            #   location: sample_orders.csv
+            #   # location: "@format {this.datasets.orders.extract.object}"
+            #   recursive: true
+            #   on_failure: warn
+
+      write:
+        write_strategy: clone
+        working_table: "{dataset.destination}_STG_{YYYY}{MM}{DD}"
+        target: "{dataset.destination}"
+        object: "{upstream.artifact_folder}"         # Auto-binds output from previous step
+        column_case_type: lower
+        column_case_style: snake
+        expected_count: "{upstream.rows_processed}"
+        column_types: {}
+        create_table_ddl:
+
+      publish:
+        target: "{dataset.destination}"
+        staging_location: "{upstream.staging_artifact}"
+        expected_count: "{upstream.rows_processed}"
+        # staging_location: "@upstream.working_table" # Auto-binds working_table from write step
+
+      archive:
+        enable_archival: true
+        service_ref: "s3_archive"
 
     # Job-level feature flag overrides
     feature_flags:
@@ -21,78 +64,57 @@ default:
       experimental_sink_type: null
       experimental_config: {}
 
-  # ── Datasets (each key = dataset_id, values override job defaults) ─────────
+    # ── Datasets (each key = dataset_id, values override job defaults) ─────────
   datasets:
     orders:
-      mode: "append"
+      mode: snapshot
+      update_key: "{dataset.meta_columns.partition_date}"
+      destination: "TEST.ORDERS"
       primary_keys: [order_id]
+      meta_columns:
+        run_id: "_run_id"
+        partition_date: "_partition"
+        source: "_source" # source identifier / file path
+        loaded_at: "_created_at_ts"
       steps:
-        - id: extract_orders_data
-          stage: extract
-          resource:
+        - id: extract_{job_id}.{dataset_id}_data
+          call: extract
+          with:
             object: sample_orders.csv
-            service_ref: mock_data_folder
             glob:
-          hooks:
-            post:
-              - id: archive_src_files
-                type: copy
-                from:
-                  service_ref: mock_data_folder
-                  path: sample_orders.csv
-                  # path: "@format {this.datasets.orders.extract.object}"
-                to:
-                  service_ref: s3_archive
-                  # path: "{job_id}/{partition_date}/{run_id}/raw/"
-                  path: s3://archive-vault/{job_id}/{partition_date}/{run_id}/raw
-                on_failure: abort # abort | warn | skip
-                single_file: true
-                timeout_secs:
+            num_workers: 1 # overrides job-level num_workers if different
+            select:
+              - order_id as ORDER_ID
+              - customer_id AS CUSTOMER_ID
+              - order_date AS ORDER_DATE
+              - amount AS AMOUNT
+              - status AS STATUS
+              - updated_at AS updated_at
 
-              # - id: cleanup_src_file
-              #   type: delete
-              #   location: sample_orders.csv
-              #   # location: "@format {this.datasets.orders.extract.object}"
-              #   recursive: true
-              #   on_failure: warn
+        - id: normalize_{dataset_id}_data
+          call: transform
+          inputs:
+            extract_orders: "{steps.extract_{job_id}.{dataset_id}_data.artifact_folder}"
+          with:
+            steps:
+              - id: create_audit_columns
+                type: sql
+                sources:
+                  raw_orders: extract_orders
+                cte:
+                  - name: data_with_audit_cols
+                    sql:
+                    from: raw_orders
+                    select:
+                      - ORDER_ID
+                      - CUSTOMER_ID
+                      - ORDER_DATE
+                      - AMOUNT
+                      - STATUS
+                      - UPDATED_AT
 
-          num_workers: 1 # overrides job-level num_workers if different
-          select:
-            - order_id as ORDER_ID
-            - customer_id AS CUSTOMER_ID
-            - order_date AS ORDER_DATE
-            - amount AS AMOUNT
-            - status AS STATUS
-            # exclude updated_at
-          add_source_audit_column: true
-
-        - id: normalize_orders_data
-          stage: transform
-          steps:
-            - id: create_audit_columns
-              type: sql
-              sources:
-                raw_orders: extract_orders_data
-              cte:
-                - name: data_with_audit_cols
-                  sql:
-                  from: raw_orders
-                  select:
-                    - ORDER_ID
-                    - CUSTOMER_ID
-                    - ORDER_DATE
-                    - AMOUNT
-                    - STATUS
-                    - "'{run_id}' AS _RUN_ID"
-                    - "'{partition_date}' AS _PARTITION"
-
-        - id: load_orders_data
-          stage: write
-          service_ref: clickhouse
-          hooks: []
-          params:
-            type: database
-            destination: TEST.ORDERS
+        - call: write
+        - call: publish
 
         # - id: archive_orders_data
         #   stage: archive
@@ -113,13 +135,13 @@ default:
         experimental_config:
           warehouse: "XSMALL"
 
-# ── Local env overrides ──────────────────────────────────────────────────────
-# local:
+# ── Environment Overrides (e.g., prod / staging) ─────────────────────────────
+# production:
 #   job:
+#     target:
+#       service_ref: clickhouse_prod
 #   datasets:
 #     orders:
-
-# production:
-#   source:
-#     config:
-#       url: "s3://my-bucket/ingestion"
+#       destination: "PROD.ORDERS"
+#       feature_flags:
+#         benchmark_mode: false

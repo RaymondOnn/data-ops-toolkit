@@ -196,7 +196,7 @@ class TimeoutManager:
         queue_start_time: float | None = None,
     ) -> tuple[bool, TimeoutType | None]:
         """Check if timeout has occurred."""
-        now = time.time()
+        now = time.monotonic()
 
         if queue_start_time:
             queue_duration = now - queue_start_time

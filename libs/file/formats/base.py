@@ -3,104 +3,92 @@
 import io
 import logging
 from abc import ABC, abstractmethod
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Self
+from typing import Any, Self
 
 import polars as pl
+from upath import UPath
 
-if TYPE_CHECKING:
-    from libs.file.base import FileSystemClient
+from libs.metaclasses.draft import ClassRegistry, load_package_modules
 
 LOG = logging.getLogger(__name__)
 
 
-class FormatHandler(ABC):
-    """Base handler for reading/writing specific file formats."""
+class FormatHandler(
+    ABC,
+    ClassRegistry,
+    registry_name="FormatHandlerRegistry",
+    auto_key=False,
+    package_paths="libs.file.formats",
+):
+    """Base handler for reading/writing specific file formats using UPath."""
 
-    def __init__(
-        self,
-        fs: "FileSystemClient",
-        options: dict[str, Any] | None = None,
-    ) -> None:
-        self.fs = fs
+    def __init__(self, options: dict[str, Any] | None = None) -> None:
         self.options = options or {}
 
-    @property
-    def splittable(self) -> bool:
-        """Whether format supports lazy/parallel reading."""
-        return False
+    @classmethod
+    def supported_extensions(cls) -> list[str]:
+        """List all registered file extensions."""
+        if not cls.keys():
+            import libs.file.formats as formatters_pkg
 
-    def count_rows(self, path: Path | str) -> int:
+            load_package_modules(formatters_pkg)
+
+        return list(cls.keys())
+
+    def count_rows(self, path: UPath | str) -> int:
         """Count rows using format-specific optimization."""
         result = self.to_df(path).select(pl.len()).collect()
         return int(result.item())
 
     def _glob_files(
-        self, path: Path | str, pattern: str | None, default_glob: str
-    ) -> set[str]:
-        """Discover files matching pattern or default glob using centralized client logic."""
-        # Convert path to string cleanly
-        search_path = str(path)
+        self, path: UPath | str, pattern: str | None, default_glob: str
+    ) -> set[UPath]:
+        """Discover files matching pattern or default glob using UPath."""
+        upath = UPath(path)
 
-        # If there's no wildcard and it isn't an explicit file, fall back to default glob
-        if (
-            "*" not in search_path
-            and not pattern
-            and not self.fs.fs.isfile(self.fs.fs._strip_protocol(search_path))
-        ):
-            pattern = default_glob
+        # 1. Single File Match
+        if upath.is_file():
+            return {upath}
 
-        # If your handler already has access to a FileSystemClient instance, call it directly:
-        # return set(self.client.glob(search_path, pattern=pattern))
+        # 2. Pattern Match
+        if pattern:
+            search_pattern = pattern.lstrip("/")
+            return {p for p in upath.glob(search_pattern) if p.is_file()}
 
-        # Direct fallback leveraging the internal handler fs mapping:
-        search = (
-            f"{search_path.rstrip('/')}/{pattern.lstrip('/')}"
-            if pattern
-            else search_path
-        )
+        # 3. Path contains wildcards directly
+        if "*" in str(path):
+            parent = upath.parent
+            return {p for p in parent.glob(upath.name) if p.is_file()}
 
-        if "*" not in search and self.fs.fs.isfile(self.fs.fs._strip_protocol(search)):
-            return {
-                str(self.fs.fs.unstrip_protocol(self.fs.fs._strip_protocol(search)))
-            }
+        # 4. Fallback to default recursive glob on directory
+        if upath.is_dir():
+            return {p for p in upath.glob(default_glob) if p.is_file()}
 
-        return {
-            str(self.fs.fs.unstrip_protocol(p))
-            for p in self.fs.glob(search)
-            if self.fs.fs.isfile(p)
-        }
+        return set()
 
     @abstractmethod
-    def discover(self, path: Path | str, pattern: str | None = None) -> set[str]:
+    def discover(self, path: UPath | str, pattern: str | None = None) -> set[UPath]:
         """Discover files matching format."""
-        pass
 
     @abstractmethod
-    def to_df(self, path: Path | str, **kwargs: Any) -> pl.LazyFrame:
+    def to_df(self, path: UPath | str, **kwargs: Any) -> pl.LazyFrame:
         """Read to Polars LazyFrame."""
-        pass
 
     @abstractmethod
-    def from_df(self, df: pl.LazyFrame | pl.DataFrame, path: Path | str) -> None:
+    def from_df(self, df: pl.LazyFrame | pl.DataFrame, path: UPath | str) -> None:
         """Write from Polars DataFrame."""
-        pass
 
     @abstractmethod
-    def read_raw(self, path: Path | str, **kwargs: Any) -> io.BytesIO:
-        """Read raw bytes with optional healing."""
-        pass
+    def read_raw(self, path: UPath | str, **kwargs: Any) -> io.BytesIO:
+        """Read raw bytes."""
 
     @abstractmethod
-    def write_raw(self, data: bytes, path: str) -> None:
+    def write_raw(self, data: bytes, path: UPath | str) -> None:
         """Write raw bytes."""
-        pass
 
     def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        if hasattr(self.fs, "close"):
-            close_method = getattr(self.fs, "close", None)
-            if callable(close_method):  # Fixed: check callable
-                close_method()
+        """Context manager exit point. Override in subclasses if cleanup is required."""
+        return

@@ -31,6 +31,8 @@ core:
   # Secondary temp updates used during some legacy sync steps
   update_temp: "update {table} set {set_values} where {join_cond}"
 
+
+  add_column: "alter table {table} add {column_name} {data_type}"
 # -----------------------------------------------------------------------------
 # 2. MERGE STRATEGIES (Used during Incremental / Upsert Sync Modes)
 # -----------------------------------------------------------------------------

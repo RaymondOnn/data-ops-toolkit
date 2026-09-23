@@ -1,7 +1,5 @@
 import logging
 import re
-import time
-import uuid
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -15,7 +13,6 @@ from libs.database.pool.queue import QueueConnectionPool
 from libs.utils.exceptions import AuthFailure, HostUnreachable
 
 from .base import DBClient
-from .factory import DatabaseFactory
 
 LOG = logging.getLogger(__name__)
 
@@ -34,7 +31,7 @@ def get_error_code(exception):
     return int(match.group(1)) if match else None
 
 
-@DatabaseFactory.register
+@DBClient.register(key="clickhouse")
 class ClickhouseClient(DBClient):
     """
     High-performance client for ClickHouse using clickhouse-connect.
@@ -43,7 +40,7 @@ class ClickhouseClient(DBClient):
     via temporary staging tables.
     """
 
-    type: str = "clickhouse"
+    db_type = "clickhouse"
 
     def __init__(self, **config: Any):
         """Initializes the ClickhouseClient with provided config."""
@@ -124,11 +121,7 @@ class ClickhouseClient(DBClient):
                 yield from result
 
     def copy(
-        self,
-        table: str,
-        source_dir: str,
-        file_ext: str = "parquet",
-        audit_values: dict[str, Any] | None = None,
+        self, table: str, filepaths: str | list[str], file_format: str, **kwargs
     ) -> None:
         """
         Multi-stage staging bulk load into ClickHouse:
@@ -136,56 +129,27 @@ class ClickhouseClient(DBClient):
         2. Streams binary Parquet files into the staging table via raw_insert().
         3. Promotes staged data into target while injecting audit constants.
         """
-        audit_values = audit_values or {}
-        files = list(Path(source_dir).glob(f"*.{file_ext}"))
 
-        if not files:
-            LOG.warning(f"No {file_ext} files found in {source_dir}")
-            return
+        if isinstance(filepaths, str):
+            filepaths = [filepaths]
+
+        columns = kwargs.get("columns", [])
+        if isinstance(columns, str):
+            columns = [columns]
 
         # Fetch columns from system layout to match target schema
         with self.get_connection() as conn:
-            schema_info = conn.query(f"DESCRIBE TABLE {table}").result_rows
-            all_columns = [str(row[0]) for row in schema_info]
-            column_names = [c for c in all_columns if c not in audit_values]
-
-            # 1. Create Temporary Table
-            unique_id = str(uuid.uuid4())[:8]
-            tmp_table = f"tmp_stage_{int(time.time())}_{unique_id}"
-            except_clause = (
-                f"EXCEPT ({', '.join(audit_values.keys())})" if audit_values else ""
-            )
-
-            conn.command(f"""
-                CREATE TEMPORARY TABLE {tmp_table}
-                ENGINE = MergeTree() ORDER BY tuple()
-                AS SELECT * {except_clause} FROM {table} LIMIT 0
-            """)
-
             # 2. Bulk Insert Parquet Streams
-            for file_path in files:
-                with file_path.open("rb") as f:
+            for file_path in filepaths:
+                with Path(file_path).open("rb") as f:
                     conn.raw_insert(
-                        table=tmp_table,
+                        table=table,
                         insert_block=f,
-                        column_names=column_names,
-                        fmt=file_ext.capitalize(),
+                        column_names=columns,
+                        fmt=file_format.capitalize(),  # e.g., 'Parquet'
                     )
-
-            # 3. Promote to Target Table with Audit Injectors
-            audit_sql = ""
-            if audit_values:
-                audit_sql = ", " + ", ".join(
-                    [f"'{v}' AS {k}" for k, v in audit_values.items()]
-                )
-
-            conn.command(f"""
-                INSERT INTO {table}
-                SELECT * {audit_sql} FROM {tmp_table}
-            """)
-
             LOG.info(
-                f"Successfully loaded {len(files)} file(s) into ClickHouse table '{table}'"
+                f"Successfully loaded {len(filepaths)} file(s) into ClickHouse table '{table}'"
             )
 
     # def copy_from_file(

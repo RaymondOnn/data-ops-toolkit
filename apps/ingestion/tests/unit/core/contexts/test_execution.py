@@ -45,7 +45,7 @@ def test_get_run_path(exec_ctx):
     )
 
     expected = (
-        exec_ctx.workspace_dir / "active" / "test_job:test_ds:2024-01-01" / "run_123"
+        exec_ctx.workspace_dir / "ACTIVE" / "test_job:test_ds:2024-01-01" / "run_123"
     )
     assert path == expected
 

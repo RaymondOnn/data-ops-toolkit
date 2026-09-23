@@ -28,8 +28,8 @@ class TestDiskCache:
         THEN items should be accessible via square brackets
         WHEN using __setitem__ and __getitem__
         """
-        cache["status"] = "active"
-        assert cache["status"] == "active"
+        cache["status"] = "ACTIVE"
+        assert cache["status"] == "ACTIVE"
         assert "status" in cache
         assert len(cache) == 1
 

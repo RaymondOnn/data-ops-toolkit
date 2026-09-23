@@ -4,7 +4,7 @@ import polars as pl
 import pytest
 
 from src.core.models.stages.extract import ExtractStage
-from src.core.stages.enums import Stage
+from src.core.stages.types import Stage
 
 
 @pytest.fixture

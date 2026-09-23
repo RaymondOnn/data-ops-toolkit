@@ -32,6 +32,8 @@ default:
       transform: 15m    # Custom for this task
       load: 25m
 
+  quarantine_error_rows: True
+
 local:
   secret_provider:
     key: "local_file"

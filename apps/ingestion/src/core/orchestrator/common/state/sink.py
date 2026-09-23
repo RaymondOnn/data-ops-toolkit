@@ -2,15 +2,19 @@
 
 from datetime import datetime
 from pathlib import Path
-from threading import RLock
+from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import msgspec
 import polars as pl
-from libs.database import TypeResolver
+from libs.file.formats.json import JSONHandler
+from libs.file.formats.parquet import ParquetHandler
 from loguru import logger
 
-from src.core.orchestrator.enums import TaskUpdate
-from src.services.factory import ServiceFactory
+from .models import TaskUpdate
+
+if TYPE_CHECKING:
+    from src.services.repo.metadata import MetadataRepository
 
 LOG = logger
 DESTINATION_TBL = "META.EXECUTION_LOG"
@@ -24,7 +28,12 @@ class StateSink:
     historical analysis.
     """
 
-    def __init__(self, db_config: dict, workspace_dir: Path, flush_threshold: int = 50):
+    def __init__(
+        self,
+        meta_repo: "MetadataRepository",
+        workspace_dir: Path,
+        flush_threshold: int = 50,
+    ):
         """Initializes the stream buffer and staging directories.
 
         Args:
@@ -37,21 +46,20 @@ class StateSink:
         final Parquet files awaiting load, ensuring that state is
         never lost if the database is temporarily unreachable.
         """
-        self.db_config = db_config
+        self.meta_repo = meta_repo
         self.workspace_dir = workspace_dir
-        self.stage_dir = workspace_dir / "staging"
-        self.archive_dir = workspace_dir / "archive"
-        self.flush_threshold = flush_threshold
 
-        self._buffer: list[TaskUpdate] = []
-        self._buffer_lock = RLock()
-        self.stream_path = workspace_dir / "execution_stream.jsonl"
+        self.state_dir = workspace_dir / "state"
+        self.stage_dir = self.state_dir / "staging"
+        self.archive_dir = self.state_dir / "archive"
 
-        self._db = None
-        self._target_schema = None
+        for d in [self.state_dir, self.stage_dir, self.archive_dir]:
+            d.mkdir(parents=True, exist_ok=True)
 
-        self.stage_dir.mkdir(parents=True, exist_ok=True)
-        self.archive_dir.mkdir(parents=True, exist_ok=True)
+        self.stream_file = workspace_dir / "execution_stream.jsonl"
+
+        self.json_handler = JSONHandler()
+        self.parquet_handler = ParquetHandler()
 
         LOG.trace(
             "StateSink initialized",
@@ -60,271 +68,77 @@ class StateSink:
             flush_threshold=flush_threshold,
         )
 
-    def append(self, update: TaskUpdate) -> None:
-        """Adds a record to the in-memory buffer.
-
-        Args:
-            record: The TaskRecord to stream.
-
-        Decision: Threshold Trigger.
-        To minimize disk contention, we only write the JSONL file once
-        the buffer reaches the flush_threshold. This balances
-        durability with system performance.
-        """
-        ready_to_flush = False
-
-        with self._buffer_lock:
-            self._buffer.append(update)
-            buffer_size = len(self._buffer)
-            LOG.trace("Appended to buffer", buffer_size=buffer_size)
-
-            if buffer_size >= self.flush_threshold:
-                LOG.debug(
-                    "Buffer threshold reached, flushing to disk",
-                    buffer_size=buffer_size,
-                )
-                records_to_write = list(self._buffer)
-                self._buffer.clear()
-                ready_to_flush = True
-
-        # Perform disk operations OUTSIDE the lock context
-        if ready_to_flush:
-            self.flush_to_disk(records_to_write)
-
-    def flush_to_disk(self, records: list[TaskUpdate], force: bool = False) -> None:
-        """Appends buffered records to the local JSONL stream file.
-
-        Args:
-            force: If True, ignores threshold and flushes immediately.
-        """
-        if not records:
-            return
-
-        if not force and len(records) < self.flush_threshold:
-            return
-
-        self.stream_path.parent.mkdir(parents=True, exist_ok=True)
-
-        try:
-            LOG.debug(
-                f"Writing {len(records)} state records to stream path: {self.stream_path}"
-            )
-            # Re-use a single stateful encoder instance to process the entire list
-            encoder = msgspec.json.Encoder()
-
-            with self.stream_path.open("ab") as f:
-                for record in records:
-                    # encoder.encode() emits highly optimized raw byte streams
-                    # without generating excess intermediate object overhead
-                    f.write(encoder.encode(record) + b"\n")
-        except Exception:
-            LOG.exception(
-                "CRITICAL: Failed to write state buffer records to JSONL stream file.",
-                stream_path=str(self.stream_path),
-                record_count=len(records),
-            )
-            # Optional: Re-raise or append back to an error-fallback collection depending on critical tolerance
-            raise
-
-    def _spill_over_to_file(self) -> Path | None:
-        """Rotates the primary stream file into a timestamped batch file.
-
-        Returns:
-            Path | None: The path to the rotated batch file if data existed.
-
-        Decision: File Rotation.
-        We rename the active stream file before conversion. This
-        allows the StateStore to continue appending new records to a
-        fresh file while the database loader processes the previous batch
-        in isolation.
-        """
-        # 1. Grab everything left inside the buffer regardless of the threshold size
-        with self._buffer_lock:
-            remnants = list(self._buffer)
-            self._buffer.clear()
-
-        # 2. Force append all buffered items to disk out-of-lock
-        if remnants:
-            self.flush_to_disk(remnants, force=True)
-
-        if not self.stream_path.exists() or self.stream_path.stat().st_size == 0:
-            LOG.debug("No data to rotate", path=str(self.stream_path))
+    def _rotate_and_stage(self) -> Path | None:
+        """Rotates active stream file to a uniquely named staging batch."""
+        if not self.stream_file.exists() or self.stream_file.stat().st_size == 0:
             return None
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        rotated = self.stage_dir / f"batch_{timestamp}.jsonl"
-        self.stream_path.rename(rotated)
+        unique_id = uuid4().hex[:6]
+        staged_path = self.stage_dir / f"batch_{timestamp}_{unique_id}.jsonl"
 
-        LOG.info(
-            "Spill over logs to new file",
-            source=str(self.stream_path),
-            destination=str(rotated),
-        )
-        return rotated
+        # Rename active file to staging path
+        self.stream_file.rename(staged_path)
+        return staged_path
 
-    @property
-    def db(self):
-        """Lazy-loaded database client connection.
-
-        Decision: Lazy Initialization.
-        Database handles are established only when a 'send' operation
-        is triggered. This reduces the number of idle connections
-        held by short-lived CLI processes.
+    def append(self, update: TaskUpdate) -> None:
         """
-        if self._db is None:
-            config = self.db_config.copy()
-            LOG.debug("Initializing database client", service_type=config.get("key"))
-            self._db = ServiceFactory.get(**config)
-        return self._db
-
-    def _get_schema(self) -> pl.DataFrame:
-        """Retrieves and caches the column schema from the database.
-
-        Returns:
-            pl.DataFrame: The schema metadata.
+        Directly appends a TaskUpdate line to execution_stream.jsonl.
+        Synchronous, simple, and relies on standard OS filesystem write-buffers.
         """
-        if self._target_schema is None:
-            LOG.debug("Fetching target table schema", table=DESTINATION_TBL)
-            self._target_schema = self.db.connector.get_schema(DESTINATION_TBL)
-        return self._target_schema
-
-    def send(self) -> bool:
-        """Converts local stream batches to Parquet and uploads to the database.
-
-        Returns:
-            bool: True if data was successfully sent.
-
-        Decision: Transactional Flow.
-        We perform a full rotation-conversion-load cycle. If any step
-        fails, the original JSONL data is preserved in the staging
-        directory, allowing for automatic recovery on the next attempt.
-        """
-        jsonl_path = self._spill_over_to_file()
-        if not jsonl_path:
-            LOG.debug("No data to send")
-            return False
-
         try:
-            LOG.info("Sending state data", source=str(jsonl_path))
-            parquet_path = self._convert_to_parquet(jsonl_path)
-            if not parquet_path:
-                LOG.warning("No valid records to send", path=str(jsonl_path))
-                return False
-
-            self._load_to_database()
-            LOG.success("Successfully sent state data")
-            return True
-
+            with self.stream_file.open("a", encoding="utf-8") as f:
+                f.write(msgspec.json.encode(update).decode("utf-8") + "\n")
         except Exception:
-            LOG.exception("Send failed")
-            raise
-
-    def _convert_to_parquet(self, jsonl_path: Path) -> Path | None:
-        """Converts a raw JSONL file into an aligned, typed Parquet file.
-
-        Args:
-            jsonl_path: Path to the source JSONL batch.
-
-        Returns:
-            Path | None: The path to the generated Parquet file.
-
-        Decision: Schema Enforcement.
-        JSONL is inherently untyped. By using the database's own
-        schema to drive the Polars conversion, we ensure that every
-        field (especially timestamps and bitmasks) is correctly cast
-        before reaching the database, avoiding bulk-load failures.
-        """
-        schema_df = self._get_schema()
-        scan_schema = {row["column_name"]: pl.String for row in schema_df.to_dicts()}
-
-        LOG.debug("Scanning JSONL with explicit schema", path=str(jsonl_path))
-        lf = pl.scan_ndjson(jsonl_path, schema=scan_schema)
-        lf_cols = {c.upper(): c for c in lf.columns}
-
-        expressions = [
-            self._build_cast_expr(row, lf_cols) for row in schema_df.to_dicts()
-        ]
-
-        # Execute and ensure we have a DataFrame
-        result = lf.select(expressions).collect()
-
-        # Polars can return different types; ensure we have a DataFrame
-        if not isinstance(result, pl.DataFrame):
-            LOG.error("Expected DataFrame but got", type=type(result).__name__)
-            jsonl_path.unlink()
-            return None
-
-        # Now safe to access .height and .write_parquet
-        if result.height == 0:
-            LOG.warning("No records after conversion", path=str(jsonl_path))
-            jsonl_path.unlink()
-            return None
-
-        parquet_path = jsonl_path.with_suffix(".parquet")
-        result.write_parquet(parquet_path)
-        jsonl_path.unlink()
-
-        LOG.info("Converted to Parquet", rows=result.height, path=str(parquet_path))
-        return parquet_path
-
-    def _build_cast_expr(self, row: dict[str, str], lf_cols: dict[str, str]) -> pl.Expr:
-        """Builds a Polars expression to cast and align a column to the DB schema.
-
-        Decision: Type Normalization.
-        We handle date and datetime strings explicitly with
-        strict=False. This prevents 'junk' data in the log
-        (e.g., malformed timestamps) from crashing the entire state
-        sync, instead gracefully defaulting to NULL.
-        """
-        col_name = row["column_name"]
-        db_col_upper = col_name.upper()
-        target_type = TypeResolver.resolve_to_polars("clickhouse", row["data_type"])
-
-        if db_col_upper not in lf_cols:
-            LOG.trace("Column not found in source, using NULL", column=col_name)
-            return pl.lit(None).cast(target_type).alias(col_name)
-
-        expr = pl.col(lf_cols[db_col_upper]).cast(pl.String)
-        dtype = row["data_type"].casefold()
-
-        if "datetime" in dtype:
-            expr = expr.str.to_datetime(strict=False)
-        elif "date" in dtype:
-            expr = expr.str.to_date(format="%Y-%m-%d", strict=False)
-
-        return expr.cast(target_type, strict=False).alias(col_name)
-
-    def _load_to_database(self) -> None:
-        """Load all staged Parquet files to ClickHouse."""
-        try:
-            pending = list(self.stage_dir.glob("*.parquet"))
-            if not pending:
-                LOG.debug("No pending Parquet files to load")
-                return
-
-            LOG.info("Loading Parquet files to ClickHouse", count=len(pending))
-
-            self.db.connector.copy_from_file(
-                table=DESTINATION_TBL,
-                source_dir=str(self.stage_dir),
-                file_ext="parquet",
+            LOG.exception(
+                f"Failed to append update for RUN_ID={update.JOB_ID} to stream file."
             )
 
-            for pq_file in pending:
-                pq_file.rename(self.archive_dir / pq_file.name)
-                LOG.debug("Archived Parquet file", file=pq_file.name)
-        except Exception:
-            LOG.exception("StateSink failed to load database")
-            raise
+    def flush_to_db(self, target_table: str = "META.EXECUTION_LOG") -> None:
+        """
+        Uses JSONHandler and ParquetHandler to stage, convert, and stream
+        buffered updates into ClickHouse.
+        """
+        if not self.meta_repo:
+            LOG.warning(
+                "MetadataRepository is not initialized on StateSink. Bypassing flush_to_db."
+            )
+            return
 
-    def close(self) -> None:
-        """Close stream and cleanup resources."""
-        LOG.trace("Closing StateStream")
+        staged_jsonl = self._rotate_and_stage()
+        if not staged_jsonl:
+            LOG.trace("No staged stream file available for state flush.")
+            return
+
+        # Prepare staging subfolder expected by MetadataRepository.bulk_load_parquet
+        staged_batch_dir = self.stage_dir / f"batch_{staged_jsonl.stem}"
+        staged_batch_dir.mkdir(exist_ok=True)
+        parquet_dst = staged_batch_dir / f"{staged_jsonl.stem}.parquet"
+
         try:
-            self.send()
-        except Exception:
-            LOG.exception("Final send failed")
+            # 1. Read JSONL file to Polars LazyFrame using JSONHandler
+            lazy_df = self.json_handler.to_df(str(staged_jsonl))
 
-        if self._db and hasattr(self._db, "close"):
-            self._db.close()
-            LOG.debug("Closed database connection")
+            # 2. Sanitize struct columns (like RUNTIME_OVERRIDES) to JSON Strings
+            schema = lazy_df.collect_schema()
+            struct_cols = [
+                col for col, dtype in schema.items() if isinstance(dtype, pl.Struct)
+            ]
+            if struct_cols:
+                lazy_df = lazy_df.with_columns(
+                    [pl.col(c).struct.json_encode() for c in struct_cols]
+                )
+
+            # 3. Convert & Write to Parquet using ParquetHandler
+            self.parquet_handler.from_df(lazy_df, str(parquet_dst))
+
+            # 4. Stream Parquet file to ClickHouse using MetadataRepository
+            self.meta_repo.bulk_load_parquet(target_table, parquet_dst)
+
+            # 5. Clean up batch subfolder and archive raw JSONL file
+            staged_jsonl.rename(self.archive_dir / staged_jsonl.name)
+            parquet_dst.rename(self.archive_dir / parquet_dst.name)
+            staged_batch_dir.rmdir()
+
+        except Exception:
+            LOG.exception(f"Failed to flush batch {staged_jsonl.name} to database.")

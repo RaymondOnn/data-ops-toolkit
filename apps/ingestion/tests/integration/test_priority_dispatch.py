@@ -1,6 +1,6 @@
 from unittest.mock import patch
 
-from src.core.orchestrator.enums import TaskMetadata
+from src.core.orchestrator.common.task.types import TaskMetadata
 
 
 def test_stage_priority_ordering(runtime):

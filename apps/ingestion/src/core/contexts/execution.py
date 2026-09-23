@@ -51,6 +51,7 @@ class ExecutionContext(msgspec.Struct, kw_only=True):
     cache_config: dict[str, Any] = {}
     provider_config: dict[str, str] = {}
     task_queue_config: dict[str, str] = {}
+    metadata_db_config: dict[str, Any] = {}
     disable_self_healing: bool = False
     stop_at_ts: float | None = None
     drain_timeout_secs: int = 600
@@ -62,7 +63,7 @@ class ExecutionContext(msgspec.Struct, kw_only=True):
 
     @property
     def active_path(self) -> Path:
-        return self.workspace_dir / "active"
+        return self.workspace_dir / "ACTIVE"
 
     @property
     def signal_path(self) -> Path:
@@ -121,7 +122,7 @@ class ExecutionContext(msgspec.Struct, kw_only=True):
     # Path Resolution
     # =========================================================================
 
-    def get_run_path(self, identity: TaskIdentity, category: str = "active") -> Path:
+    def get_run_path(self, identity: TaskIdentity, category: str = "ACTIVE") -> Path:
         """Get task run directory path."""
         return self.workspace_dir / category / identity.key / identity.run_id
 

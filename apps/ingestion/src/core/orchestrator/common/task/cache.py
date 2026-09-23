@@ -3,13 +3,13 @@ from itertools import takewhile
 from typing import Any
 
 import msgspec
-from libs.storage.cache import CacheFactory
+from libs.storage.cache import Cache
 from libs.utils.dates import current_timestamp
 from loguru import logger
 
 from src.core.models.task.enums import ExecutionStatus
 from src.core.orchestrator.common.state import StateHub
-from src.core.orchestrator.enums import TaskMetadata
+from src.core.orchestrator.common.task.types import TaskMetadata
 
 LOG = logger
 
@@ -19,7 +19,7 @@ class TaskCache:
 
     def __init__(self, cache_config, prefix: str, state_hub: StateHub | None = None):
         self.prefix = f"{prefix.rstrip(':')}:" if prefix else prefix
-        self.client = CacheFactory.create(
+        self.client = Cache.create(
             key=cache_config["key"],
             directory=str(cache_config["directory"]),
             namespace=prefix,
@@ -75,11 +75,11 @@ class TaskCache:
 
                 # Otherwise, fall back to parsing raw bytes/strings
                 return TaskMetadata.from_raw_cache(raw)
-        except Exception as err:
+        except Exception:
             LOG.exception(
-                f"Serialization crash decoding metadata inside worker for key {cache_key}: {err}"
+                f"Serialization crash decoding metadata inside worker for key {cache_key}"
             )
-            raise err
+            raise
 
         # Fallback Strategy: If cache evaporated but worker is recovering, check State Store
         run_id = cache_key.rsplit(":", maxsplit=1)[
@@ -157,8 +157,8 @@ class TaskCache:
                     "LAST_UPDATED_AT_TS_LC": current_timestamp().isoformat(sep=" "),
                 }
                 self.state_hub.update_task(metadata.run_id, update_record)
-            except Exception as err:
+            except Exception:
                 LOG.exception(
-                    f"StateHub telemetry broadcast failed for {metadata.run_id}: {err}"
+                    f"StateHub telemetry broadcast failed for {metadata.run_id}"
                 )
         return new_key

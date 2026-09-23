@@ -65,7 +65,7 @@ def mock_task(exec_ctx, tmp_path):
     task.job_id = "test-job"
     task.dataset_id = "test-dataset"
     task.partition_date = "2024-01-01"
-    task.workspace.path = tmp_path / "active" / "test-run-uuid"
+    task.workspace.path = tmp_path / "ACTIVE" / "test-run-uuid"
     task.workspace.path.mkdir(parents=True)
     task.exec_ctx = exec_ctx
 

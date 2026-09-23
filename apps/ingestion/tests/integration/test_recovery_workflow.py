@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from src.core.models.task import ExecutionStatus, Task
-from src.core.stages.enums import Stage
+from src.core.stages.types import Stage
 
 
 def test_manual_rewind_recovery(runtime, tmp_path):
@@ -41,7 +41,7 @@ def test_manual_rewind_recovery(runtime, tmp_path):
     # 3. Verification
     # The task should now be back in 'active'
     new_task_path = runtime.orchestrator.state_store.resolve_task_path(run_id)
-    assert "active" in str(new_task_path)
+    assert "ACTIVE" in str(new_task_path)
 
     recovered_task = Task.from_path(new_task_path, runtime.exec_ctx)
 

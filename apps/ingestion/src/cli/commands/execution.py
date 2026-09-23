@@ -24,7 +24,7 @@ from src.core.contexts import (
 from src.core.models.task import Task
 from src.core.orchestrator.factory import assemble_runtime
 from src.core.orchestrator.modes.trigger import TriggerRuntime
-from src.core.stages.enums import ALL_STAGES, Stage
+from src.core.stages.types import ALL_STAGES, Stage
 from src.utils.common import setup_logger, short_hash
 
 

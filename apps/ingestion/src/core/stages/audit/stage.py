@@ -62,7 +62,7 @@
 #                 audit_duration_ms=duration_ms,
 #             )
 
-#             self.checkpoint(job, results=payload)
+#             self.save_stage_outcome(job, results=payload)
 
 #             # If validation fails, we stop the pipeline here!
 #             if not payload.validation_passed:
@@ -73,7 +73,7 @@
 #             return self._next_stage(job)
 
 #         except Exception as e:
-#             self.checkpoint(job, exception=e)
+#             self.save_stage_outcome(job, exception=e)
 #             raise
 
 #     def _run_internal_checks(

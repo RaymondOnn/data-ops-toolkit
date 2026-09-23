@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import polars as pl
 import pytest
 from fsspec import AbstractFileSystem
-from libs.file.mixins.archive import StandardArchiveMixin
+from libs.file.skills.archive import StandardArchiveMixin
 
 
 class MockArchiveClient(StandardArchiveMixin):

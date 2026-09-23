@@ -14,7 +14,7 @@ from loguru import logger
 
 from src.core.contexts import RayMode
 from src.core.contexts.execution import ExecutionContext
-from src.core.stages.enums import Stage
+from src.core.stages.types import Stage
 from src.services.health.system import HealthStatus, SystemMonitor
 
 LOG = logger

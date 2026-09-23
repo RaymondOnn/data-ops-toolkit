@@ -9,6 +9,7 @@ circular dependencies between implementation modules and the entry point.
 
 from .commands import daemon, execution, maintenance  # noqa: F401
 from .groups.doctor import doctor_app
+from .groups.notify import notify_app
 from .groups.test.test import test_app
 from .state import app, apply_global_options
 
@@ -17,6 +18,7 @@ app.callback()(apply_global_options)
 
 # 2. Register Sub-apps (Namespaced commands)
 app.add_typer(doctor_app, name="doctor")
+app.add_typer(notify_app, name="notify")
 app.add_typer(test_app, name="test")
 
 # 3. Trigger Command Discovery

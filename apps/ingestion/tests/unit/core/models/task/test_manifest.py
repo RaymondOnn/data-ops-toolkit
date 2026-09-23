@@ -17,7 +17,7 @@ def test_manifest_is_fully_populated_false():
         status=ExecutionStatus.PENDING,
         current_stage="extract",
         bitmask=1,
-        extract=ExtractPayload(source_count=100),
+        extract=ExtractPayload(rows_processed=100),
     )
 
     assert manifest.is_fully_populated() is False

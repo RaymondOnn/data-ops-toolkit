@@ -5,7 +5,7 @@ from loguru import logger
 
 from src.core.contexts.execution import ExecutionContext
 from src.core.orchestrator.common.task.cache import TaskCache
-from src.core.orchestrator.enums import TaskMetadata
+from src.core.orchestrator.common.task.types import TaskMetadata
 
 LOG = logger
 
@@ -37,3 +37,12 @@ class MaintenancePolicy(Protocol):
     ) -> list[TaskMetadata] | None:
         """Run one maintenance cycle."""
         ...
+
+    def resume(
+        self,
+        cache: TaskCache,
+        lock: Any,
+        run_id: str,
+        from_step: str | None = None,
+    ) -> bool:
+        """Manually recovers/resumes a targeted task by run_id."""

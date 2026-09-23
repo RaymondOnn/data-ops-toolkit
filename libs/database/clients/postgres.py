@@ -5,17 +5,15 @@ from typing import TYPE_CHECKING, Any
 from libs.clients.base import ClientCantConnect
 from libs.database.clients.base import DBClient
 
-from .factory import DatabaseFactory
-
 if TYPE_CHECKING:
     from adbc_driver_postgresql.dbapi import Connection
 
 LOG = logging.getLogger(__name__)
 
 
-@DatabaseFactory.register
+@DBClient.register(key="postgres")
 class PostgresClient(DBClient):
-    type = "postgres"
+    db_type = "postgres"
 
     def __init__(self, **config: Any) -> None:
         super().__init__(**config)

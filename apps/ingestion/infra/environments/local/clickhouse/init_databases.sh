@@ -53,11 +53,13 @@ ch_client -q "KILL QUERY WHERE query_kind = 'RefreshView' ASYNC" || true
 # 2. Define the EXPLICIT order of SQL execution
 # Add your table definitions here in the order they should be created
 SQL_FILES=(
-    "/sql/definitions/tables/test.orders.sql"
+    # "/sql/definitions/tables/test.orders.sql"
     "/sql/definitions/tables/test.sim_data.sql"
     "/sql/definitions/tables/meta.execution_log.sql"
     "/sql/definitions/tables/meta.job_schedules.sql"
     "/sql/definitions/tables/meta.execution_history.sql"
+    "/sql/definitions/tables/meta.checkpoints.sql"
+    "/sql/definitions/tables/meta.schema_evolution_log.sql"
     "/sql/definitions/views/meta.current_schedules.sql"
     "/sql/definitions/views/meta.append_log_trigger.sql"
     "/sql/definitions/views/meta.current_execution.sql"
